@@ -62,6 +62,16 @@ class ImageProcessor(Protocol):
         """Decode, orient, resize, normalize, and visually fingerprint one source image."""
 
 
+class VideoFrameExtractor(Protocol):
+    """Probe and decode bounded image frames from unarchived video bytes."""
+
+    async def probe_duration(self, *, content: bytes) -> float:
+        """Return a finite positive duration in seconds."""
+
+    async def extract_frame(self, *, content: bytes, timestamp_seconds: float) -> bytes:
+        """Decode one non-empty still-image frame at a non-negative timestamp."""
+
+
 @dataclass(frozen=True, slots=True)
 class ImageArchiveReadyMetadata:
     """Verified immutable archive facts to persist only after storage publication succeeds."""
