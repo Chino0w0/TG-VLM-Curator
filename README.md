@@ -7,7 +7,7 @@ Implementation plan and module boundaries: tg-vlm-curator-module-implementation.
 
 ## Current stage
 
-M0 is complete. M1 establishes the API, versioned-configuration, security, and PostgreSQL migration foundation; M2 provides durable range scheduling. M3 Parts 1鈥�3 now provide typed, idempotent Telegram message normalization/persistence, a local atomic archive adapter, and deterministic image normalization/fingerprinting. The current implementation passed deterministic unit and offline Alembic SQL verification on September 4, 2026.
+M0 is complete. M1 establishes the API, versioned-configuration, security, and PostgreSQL migration foundation; M2 provides durable range scheduling. M3 Parts 1鈥�4 now provide typed, idempotent Telegram message normalization/persistence, a local atomic archive adapter, deterministic image normalization/fingerprinting, and generic finite-window history-execution orchestration. The current implementation passed deterministic unit and offline Alembic SQL verification on September 4, 2026.
 
 The repository now includes:
 
@@ -27,8 +27,9 @@ The repository now includes:
 - A PostgreSQL `message_parts` membership table and idempotent message/part upsert repository. Regular messages use source + Telegram message-ID identity; albums use a source + `grouped_id` partial unique index and retain their deterministic lowest-ID anchor.
 - A local `LocalArchiveStorage` adapter with relative-key validation, temporary-file write/fsync, atomic no-replace publication, immutable-key conflict detection, idempotent same-byte writes, and safe deletion. The caller persists only backend/key rather than host paths.
 - A Pillow-backed `ImageProcessor` adapter that applies EXIF orientation, bounds dimensions, converts image evidence to metadata-free WebP, computes source/archive SHA-256 values, and produces a deterministic 64-bit DCT perceptual hash from normalized display pixels. `ImageArchiveService` writes only normalized bytes through `ArchiveStorage`; it intentionally does not couple archive I/O to a database transaction.
+- A RangeExecutionHistoryIngestion application service that fetches a claimed immutable Telegram history window, validates source and time boundaries, uses the idempotent ingestion path, then advances the watermark and completes only after persistence succeeds. The worker runtime invokes this service only when deployment injects a configured Telegram gateway; otherwise it intentionally leaves the lease open rather than marking unprocessed work complete.
 
-M3 remains in progress: Telethon adapters, an aggregation-window buffer, reconciliation cursors, range-execution history processing, source edits/deletions, archive-asset metadata/READY state, Telegram media download wiring, video cover/representative-frame extraction, and protected-content handling are still pending. The M2 worker therefore still only claims a stable execution UUID; it does not yet invoke Telegram history processing or advance the execution watermark. A live PostgreSQL migration/adapter verification remains pending because a local Docker daemon was not available during this validation.
+M3 remains in progress: a deployable Telethon identity/session and history/update adapter, an aggregation-window buffer, reconciliation cursors, source edits/deletions, archive-asset metadata/READY state, Telegram media download wiring, video cover/representative-frame extraction, and protected-content handling are still pending. No inference model has been deployed or simulated; that integration remains isolated behind `InferenceProvider`. A live PostgreSQL migration/adapter verification remains pending because a local Docker daemon was not available during this validation.
 
 ## Development
 
