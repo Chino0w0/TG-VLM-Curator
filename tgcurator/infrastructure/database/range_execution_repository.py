@@ -62,8 +62,15 @@ class SqlAlchemyRangeExecutionWorkerRepository:
                 row.lease_expires_at = now + lease_duration
                 row.started_at = row.started_at or now
                 row.updated_at = now
+                source_channel_id = await session.scalar(
+                    select(ProcessingRange.source_channel_id).where(
+                        ProcessingRange.id == row.processing_range_id
+                    )
+                )
+                assert source_channel_id is not None
                 return ClaimedRangeExecution(
                     execution=self._to_domain(row),
+                    source_channel_id=str(source_channel_id),
                     source_profile_version_id=str(row.source_profile_version_id),
                     lease_token=str(lease_token),
                 )
