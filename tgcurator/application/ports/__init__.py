@@ -10,6 +10,7 @@ from .processing import (
     RangeExecutionWorkerRepository,
     ScheduledProcessingRange,
 )
+from .reconciliation import SourceReconciliationCursorRepository
 from .secrets import SecretStatus, SecretVault
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "ScheduledProcessingRange",
     "SecretStatus",
     "SecretVault",
+    "SourceReconciliationCursorRepository",
     "TaskDispatcher",
     "TelegramGateway",
     "TelegramMessageIngestRepository",

@@ -187,7 +187,7 @@ Still required to complete M2:
 - Live PostgreSQL concurrency verification for wake-up/execution claims, lease reclamation, stale-lease rejection, and contiguous range-watermark advancement.
 - A Redis-loss runtime recovery test proving that an unfinished durable-wakeup row causes re-enqueue after broker loss.
 
-### M3 - Telegram ingestion and media archive (Parts 1-6: typed ingestion, local atomic storage, image normalization, range-history orchestration, real-time media-group aggregation, and bounded Telethon history reads implemented)
+### M3 - Telegram ingestion and media archive (Parts 1-7: typed ingestion, local atomic storage, image normalization, range-history orchestration, real-time media-group aggregation, bounded Telethon history reads, and durable reconciliation-cursor storage implemented)
 
 Implemented M3 checkpoints:
 
@@ -201,10 +201,11 @@ Implemented M3 checkpoints:
 - RangeExecutionHistoryIngestion performs claimed finite-window processing without a long transaction: it fetches the immutable Telegram interval, rejects foreign or out-of-window DTOs, invokes the idempotent MessageIngestService, then advances the execution watermark to its immutable right boundary and completes only after that update succeeds. WorkerRuntime calls it only when deployment composition injects a configured Telegram gateway; its no-adapter fallback leaves the lease open rather than falsely completing work.
 - MediaGroupAggregationBuffer provides a short, positive-duration, in-memory wait for native Telegram grouped-message parts. RealtimeTelegramIngestion sends regular messages immediately and flushes complete/expired or shutdown-drained groups through the existing common normalization/upsert path. The buffer is intentionally reconstructable: replay/history reconciliation restores anything a process restart had not yet emitted.
 - TelethonReadGateway and TelethonMessageMapper define the read-side adapter without leaking Telethon objects across the application boundary. Given an injected source-peer resolver, it obtains newest timestamps and bounded newest-to-oldest history, maps caption/group/media DTOs, and stops after the left boundary. It is deliberately not a deployed identity/session or live-Update composition.
+- `source_channels.last_seen_message_id` persists a positive, nullable reconciliation point. `SourceReconciliationService` validates source UUIDs and positive Telegram IDs before delegating to a narrow cursor port; the PostgreSQL adapter atomically advances only from null or a lower value, so concurrent, duplicate, and out-of-order deliveries cannot regress it. This is storage foundation only: no Update adapter or reconnect scan is composed yet.
 
 Still required for the remainder of M3:
 
-- Deployable Telethon identity/session plus live Update adapter that drives the aggregation flush loop, and reconnect reconciliation based on a persisted `last_seen_message_id` cursor. Bounded history reads are implemented, but no Telethon gateway is composed into a deployed process yet.
+- Deployable Telethon identity/session plus live Update adapter that drives the aggregation flush loop, and reconnect reconciliation that reads from the persisted `last_seen_message_id` cursor. Bounded history reads and cursor storage are implemented, but no Telethon gateway is composed into a deployed process yet.
 - Source edits/deletions; archive-asset metadata and DB READY-state transitions; Telegram media download wiring; video cover/representative-frame extraction; and protected-content error handling.
 - Live PostgreSQL adapter verification for concurrent replay/upsert behavior. SQLite is not a substitute because the schema relies on PostgreSQL partial indexes and conflict semantics.
 

@@ -84,6 +84,10 @@ class SourceChannel(TimestampMixin, Base):
         UniqueConstraint(
             "telegram_identity_id", "telegram_channel_id", name="uq_source_channel_identity_remote"
         ),
+        CheckConstraint(
+            "last_seen_message_id IS NULL OR last_seen_message_id > 0",
+            name="ck_source_channel_last_seen_positive",
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -94,6 +98,7 @@ class SourceChannel(TimestampMixin, Base):
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     username: Mapped[str | None] = mapped_column(String(256), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_seen_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class DestinationChannel(TimestampMixin, Base):
