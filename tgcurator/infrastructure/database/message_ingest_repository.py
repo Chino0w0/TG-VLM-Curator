@@ -62,6 +62,7 @@ def image_assets_upsert_statement(*, message_id: UUID, message: NormalizedTelegr
                 "message_id": message_id,
                 "source_asset_id": asset.asset_id,
                 "source_phash": asset.original_visual_phash,
+                "source_telegram_message_id": asset.source_telegram_message_id,
                 "archive_state": "pending",
             }
             for asset in image_assets
@@ -72,7 +73,11 @@ def image_assets_upsert_statement(*, message_id: UUID, message: NormalizedTelegr
         set_={
             "source_phash": func.coalesce(
                 statement.excluded.source_phash, ImageAssetRecord.source_phash
-            )
+            ),
+            "source_telegram_message_id": func.coalesce(
+                ImageAssetRecord.source_telegram_message_id,
+                statement.excluded.source_telegram_message_id,
+            ),
         },
     )
 

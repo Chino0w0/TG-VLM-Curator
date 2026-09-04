@@ -24,6 +24,15 @@ class MessageVisualFingerprintTests(unittest.TestCase):
             message_visual_fingerprint((image_a, image_b)),
         )
 
+    def test_media_asset_validates_optional_source_message_reference(self) -> None:
+        asset = MediaAsset("image-1", MediaKind.IMAGE, source_telegram_message_id=17)
+
+        self.assertEqual(asset.source_telegram_message_id, 17)
+        with self.assertRaisesRegex(Exception, "source_telegram_message_id"):
+            MediaAsset("image-1", MediaKind.IMAGE, source_telegram_message_id=True)
+        with self.assertRaisesRegex(Exception, "source_telegram_message_id"):
+            MediaAsset("image-1", MediaKind.IMAGE, source_telegram_message_id=0)
+
     def test_text_only_message_has_no_visual_identity(self) -> None:
         self.assertIsNone(MessageContent(text="no media").visual_fingerprint)
 

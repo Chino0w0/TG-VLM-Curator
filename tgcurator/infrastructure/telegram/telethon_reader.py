@@ -73,6 +73,7 @@ class TelethonMessageMapper:
             MediaAsset(
                 asset_id=f"telegram:{source_channel_id}:{message.id}:0",
                 kind=kind,
+                source_telegram_message_id=message.id,
             ),
         )
 
