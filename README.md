@@ -7,7 +7,7 @@ Implementation plan and module boundaries: tg-vlm-curator-module-implementation.
 
 ## Current stage
 
-M0 is complete. M1 implements the API, versioned-configuration, security, and PostgreSQL migration foundation. M2 durable range scheduling is now in progress. The current implementation has passed deterministic unit and offline Alembic SQL verification on September 4, 2026.
+M0 is complete. M1 establishes the API, versioned-configuration, security, and PostgreSQL migration foundation; M2 provides durable range scheduling. M3 Part 1 now provides typed, idempotent Telegram message normalization and persistence. The current implementation passed deterministic unit and offline Alembic SQL verification on September 4, 2026.
 
 The repository now includes:
 
@@ -22,9 +22,11 @@ The repository now includes:
 - A scheduler application service that freezes FIXED and stable LATEST time windows, persists each execution atomically with a durable wake-up, and performs Telegram observation before the database transaction.
 - Durable wake-up leases that use PostgreSQL SELECT FOR UPDATE SKIP LOCKED. Successful broker dispatches remain repairable, so broker loss can result in duplicate wakes but cannot erase unfinished database work.
 - Worker-facing range-execution lease, monotonic progress, and completion services. Completion atomically advances a parent range watermark only for a contiguous finished execution and completes its durable wake-up.
-- A Celery producer adapter that sends JSON-only 	gcurator.range_execution wake-ups containing a normalized RangeExecution UUID, plus scheduler and worker composition roots that wire PostgreSQL repositories through the application services.
+- A Celery producer adapter that sends JSON-only `tgcurator.range_execution` wake-ups containing a normalized RangeExecution UUID, plus scheduler and worker composition roots that wire PostgreSQL repositories through the application services.
+- M3 Part 1 typed Telegram ingestion DTOs and one `MessageIngestService` path for both history reads and live updates. Telegram-native albums normalize by source peer and `grouped_id`; their actual constituent Telegram message IDs are retained.
+- A PostgreSQL `message_parts` membership table and idempotent message/part upsert repository. Regular messages use source + Telegram message-ID identity; albums use a source + `grouped_id` partial unique index and retain their deterministic lowest-ID anchor.
 
-Telegram ingestion, archive storage, inference providers, publishing adapters, and browser authentication/session/CSRF handling are intentionally deferred to later milestones. The M2 worker claims only a stable execution UUID; actual Telegram history/message processing and watermark advancement arrive in M3. A live PostgreSQL migration/adapter verification remains pending because a local Docker daemon was not available during this validation.
+M3 remains in progress: Telethon adapters, an aggregation-window buffer, reconciliation cursors, range-execution history processing, source edits/deletions, archive storage, image/video extraction, pHash generation, and protected-content handling are still pending. The M2 worker therefore still only claims a stable execution UUID; it does not yet invoke Telegram history processing or advance the execution watermark. A live PostgreSQL migration/adapter verification remains pending because a local Docker daemon was not available during this validation.
 
 ## Development
 

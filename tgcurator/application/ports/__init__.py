@@ -1,5 +1,6 @@
 from .admin import AdminBootstrapRepository, PasswordHasher
 from .contracts import ArchiveStorage, InferenceProvider, TaskDispatcher, TelegramGateway
+from .ingestion import IngestReport, TelegramMessageIngestRepository
 from .processing import (
     ClaimedRangeExecution,
     ClaimedWakeup,
@@ -16,6 +17,7 @@ __all__ = [
     "ClaimedRangeExecution",
     "ClaimedWakeup",
     "DurableWakeupRepository",
+    "IngestReport",
     "InferenceProvider",
     "PasswordHasher",
     "ProcessingRangeScheduleRepository",
@@ -25,4 +27,5 @@ __all__ = [
     "SecretVault",
     "TaskDispatcher",
     "TelegramGateway",
+    "TelegramMessageIngestRepository",
 ]
