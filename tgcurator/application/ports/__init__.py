@@ -12,6 +12,7 @@ from .processing import (
 )
 from .reconciliation import SourceReconciliationCursorRepository
 from .secrets import SecretStatus, SecretVault
+from .source_lifecycle import SourceMessageLifecycleRepository
 
 __all__ = [
     "AdminBootstrapRepository",
@@ -30,6 +31,7 @@ __all__ = [
     "ScheduledProcessingRange",
     "SecretStatus",
     "SecretVault",
+    "SourceMessageLifecycleRepository",
     "SourceReconciliationCursorRepository",
     "TaskDispatcher",
     "TelegramGateway",
