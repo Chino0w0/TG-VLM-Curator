@@ -6,13 +6,14 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.sql.dml import Update
 
+from tgcurator.application.media.archive_wakeups import IMAGE_ARCHIVE_QUEUE
 from tgcurator.application.ports.media import (
     ClaimedImageArchive,
     ImageArchiveReadyMetadata,
     ImageArchiveWorkItem,
 )
 
-from .models import ImageAssetRecord, MessageRecord
+from .models import DurableWakeup, ImageAssetRecord, MessageRecord
 from .session import AsyncDatabase
 
 _TERMINAL_FAILURE_REASONS = frozenset(
@@ -173,6 +174,35 @@ def image_archive_release_statement(*, claim: ClaimedImageArchive, now: datetime
     )
 
 
+def image_archive_complete_wakeup_statement(*, image_asset_id: UUID, now: datetime) -> Update:
+    """Complete a durable image wake-up only after its archive has a terminal state."""
+
+    terminal_image_exists = (
+        select(ImageAssetRecord.id)
+        .where(
+            ImageAssetRecord.id == image_asset_id,
+            ImageAssetRecord.archive_state.in_(("ready", "deleted", "failed")),
+        )
+        .exists()
+    )
+    return (
+        update(DurableWakeup)
+        .where(
+            DurableWakeup.queue == IMAGE_ARCHIVE_QUEUE,
+            DurableWakeup.entity_id == image_asset_id,
+            DurableWakeup.status.in_(("pending", "leased")),
+            terminal_image_exists,
+        )
+        .values(
+            status="completed",
+            lease_token=None,
+            lease_expires_at=None,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+
+
 class SqlAlchemyImageArchiveMetadataRepository:
     """PostgreSQL adapter for the archive-published-to-READY transition."""
 
@@ -264,5 +294,15 @@ class SqlAlchemyImageArchiveWorkRepository:
             async with session.begin():
                 result = await session.execute(
                     image_archive_release_statement(claim=claim, now=now)
+                )
+                return result.rowcount == 1
+
+    async def complete_wakeup_if_terminal(self, *, image_asset_id: str, now: datetime) -> bool:
+        async with self._database.session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    image_archive_complete_wakeup_statement(
+                        image_asset_id=UUID(image_asset_id), now=now
+                    )
                 )
                 return result.rowcount == 1

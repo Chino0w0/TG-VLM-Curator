@@ -247,3 +247,6 @@ class ImageArchiveWorkRepository(Protocol):
 
     async def release(self, *, claim: ClaimedImageArchive, now: datetime) -> bool:
         """Return a retryable failed claim to pending without storing raw exception details."""
+
+    async def complete_wakeup_if_terminal(self, *, image_asset_id: str, now: datetime) -> bool:
+        """Complete the durable image wake-up only if the image archive is terminal."""
