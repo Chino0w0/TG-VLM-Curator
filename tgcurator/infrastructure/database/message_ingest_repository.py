@@ -5,10 +5,10 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.dialects import postgresql
 
-from tgcurator.domain.messages import NormalizedTelegramMessage
+from tgcurator.domain.messages import MediaKind, NormalizedTelegramMessage
 from tgcurator.shared import DomainValidationError
 
-from .models import MessagePartRecord, MessageRecord
+from .models import ImageAssetRecord, MessagePartRecord, MessageRecord
 from .session import AsyncDatabase
 
 
@@ -49,6 +49,34 @@ def message_upsert_statement(message: NormalizedTelegramMessage):
     ).returning(MessageRecord.id)
 
 
+def image_assets_upsert_statement(*, message_id: UUID, message: NormalizedTelegramMessage):
+    """Create missing image-asset metadata rows while preserving archive lifecycle state."""
+
+    image_assets = tuple(asset for asset in message.content.media if asset.kind is MediaKind.IMAGE)
+    if not image_assets:
+        return None
+    statement = postgresql.insert(ImageAssetRecord).values(
+        [
+            {
+                "id": uuid4(),
+                "message_id": message_id,
+                "source_asset_id": asset.asset_id,
+                "source_phash": asset.original_visual_phash,
+                "archive_state": "pending",
+            }
+            for asset in image_assets
+        ]
+    )
+    return statement.on_conflict_do_update(
+        constraint="uq_image_asset_message_source",
+        set_={
+            "source_phash": func.coalesce(
+                statement.excluded.source_phash, ImageAssetRecord.source_phash
+            )
+        },
+    )
+
+
 def message_parts_upsert_statement(*, message_id: UUID, message: NormalizedTelegramMessage):
     """Insert only newly observed component IDs; replays preserve their original ownership."""
 
@@ -81,6 +109,11 @@ class SqlAlchemyTelegramMessageIngestRepository:
             async with session.begin():
                 result = await session.execute(message_upsert_statement(message))
                 message_id = result.scalar_one()
+                image_assets_statement = image_assets_upsert_statement(
+                    message_id=message_id, message=message
+                )
+                if image_assets_statement is not None:
+                    await session.execute(image_assets_statement)
                 await session.execute(
                     message_parts_upsert_statement(message_id=message_id, message=message)
                 )
