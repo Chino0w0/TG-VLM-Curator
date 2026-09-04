@@ -7,6 +7,8 @@ from .media import (
     ImageNormalizationProfile,
     ImageProcessor,
     NormalizedImageArtifact,
+    TelegramMediaDownloader,
+    TelegramMediaDownloadRequest,
 )
 from .processing import (
     ClaimedRangeExecution,
@@ -33,6 +35,8 @@ __all__ = [
     "IngestReport",
     "InferenceProvider",
     "NormalizedImageArtifact",
+    "TelegramMediaDownloader",
+    "TelegramMediaDownloadRequest",
     "PasswordHasher",
     "ProcessingRangeScheduleRepository",
     "RangeExecutionWorkerRepository",
