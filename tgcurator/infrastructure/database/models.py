@@ -209,7 +209,20 @@ class MessageRecord(TimestampMixin, Base):
         UniqueConstraint(
             "source_channel_id", "telegram_anchor_message_id", name="uq_message_source_anchor"
         ),
+        CheckConstraint("telegram_anchor_message_id > 0", name="ck_message_anchor_positive"),
+        CheckConstraint(
+            "telegram_group_id IS NULL OR telegram_group_id > 0",
+            name="ck_message_group_positive",
+        ),
+        CheckConstraint("media_count >= 0", name="ck_message_media_count_nonnegative"),
         Index("ix_messages_source_sent_at", "source_channel_id", "sent_at"),
+        Index(
+            "uq_messages_source_group",
+            "source_channel_id",
+            "telegram_group_id",
+            unique=True,
+            postgresql_where=text("telegram_group_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -228,6 +241,30 @@ class MessageRecord(TimestampMixin, Base):
     source_changed_after_processing: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+
+
+class MessagePartRecord(CreatedAtMixin, Base):
+    """One actual Telegram component Message belonging to a logical normalized Message."""
+
+    __tablename__ = "message_parts"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_channel_id",
+            "telegram_message_id",
+            name="uq_message_part_source_telegram",
+        ),
+        CheckConstraint("telegram_message_id > 0", name="ck_message_part_telegram_positive"),
+        Index("ix_message_parts_message", "message_id"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    source_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class RangeExecutionRecord(TimestampMixin, Base):
