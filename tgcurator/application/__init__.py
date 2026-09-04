@@ -9,6 +9,7 @@ from .processing import (
     WakeupDispatchReport,
 )
 from .realtime_ingestion import RealtimeTelegramIngestion
+from .reconciliation import SourceReconciliationService
 from .settings import Settings, get_settings
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "RangeExecutionWorker",
     "RangeScheduleReport",
     "Settings",
+    "SourceReconciliationService",
     "WakeupDispatchReport",
     "get_settings",
 ]
