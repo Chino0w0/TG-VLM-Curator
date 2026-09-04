@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tg-vlm-curator"
+version = "0.1.0"
+description = "Modular Telegram ingestion, VLM analysis, routing, and publishing system."
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "Proprietary" }
+authors = [{ name = "TG VLM Curator contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+runtime = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "sqlalchemy>=2.0",
+  "asyncpg>=0.29",
+  "alembic>=1.13",
+  "celery[redis]>=5.4",
+  "telethon>=1.36",
+  "httpx>=0.27",
+  "pillow>=10.4",
+  "pydantic-settings>=2.6",
+  "cryptography>=43",
+  "argon2-cffi>=23.1",
+]
+dev = ["ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["tgcurator"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

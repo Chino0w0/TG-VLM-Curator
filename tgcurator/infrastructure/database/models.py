@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKey
+
+
+class AdminUser(TimestampMixin, Base):
+    __tablename__ = "admin_users"
+    __table_args__ = (
+        Index(
+            "uq_admin_users_single_active",
+            "is_active",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    username: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class EncryptedSecret(CreatedAtMixin, Base):
+    __tablename__ = "encrypted_secrets"
+
+    id: Mapped[UUIDPrimaryKey]
+    secret_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class TelegramIdentity(TimestampMixin, Base):
+    __tablename__ = "telegram_identities"
+    __table_args__ = (
+        CheckConstraint(
+            "identity_type IN ('mtproto_user', 'bot')", name="ck_telegram_identity_type"
+        ),
+        CheckConstraint(
+            "health_status IN ('unknown', 'healthy', 'degraded', 'failed')",
+            name="ck_telegram_identity_health",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    identity_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    health_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    last_connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_id: Mapped[UUID] = mapped_column(
+        ForeignKey("encrypted_secrets.id", ondelete="RESTRICT"), nullable=False
+    )
+
+
+class SourceChannel(TimestampMixin, Base):
+    __tablename__ = "source_channels"
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_identity_id", "telegram_channel_id", name="uq_source_channel_identity_remote"
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    telegram_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("telegram_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    telegram_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class DestinationChannel(TimestampMixin, Base):
+    __tablename__ = "destination_channels"
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_identity_id",
+            "telegram_channel_id",
+            name="uq_destination_channel_identity_remote",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    telegram_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("telegram_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    telegram_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class SourceChannelProfile(TimestampMixin, Base):
+    __tablename__ = "source_channel_profiles"
+
+    id: Mapped[UUIDPrimaryKey]
+    source_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channels.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class SourceChannelProfileVersion(CreatedAtMixin, Base):
+    __tablename__ = "source_channel_profile_versions"
+    __table_args__ = (
+        UniqueConstraint("profile_id", "version_number", name="uq_source_profile_version_number"),
+        UniqueConstraint("profile_id", "content_hash", name="uq_source_profile_content_hash"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'retired')", name="ck_source_profile_version_state"
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL) "
+            "OR (state IN ('published', 'retired') AND published_at IS NOT NULL)",
+            name="ck_source_profile_version_published_at",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channel_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProcessingRange(TimestampMixin, Base):
+    __tablename__ = "processing_ranges"
+    __table_args__ = (
+        CheckConstraint(
+            "boundary_kind IN ('fixed', 'latest')", name="ck_processing_range_boundary_kind"
+        ),
+        CheckConstraint(
+            "(boundary_kind = 'fixed' "
+            "AND fixed_end_at IS NOT NULL "
+            "AND latest_quiet_seconds IS NULL) "
+            "OR (boundary_kind = 'latest' "
+            "AND fixed_end_at IS NULL "
+            "AND latest_quiet_seconds IS NOT NULL)",
+            name="ck_processing_range_boundary_fields",
+        ),
+        CheckConstraint(
+            "fixed_end_at IS NULL OR fixed_end_at > start_at",
+            name="ck_processing_range_fixed_order",
+        ),
+        CheckConstraint(
+            "latest_quiet_seconds IS NULL OR latest_quiet_seconds > 0",
+            name="ck_processing_range_quiet_positive",
+        ),
+        CheckConstraint(
+            "processing_watermark_at IS NULL OR processing_watermark_at >= start_at",
+            name="ck_processing_range_watermark_floor",
+        ),
+        CheckConstraint(
+            "fixed_end_at IS NULL OR processing_watermark_at IS NULL "
+            "OR processing_watermark_at <= fixed_end_at",
+            name="ck_processing_range_watermark_fixed_ceiling",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    source_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_profile_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channel_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    boundary_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fixed_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_quiet_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    processing_watermark_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MessageRecord(TimestampMixin, Base):
+    __tablename__ = "messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_channel_id", "telegram_anchor_message_id", name="uq_message_source_anchor"
+        ),
+        Index("ix_messages_source_sent_at", "source_channel_id", "sent_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    source_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    telegram_anchor_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    telegram_group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    visual_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_changed_after_processing: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
+
+class RangeExecutionRecord(TimestampMixin, Base):
+    __tablename__ = "range_executions"
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_range_id", "from_at", "to_at", name="uq_range_execution_bounds"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_range_execution_status",
+        ),
+        CheckConstraint("from_at < to_at", name="ck_range_execution_bounds"),
+        CheckConstraint(
+            "watermark_at IS NULL OR (watermark_at >= from_at AND watermark_at <= to_at)",
+            name="ck_range_execution_watermark_bounds",
+        ),
+        CheckConstraint(
+            "status <> 'completed' OR (watermark_at = to_at AND completed_at IS NOT NULL)",
+            name="ck_range_execution_completion",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'running' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="ck_range_execution_lease",
+        ),
+        Index("ix_range_executions_status_lease", "status", "lease_expires_at"),
+        Index(
+            "uq_range_execution_one_active",
+            "processing_range_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    processing_range_id: Mapped[UUID] = mapped_column(
+        ForeignKey("processing_ranges.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_profile_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channel_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    from_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    to_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    watermark_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DurableWakeup(TimestampMixin, Base):
+    __tablename__ = "durable_wakeups"
+    __table_args__ = (
+        UniqueConstraint("queue", "entity_id", name="uq_durable_wakeup_queue_entity"),
+        CheckConstraint(
+            "status IN ('pending', 'leased', 'completed', 'cancelled')",
+            name="ck_durable_wakeup_status",
+        ),
+        CheckConstraint("dispatch_attempts >= 0", name="ck_durable_wakeup_attempts"),
+        CheckConstraint(
+            "(status = 'leased' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'leased' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="ck_durable_wakeup_lease",
+        ),
+        Index("ix_durable_wakeups_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    queue: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditEvent(CreatedAtMixin, Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (Index("ix_audit_events_entity", "entity_type", "entity_id"),)
+
+    id: Mapped[UUIDPrimaryKey]
+    actor_admin_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True
+    )
+    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    before_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    after_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
