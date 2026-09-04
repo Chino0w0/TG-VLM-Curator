@@ -1,6 +1,6 @@
 # TG VLM Curator Modular Implementation Plan
 
-Status: M0 completed; M1 implemented; M2 durable range-scheduling foundation implemented; M3 Parts 1鈥�2 typed idempotent Telegram normalization and local archive storage implemented. The repository is verified with unit tests plus offline Alembic PostgreSQL SQL rendering on 2026-09-04. Live PostgreSQL adapter verification remains pending.
+Status: M0 completed; M1 implemented; M2 durable range-scheduling foundation implemented; M3 Parts 1鈥�3 typed idempotent Telegram normalization, local archive storage, and image normalization/fingerprinting implemented. The repository is verified with unit tests plus offline Alembic PostgreSQL SQL rendering on 2026-09-04. Live PostgreSQL adapter verification remains pending.
 
 Source specification: tg-vlm-curator-architecture.md.
 
@@ -189,7 +189,7 @@ Still required to complete M2:
 - Live PostgreSQL concurrency verification for wake-up/execution claims, lease reclamation, stale-lease rejection, and contiguous range-watermark advancement.
 - A Redis-loss runtime recovery test proving that an unfinished durable-wakeup row causes re-enqueue after broker loss.
 
-### M3 - Telegram ingestion and media archive (Parts 1鈥�2: typed ingestion and local atomic storage implemented)
+### M3 - Telegram ingestion and media archive (Parts 1鈥�3: typed ingestion, local atomic storage, and image normalization implemented)
 
 Implemented M3 checkpoints:
 
@@ -199,12 +199,13 @@ Implemented M3 checkpoints:
 - `message_parts` stores source-channel/component-message membership. PostgreSQL constraints prevent duplicate component ownership, invalid IDs, and duplicate non-null source/group identities.
 - PostgreSQL upserts preserve known payload fields and add newly observed album component IDs on repeat history/update ingestion. Focused unit tests cover history/update idempotency, cross-source group isolation, album ordering, duplicate component rejection, schema constraints, and compiled PostgreSQL conflict SQL.
 - `LocalArchiveStorage` implements the `ArchiveStorage` port for a local Docker-volume-compatible root. It accepts only safe relative POSIX keys, writes temporary files with fsync, atomically publishes without replacement, makes same-byte replays idempotent, rejects different bytes at an immutable key, and never persists a host path as a business key.
+- `PillowImageProcessor` implements the `ImageProcessor` port: it applies EXIF orientation, preserves alpha when present, bounds dimensions, emits metadata-free WebP, computes SHA-256 values for both source and archive bytes, and calculates a deterministic 64-bit DCT pHash from normalized display pixels. `ImageArchiveService` keeps archive I/O outside any database transaction; asset metadata/READY persistence is deliberately still pending.
 
 Still required for the remainder of M3:
 
 - Telethon history and Update adapters, short media-group aggregation-window buffering, and reconnect reconciliation based on a persisted `last_seen_message_id` cursor.
 - Wiring range-execution workers to fetch missing history, invoke `MessageIngestService`, record watermarks only after committed ingestion, and complete finite executions.
-- Source edits/deletions; archive-asset metadata and DB READY-state transitions; image normalization; video cover/representative frames; pHash extraction; and protected-content error handling.
+- Source edits/deletions; archive-asset metadata and DB READY-state transitions; Telegram media download wiring; video cover/representative-frame extraction; and protected-content error handling.
 - Live PostgreSQL adapter verification for concurrent replay/upsert behavior. SQLite is not a substitute because the schema relies on PostgreSQL partial indexes and conflict semantics.
 
 ### M4 - Analysis engine
