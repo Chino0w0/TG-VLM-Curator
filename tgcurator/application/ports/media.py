@@ -150,3 +150,33 @@ class ImageArchiveMetadataRepository(Protocol):
 
     async def mark_ready(self, *, metadata: ImageArchiveReadyMetadata) -> bool:
         """Persist matching READY metadata, or return False for a missing/conflicting asset."""
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramMediaDownloadRequest:
+    """Stable Telegram source reference for one durable media asset download."""
+
+    source_channel_id: str
+    telegram_message_id: int
+    source_asset_id: str
+
+    def __post_init__(self) -> None:
+        try:
+            UUID(self.source_channel_id)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("source_channel_id must be a UUID") from error
+        if (
+            not isinstance(self.telegram_message_id, int)
+            or isinstance(self.telegram_message_id, bool)
+            or self.telegram_message_id <= 0
+        ):
+            raise ValueError("telegram_message_id must be a positive integer")
+        if not isinstance(self.source_asset_id, str) or not self.source_asset_id.strip():
+            raise ValueError("source_asset_id must not be blank")
+
+
+class TelegramMediaDownloader(Protocol):
+    """Download one source-media object without exposing a Telegram SDK to application callers."""
+
+    async def download(self, *, request: TelegramMediaDownloadRequest) -> bytes:
+        """Return non-empty media bytes or raise a typed application error."""
