@@ -14,6 +14,7 @@ from tgcurator.application.ports.media import (
 )
 from tgcurator.infrastructure.database.image_archive_repository import (
     image_archive_claim_statement,
+    image_archive_complete_wakeup_statement,
     image_archive_mark_failed_statement,
     image_archive_mark_ready_claim_statement,
     image_archive_release_statement,
@@ -75,6 +76,17 @@ class ImageArchiveWorkRepositoryStatementTests(unittest.TestCase):
         self.assertIn("image_assets.archive_state =", sql)
         self.assertIn("image_assets.archive_lease_token =", sql)
         self.assertNotIn("network unavailable", sql)
+
+    def test_terminal_wakeup_completion_requires_a_terminal_image_archive_state(self) -> None:
+        sql = _compile(image_archive_complete_wakeup_statement(image_asset_id=uuid4(), now=NOW))
+
+        self.assertIn("UPDATE durable_wakeups SET", sql)
+        self.assertIn("durable_wakeups.queue =", sql)
+        self.assertIn("durable_wakeups.entity_id =", sql)
+        self.assertIn("durable_wakeups.status IN", sql)
+        self.assertIn("EXISTS (SELECT image_assets.id", sql)
+        self.assertIn("image_assets.archive_state IN", sql)
+        self.assertIn("completed", sql)
 
     def test_rejects_unrecognized_terminal_failure_reason(self) -> None:
         with self.assertRaisesRegex(ValueError, "recognized terminal"):
