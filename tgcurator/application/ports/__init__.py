@@ -2,8 +2,11 @@ from .admin import AdminBootstrapRepository, PasswordHasher
 from .contracts import ArchiveStorage, InferenceProvider, TaskDispatcher, TelegramGateway
 from .ingestion import IngestReport, TelegramMessageIngestRepository
 from .media import (
+    ClaimedImageArchive,
     ImageArchiveMetadataRepository,
     ImageArchiveReadyMetadata,
+    ImageArchiveWorkItem,
+    ImageArchiveWorkRepository,
     ImageNormalizationProfile,
     ImageProcessor,
     NormalizedImageArtifact,
@@ -25,11 +28,14 @@ from .source_lifecycle import SourceMessageLifecycleRepository
 __all__ = [
     "AdminBootstrapRepository",
     "ArchiveStorage",
+    "ClaimedImageArchive",
     "ClaimedRangeExecution",
     "ClaimedWakeup",
     "DurableWakeupRepository",
     "ImageArchiveMetadataRepository",
     "ImageArchiveReadyMetadata",
+    "ImageArchiveWorkItem",
+    "ImageArchiveWorkRepository",
     "ImageNormalizationProfile",
     "ImageProcessor",
     "IngestReport",
