@@ -1,6 +1,6 @@
 # TG VLM Curator Modular Implementation Plan
 
-Status: M0 completed; M1 implemented; M2 durable range-scheduling foundation implemented; M3 Parts 1-4 typed idempotent Telegram normalization, local archive storage, image normalization/fingerprinting, and generic range-history execution orchestration implemented. The repository is verified with unit tests plus offline Alembic PostgreSQL SQL rendering on 2026-09-04. Live PostgreSQL adapter verification remains pending.
+Status: M0 completed; M1 implemented; M2 durable range-scheduling foundation implemented; M3 Parts 1-5 typed idempotent Telegram normalization, local archive storage, image normalization/fingerprinting, generic range-history execution orchestration, and a real-time media-group aggregation buffer implemented. The repository is verified with unit tests plus offline Alembic PostgreSQL SQL rendering on 2026-09-04. Live PostgreSQL adapter verification remains pending.
 
 Source specification: tg-vlm-curator-architecture.md.
 
@@ -187,7 +187,7 @@ Still required to complete M2:
 - Live PostgreSQL concurrency verification for wake-up/execution claims, lease reclamation, stale-lease rejection, and contiguous range-watermark advancement.
 - A Redis-loss runtime recovery test proving that an unfinished durable-wakeup row causes re-enqueue after broker loss.
 
-### M3 - Telegram ingestion and media archive (Parts 1-4: typed ingestion, local atomic storage, image normalization, and range-history orchestration implemented)
+### M3 - Telegram ingestion and media archive (Parts 1-5: typed ingestion, local atomic storage, image normalization, range-history orchestration, and real-time media-group aggregation implemented)
 
 Implemented M3 checkpoints:
 
@@ -199,6 +199,7 @@ Implemented M3 checkpoints:
 - `LocalArchiveStorage` implements the `ArchiveStorage` port for a local Docker-volume-compatible root. It accepts only safe relative POSIX keys, writes temporary files with fsync, atomically publishes without replacement, makes same-byte replays idempotent, rejects different bytes at an immutable key, and never persists a host path as a business key.
 - `PillowImageProcessor` implements the `ImageProcessor` port: it applies EXIF orientation, preserves alpha when present, bounds dimensions, emits metadata-free WebP, computes SHA-256 values for both source and archive bytes, and calculates a deterministic 64-bit DCT pHash from normalized display pixels. `ImageArchiveService` keeps archive I/O outside any database transaction; asset metadata/READY persistence is deliberately still pending.
 - RangeExecutionHistoryIngestion performs claimed finite-window processing without a long transaction: it fetches the immutable Telegram interval, rejects foreign or out-of-window DTOs, invokes the idempotent MessageIngestService, then advances the execution watermark to its immutable right boundary and completes only after that update succeeds. WorkerRuntime calls it only when deployment composition injects a configured Telegram gateway; its no-adapter fallback leaves the lease open rather than falsely completing work.
+- MediaGroupAggregationBuffer provides a short, positive-duration, in-memory wait for native Telegram grouped-message parts. RealtimeTelegramIngestion sends regular messages immediately and flushes complete/expired or shutdown-drained groups through the existing common normalization/upsert path. The buffer is intentionally reconstructable: replay/history reconciliation restores anything a process restart had not yet emitted.
 
 Still required for the remainder of M3:
 
