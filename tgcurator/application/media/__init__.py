@@ -1,3 +1,3 @@
-from .images import ImageArchiveService
+from .images import ImageArchiveMetadataPersistenceError, ImageArchiveService
 
-__all__ = ["ImageArchiveService"]
+__all__ = ["ImageArchiveMetadataPersistenceError", "ImageArchiveService"]
