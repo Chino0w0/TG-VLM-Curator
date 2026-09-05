@@ -187,7 +187,7 @@ Still required to complete M2:
 - Live PostgreSQL concurrency verification for wake-up/execution claims, lease reclamation, stale-lease rejection, and contiguous range-watermark advancement.
 - A Redis-loss runtime recovery test proving that an unfinished durable-wakeup row causes re-enqueue after broker loss.
 
-### M3 - Telegram ingestion and media archive (Parts 1-7: typed ingestion, local atomic storage, image normalization, range-history orchestration, real-time media-group aggregation, bounded Telethon history reads, and durable reconciliation-cursor storage implemented)
+### M3 - Telegram ingestion and media archive (Parts 1-8: typed ingestion, local atomic storage, image normalization, range-history orchestration, real-time media-group aggregation, bounded Telethon history reads, durable reconciliation-cursor storage, and source-message lifecycle persistence implemented)
 
 Implemented M3 checkpoints:
 
@@ -202,11 +202,12 @@ Implemented M3 checkpoints:
 - MediaGroupAggregationBuffer provides a short, positive-duration, in-memory wait for native Telegram grouped-message parts. RealtimeTelegramIngestion sends regular messages immediately and flushes complete/expired or shutdown-drained groups through the existing common normalization/upsert path. The buffer is intentionally reconstructable: replay/history reconciliation restores anything a process restart had not yet emitted.
 - TelethonReadGateway and TelethonMessageMapper define the read-side adapter without leaking Telethon objects across the application boundary. Given an injected source-peer resolver, it obtains newest timestamps and bounded newest-to-oldest history, maps caption/group/media DTOs, and stops after the left boundary. It is deliberately not a deployed identity/session or live-Update composition.
 - `source_channels.last_seen_message_id` persists a positive, nullable reconciliation point. `SourceReconciliationService` validates source UUIDs and positive Telegram IDs before delegating to a narrow cursor port; the PostgreSQL adapter atomically advances only from null or a lower value, so concurrent, duplicate, and out-of-order deliveries cannot regress it. This is storage foundation only: no Update adapter or reconnect scan is composed yet.
+- `SourceMessageLifecycleService` and its PostgreSQL adapter persist source-side edits and deletion markers without deleting retained message, archive, analysis, routing, or publication evidence. A newer `source_edited_at` replaces text and sets `source_changed_after_processing`; the database rejects source edit timestamps before the original send time. Deletions set only the first `source_deleted_at`. Both operations resolve a message through `(source_channel_id, telegram_message_id)` membership in `message_parts`, so album components update their normalized parent. This is a ready application/persistence boundary, not yet a deployed Telethon Update adapter.
 
 Still required for the remainder of M3:
 
-- Deployable Telethon identity/session plus live Update adapter that drives the aggregation flush loop, and reconnect reconciliation that reads from the persisted `last_seen_message_id` cursor. Bounded history reads and cursor storage are implemented, but no Telethon gateway is composed into a deployed process yet.
-- Source edits/deletions; archive-asset metadata and DB READY-state transitions; Telegram media download wiring; video cover/representative-frame extraction; and protected-content error handling.
+- Deployable Telethon identity/session plus live Update adapter that drives the aggregation flush loop, invokes edit/deletion lifecycle persistence, and performs reconnect reconciliation from the persisted `last_seen_message_id` cursor. Bounded history reads, cursor storage, and source lifecycle persistence are implemented, but no Telethon gateway is composed into a deployed process yet.
+- Archive-asset metadata and DB READY-state transitions; Telegram media download wiring; video cover/representative-frame extraction; and protected-content error handling.
 - Live PostgreSQL adapter verification for concurrent replay/upsert behavior. SQLite is not a substitute because the schema relies on PostgreSQL partial indexes and conflict semantics.
 
 ### M4 - Analysis engine

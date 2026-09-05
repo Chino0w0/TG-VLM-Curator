@@ -228,6 +228,10 @@ class MessageRecord(TimestampMixin, Base):
             unique=True,
             postgresql_where=text("telegram_group_id IS NOT NULL"),
         ),
+        CheckConstraint(
+            "source_edited_at IS NULL OR source_edited_at >= sent_at",
+            name="ck_message_source_edited_after_sent",
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -238,6 +242,9 @@ class MessageRecord(TimestampMixin, Base):
     telegram_group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     media_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     visual_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_deleted_at: Mapped[datetime | None] = mapped_column(

@@ -8,6 +8,7 @@ from .range_execution_repository import SqlAlchemyRangeExecutionWorkerRepository
 from .reconciliation_repository import SqlAlchemySourceReconciliationCursorRepository
 from .secret_vault import SecretNotFoundError, SecretTypeMismatchError, SqlAlchemySecretVault
 from .session import AsyncDatabase
+from .source_lifecycle_repository import SqlAlchemySourceMessageLifecycleRepository
 
 __all__ = [
     "AsyncDatabase",
@@ -18,6 +19,7 @@ __all__ = [
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
     "SqlAlchemySecretVault",
+    "SqlAlchemySourceMessageLifecycleRepository",
     "SqlAlchemySourceReconciliationCursorRepository",
     "SqlAlchemyTelegramMessageIngestRepository",
 ]
