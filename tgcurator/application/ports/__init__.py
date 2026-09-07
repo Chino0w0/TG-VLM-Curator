@@ -1,7 +1,15 @@
 from .admin import AdminBootstrapRepository, PasswordHasher
 from .contracts import ArchiveStorage, InferenceProvider, TaskDispatcher, TelegramGateway
 from .ingestion import IngestReport, TelegramMessageIngestRepository
-from .media import ImageNormalizationProfile, ImageProcessor, NormalizedImageArtifact
+from .media import (
+    ImageArchiveMetadataRepository,
+    ImageArchiveReadyMetadata,
+    ImageNormalizationProfile,
+    ImageProcessor,
+    NormalizedImageArtifact,
+    TelegramMediaDownloader,
+    TelegramMediaDownloadRequest,
+)
 from .processing import (
     ClaimedRangeExecution,
     ClaimedWakeup,
@@ -20,11 +28,15 @@ __all__ = [
     "ClaimedRangeExecution",
     "ClaimedWakeup",
     "DurableWakeupRepository",
+    "ImageArchiveMetadataRepository",
+    "ImageArchiveReadyMetadata",
     "ImageNormalizationProfile",
     "ImageProcessor",
     "IngestReport",
     "InferenceProvider",
     "NormalizedImageArtifact",
+    "TelegramMediaDownloader",
+    "TelegramMediaDownloadRequest",
     "PasswordHasher",
     "ProcessingRangeScheduleRepository",
     "RangeExecutionWorkerRepository",
