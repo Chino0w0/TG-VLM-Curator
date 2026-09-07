@@ -32,6 +32,7 @@ class ClaimedRangeExecution:
     """A short-lived worker lease over a finite, immutable execution window."""
 
     execution: RangeExecution
+    source_channel_id: str
     source_profile_version_id: str
     lease_token: str
 
