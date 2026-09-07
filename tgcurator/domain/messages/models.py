@@ -27,6 +27,7 @@ class MediaAsset:
     original_visual_phash: str | None = None
     video_cover_phash: str | None = None
     representative_frame_phashes: tuple[str, ...] = ()
+    source_telegram_message_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.asset_id.strip():
@@ -41,6 +42,12 @@ class MediaAsset:
             raise DomainValidationError("only image assets may define original_visual_phash")
         if self.kind is not MediaKind.VIDEO and self.video_cover_phash is not None:
             raise DomainValidationError("only video assets may define video_cover_phash")
+        if self.source_telegram_message_id is not None and (
+            not isinstance(self.source_telegram_message_id, int)
+            or isinstance(self.source_telegram_message_id, bool)
+            or self.source_telegram_message_id <= 0
+        ):
+            raise DomainValidationError("source_telegram_message_id must be a positive integer")
 
     @property
     def duplicate_identity_phash(self) -> str | None:

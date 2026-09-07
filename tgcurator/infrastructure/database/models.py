@@ -301,6 +301,10 @@ class ImageAssetRecord(TimestampMixin, Base):
             "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
             name="ck_image_asset_deleted_timestamp",
         ),
+        CheckConstraint(
+            "source_telegram_message_id IS NULL OR source_telegram_message_id > 0",
+            name="ck_image_asset_source_message_positive",
+        ),
         CheckConstraint("width IS NULL OR width > 0", name="ck_image_asset_width_positive"),
         CheckConstraint("height IS NULL OR height > 0", name="ck_image_asset_height_positive"),
         CheckConstraint(
@@ -316,6 +320,7 @@ class ImageAssetRecord(TimestampMixin, Base):
     )
     source_asset_id: Mapped[str] = mapped_column(String(512), nullable=False)
     source_phash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     perceptual_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     archive_state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     storage_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)

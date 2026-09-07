@@ -55,6 +55,7 @@ class TelethonReadGatewayTests(unittest.TestCase):
         self.assertEqual(message.text, "caption")
         self.assertEqual(message.media[0].kind.value, "image")
         self.assertEqual(message.media[0].asset_id, f"telegram:{source_channel_id}:9:0")
+        self.assertEqual(message.media[0].source_telegram_message_id, 9)
 
     def test_newest_and_missing_peer_behavior(self) -> None:
         source_channel_id = str(uuid4())
