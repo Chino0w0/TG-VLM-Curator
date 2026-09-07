@@ -6,6 +6,15 @@ from .downloads import (
     TelegramProtectedContentError,
 )
 from .images import ImageArchiveMetadataPersistenceError, ImageArchiveService
+from .videos import (
+    VideoFrameEvidence,
+    VideoFrameSamplingService,
+    VideoSamplingProfile,
+    VideoSamplingResult,
+    candidate_timestamps,
+    perceptual_hash_distance,
+    select_representative_frames,
+)
 
 __all__ = [
     "IMAGE_ARCHIVE_QUEUE",
@@ -13,6 +22,13 @@ __all__ = [
     "ImageArchiveWorker",
     "ImageArchiveService",
     "TelegramMediaDownloadError",
+    "VideoFrameEvidence",
+    "VideoFrameSamplingService",
+    "VideoSamplingProfile",
+    "VideoSamplingResult",
+    "candidate_timestamps",
+    "perceptual_hash_distance",
+    "select_representative_frames",
     "TelegramMediaUnavailableError",
     "TelegramProtectedContentError",
 ]
