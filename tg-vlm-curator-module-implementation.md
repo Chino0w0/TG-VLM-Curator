@@ -14,7 +14,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | --- | --- | --- |
 | M0 | Domain foundation and framework-neutral ports | Complete |
 | M1 | API, environment settings, security, and initial PostgreSQL schema | Complete |
-| M2 | Durable ProcessingRange and RangeExecution scheduling | Pending |
+| M2 | Durable ProcessingRange and RangeExecution scheduling | Complete |
 | M3 | Telegram ingestion and media archive workflows | Pending |
 | M4 | Versioned analysis engine and provider adapters | Pending; model not deployed |
 | M5 | Human review and routing workflows | Pending |
@@ -82,11 +82,33 @@ Acceptance uses the same formatting, lint, pytest, unittest, compileall, and pip
 plus offline PostgreSQL Alembic upgrade and downgrade rendering. It requires no Redis,
 Telegram credentials, running PostgreSQL server, or inference model.
 
-## M2 - Durable processing scheduling
+## M2 - Durable processing scheduling (complete)
 
-M2 will persist ProcessingRange and RangeExecution state, leases, retries, watermarks, and
-reconstructable queue wake-ups. A LATEST range will always freeze a stable finite right
-boundary before workers process it.
+M2 adds, as one module:
+
+- immutable Telegram message-ID windows with (from_message_id_exclusive,
+  to_message_id_inclusive] semantics and an initial lower bound of
+  resolved_start_message_id - 1;
+- direct FIXED scheduling and LATEST scheduling only after an injected boundary source confirms
+  that the newest real message has remained quiet for steady_after_seconds;
+- atomic PostgreSQL persistence of each frozen RangeExecution and its reconstructable durable
+  wake-up, with row-lock revalidation of range, source-channel, profile-version, and watermark
+  state;
+- one active execution per ProcessingRange, short compare-by-token leases, bounded retry state,
+  safe error codes/types, and monotonic execution/range watermarks;
+- at-least-once Celery/Redis wake-up delivery containing only the immutable execution UUID;
+- scheduler and worker composition roots. M3 will attach Telegram ingestion to a claimed
+  execution, so M2 does not fabricate ingestion completion while that adapter is unavailable.
+
+PostgreSQL is the source of business truth. durable_wakeups are repairable broker signals,
+and Redis loss cannot delete RangeExecution state. FIXED windows never use quiet-period logic;
+LATEST windows never freeze from a synthetic boundary.
+
+Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline
+Alembic checks. Repository and runtime tests cover atomic freezing, stale-snapshot rejection,
+partial unique execution protection, wake-up repair, lease expiry, retries, terminal failures,
+and monotonic completion. No running PostgreSQL, Redis, Telegram session, or inference model is
+required for the acceptance suite.
 
 ## M3 - Telegram ingestion and archive workflows
 
