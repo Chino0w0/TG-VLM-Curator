@@ -1,3 +1,4 @@
+from .telethon_media_downloader import TelethonMediaDownloader
 from .telethon_reader import (
     StaticTelegramSourcePeerResolver,
     TelethonMessageMapper,
@@ -6,6 +7,7 @@ from .telethon_reader import (
 
 __all__ = [
     "StaticTelegramSourcePeerResolver",
+    "TelethonMediaDownloader",
     "TelethonMessageMapper",
     "TelethonReadGateway",
 ]
