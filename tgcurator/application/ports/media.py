@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
@@ -180,3 +180,70 @@ class TelegramMediaDownloader(Protocol):
 
     async def download(self, *, request: TelegramMediaDownloadRequest) -> bytes:
         """Return non-empty media bytes or raise a typed application error."""
+
+
+@dataclass(frozen=True, slots=True)
+class ImageArchiveWorkItem:
+    """Stable database facts needed to retrieve one exact Telegram image component."""
+
+    image_asset_id: str
+    source_channel_id: str
+    source_telegram_message_id: int
+    source_asset_id: str
+    source_deleted_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for field, value in (
+            ("image_asset_id", self.image_asset_id),
+            ("source_channel_id", self.source_channel_id),
+        ):
+            try:
+                UUID(value)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(f"{field} must be a UUID") from error
+        if (
+            not isinstance(self.source_telegram_message_id, int)
+            or isinstance(self.source_telegram_message_id, bool)
+            or self.source_telegram_message_id <= 0
+        ):
+            raise ValueError("source_telegram_message_id must be a positive integer")
+        if not isinstance(self.source_asset_id, str) or not self.source_asset_id.strip():
+            raise ValueError("source_asset_id must not be blank")
+        if self.source_deleted_at is not None and (
+            self.source_deleted_at.tzinfo is None or self.source_deleted_at.utcoffset() is None
+        ):
+            raise ValueError("source_deleted_at must be timezone-aware when present")
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedImageArchive:
+    """A finite archive lease; external effects intentionally occur after its DB transaction."""
+
+    work_item: ImageArchiveWorkItem
+    lease_token: str
+
+    def __post_init__(self) -> None:
+        try:
+            UUID(self.lease_token)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("lease_token must be a UUID") from error
+
+
+class ImageArchiveWorkRepository(Protocol):
+    """Short-transaction state changes for an at-least-once image archive worker."""
+
+    async def claim(
+        self, *, image_asset_id: str, now: datetime, lease_duration: timedelta
+    ) -> ClaimedImageArchive | None:
+        """Lease a pending or expired archive asset, without holding a transaction for I/O."""
+
+    async def mark_ready(
+        self, *, claim: ClaimedImageArchive, metadata: ImageArchiveReadyMetadata
+    ) -> bool:
+        """Commit immutable READY metadata only if this worker still owns the claim."""
+
+    async def mark_failed(self, *, claim: ClaimedImageArchive, reason: str, now: datetime) -> bool:
+        """Commit a known terminal retrieval failure only if this worker still owns the claim."""
+
+    async def release(self, *, claim: ClaimedImageArchive, now: datetime) -> bool:
+        """Return a retryable failed claim to pending without storing raw exception details."""
