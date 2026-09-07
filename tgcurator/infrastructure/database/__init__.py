@@ -1,4 +1,5 @@
 from .admin_repository import SqlAlchemyAdminBootstrapRepository
+from .image_archive_repository import SqlAlchemyImageArchiveMetadataRepository
 from .message_ingest_repository import SqlAlchemyTelegramMessageIngestRepository
 from .processing_repository import (
     SqlAlchemyDurableWakeupRepository,
@@ -16,6 +17,7 @@ __all__ = [
     "SecretTypeMismatchError",
     "SqlAlchemyAdminBootstrapRepository",
     "SqlAlchemyDurableWakeupRepository",
+    "SqlAlchemyImageArchiveMetadataRepository",
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
     "SqlAlchemySecretVault",
