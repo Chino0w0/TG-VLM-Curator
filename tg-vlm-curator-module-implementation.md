@@ -1,6 +1,6 @@
 # TG VLM Curator Modular Implementation Plan
 
-Status: M0 completed; M1 implemented; M2 durable range-scheduling foundation implemented; M3 Part 1 typed idempotent Telegram normalization implemented. The repository is verified with unit tests plus offline Alembic PostgreSQL SQL rendering on 2026-09-04. Live PostgreSQL adapter verification remains pending.
+Status: M0 completed; M1 implemented; M2 durable range-scheduling foundation implemented; M3 Parts 1-4 typed idempotent Telegram normalization, local archive storage, image normalization/fingerprinting, and generic range-history execution orchestration implemented. The repository is verified with unit tests plus offline Alembic PostgreSQL SQL rendering on 2026-09-04. Live PostgreSQL adapter verification remains pending.
 
 Source specification: tg-vlm-curator-architecture.md.
 
@@ -184,26 +184,26 @@ Implemented foundation:
 
 Still required to complete M2:
 
-- An actual Telegram history/message-by-message processor after worker claim; that I/O and content persistence belong to M3. The current M2 task deliberately claims its lease but does not advance or complete it.
-
 - Live PostgreSQL concurrency verification for wake-up/execution claims, lease reclamation, stale-lease rejection, and contiguous range-watermark advancement.
 - A Redis-loss runtime recovery test proving that an unfinished durable-wakeup row causes re-enqueue after broker loss.
 
-### M3 - Telegram ingestion and media archive (Part 1: typed, idempotent normalization implemented)
+### M3 - Telegram ingestion and media archive (Parts 1-4: typed ingestion, local atomic storage, image normalization, and range-history orchestration implemented)
 
-Implemented in the first M3 checkpoint:
+Implemented M3 checkpoints:
 
 - Platform-neutral `TelegramMessage` DTOs now cross the Telegram application boundary; `TelegramGateway.fetch_history` returns this typed model rather than `Any`.
 - `MessageIngestService.ingest_history(...)` and `.ingest_update(...)` delegate to one common normalization and repository-upsert path. Telegram I/O remains outside the persistence transaction.
 - Normal messages retain source-channel + Telegram message-ID identity. Media groups normalize only by source-channel + Telegram `grouped_id`; their deterministic anchor is the smallest observed component ID and every actual component ID is retained.
 - `message_parts` stores source-channel/component-message membership. PostgreSQL constraints prevent duplicate component ownership, invalid IDs, and duplicate non-null source/group identities.
 - PostgreSQL upserts preserve known payload fields and add newly observed album component IDs on repeat history/update ingestion. Focused unit tests cover history/update idempotency, cross-source group isolation, album ordering, duplicate component rejection, schema constraints, and compiled PostgreSQL conflict SQL.
+- `LocalArchiveStorage` implements the `ArchiveStorage` port for a local Docker-volume-compatible root. It accepts only safe relative POSIX keys, writes temporary files with fsync, atomically publishes without replacement, makes same-byte replays idempotent, rejects different bytes at an immutable key, and never persists a host path as a business key.
+- `PillowImageProcessor` implements the `ImageProcessor` port: it applies EXIF orientation, preserves alpha when present, bounds dimensions, emits metadata-free WebP, computes SHA-256 values for both source and archive bytes, and calculates a deterministic 64-bit DCT pHash from normalized display pixels. `ImageArchiveService` keeps archive I/O outside any database transaction; asset metadata/READY persistence is deliberately still pending.
+- RangeExecutionHistoryIngestion performs claimed finite-window processing without a long transaction: it fetches the immutable Telegram interval, rejects foreign or out-of-window DTOs, invokes the idempotent MessageIngestService, then advances the execution watermark to its immutable right boundary and completes only after that update succeeds. WorkerRuntime calls it only when deployment composition injects a configured Telegram gateway; its no-adapter fallback leaves the lease open rather than falsely completing work.
 
 Still required for the remainder of M3:
 
-- Telethon history and Update adapters, short media-group aggregation-window buffering, and reconnect reconciliation based on a persisted `last_seen_message_id` cursor.
-- Wiring range-execution workers to fetch missing history, invoke `MessageIngestService`, record watermarks only after committed ingestion, and complete finite executions.
-- Source edits/deletions; local atomic archive storage; image normalization; video cover/representative frames; pHash extraction; and protected-content error handling.
+- Deployable Telethon identity/session plus history and Update adapters, short media-group aggregation-window buffering, and reconnect reconciliation based on a persisted `last_seen_message_id` cursor. The generic range-execution orchestration is done, but no Telethon gateway is composed into a deployed worker yet.
+- Source edits/deletions; archive-asset metadata and DB READY-state transitions; Telegram media download wiring; video cover/representative-frame extraction; and protected-content error handling.
 - Live PostgreSQL adapter verification for concurrent replay/upsert behavior. SQLite is not a substitute because the schema relies on PostgreSQL partial indexes and conflict semantics.
 
 ### M4 - Analysis engine
