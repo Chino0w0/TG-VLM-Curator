@@ -71,6 +71,7 @@ class RangeExecutionWorkerTests(unittest.TestCase):
                 to_at=TO_AT,
                 status=RangeExecutionStatus.RUNNING,
             ),
+            source_channel_id=str(uuid4()),
             source_profile_version_id=str(uuid4()),
             lease_token=lease_token,
         )

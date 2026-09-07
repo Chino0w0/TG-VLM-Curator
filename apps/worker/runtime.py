@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from tgcurator.application import Settings, get_settings
-from tgcurator.application.processing import RangeExecutionWorker
+from tgcurator.application.processing import RangeExecutionHistoryIngestion, RangeExecutionWorker
 from tgcurator.infrastructure.database import (
     AsyncDatabase,
     SqlAlchemyRangeExecutionWorkerRepository,
@@ -19,6 +19,7 @@ class WorkerRuntime:
 
     database: AsyncDatabase
     range_execution_worker: RangeExecutionWorker
+    range_execution_history_ingestion: RangeExecutionHistoryIngestion | None = None
 
     async def handle_range_execution(self, *, execution_id: str, now: datetime) -> bool:
         normalized_execution_id = _normalize_execution_id(execution_id)
@@ -26,10 +27,13 @@ class WorkerRuntime:
             execution_id=normalized_execution_id,
             now=now,
         )
-        # M3 owns Telegram history/media ingestion and records watermarks after each committed
-        # message. Until that processor exists, a successful lease intentionally remains open;
-        # durable_wakeup repair will re-enqueue it after the lease expires.
-        return claim is not None
+        if claim is None:
+            return False
+        if self.range_execution_history_ingestion is None:
+            # Deployment injects a Telegram gateway after its identity/session adapter exists.
+            # Leaving this lease open is safer than completing an unprocessed window.
+            return True
+        return await self.range_execution_history_ingestion.process(claim=claim, now=now)
 
     async def close(self) -> None:
         await self.database.dispose()
