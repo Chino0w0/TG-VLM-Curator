@@ -12,6 +12,9 @@ license = { text = "Proprietary" }
 authors = [{ name = "TG VLM Curator contributors" }]
 dependencies = []
 
+[project.scripts]
+tgcurator-bootstrap-admin = "apps.bootstrap_admin:main"
+
 [project.optional-dependencies]
 runtime = [
   "fastapi>=0.115",
@@ -33,7 +36,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["tgcurator"]
+packages = ["tgcurator", "apps"]
 
 [tool.ruff]
 target-version = "py312"
