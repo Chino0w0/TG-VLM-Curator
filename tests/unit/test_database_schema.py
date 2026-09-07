@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sqlalchemy import DateTime
+from sqlalchemy import BigInteger, DateTime
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, dialect
 from sqlalchemy.schema import CreateTable
 
@@ -21,13 +21,12 @@ M1_TABLES = {
     "processing_ranges",
     "messages",
 }
+M2_TABLES = {"range_executions", "durable_wakeups"}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_exactly_the_documented_m1_tables(self) -> None:
-        self.assertEqual(set(Base.metadata.tables), M1_TABLES)
-        self.assertNotIn("range_executions", Base.metadata.tables)
-        self.assertNotIn("durable_wakeups", Base.metadata.tables)
+    def test_schema_contains_exactly_the_documented_m1_and_m2_tables(self) -> None:
+        self.assertEqual(set(Base.metadata.tables), M1_TABLES | M2_TABLES)
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:
         constraints = {
@@ -44,8 +43,48 @@ class DatabaseSchemaTests(unittest.TestCase):
             "ck_processing_ranges_processing_range_watermark_nonnegative",
             "ck_processing_ranges_processing_range_active_high_positive",
             "ck_processing_ranges_processing_range_watermark_high_ceiling",
+            "ck_processing_ranges_processing_range_watermark_start_floor",
+            "ck_processing_ranges_processing_range_watermark_fixed_ceiling",
         }
         self.assertTrue(expected.issubset(constraints))
+
+    def test_range_execution_has_durable_state_constraints_and_indexes(self) -> None:
+        table = Base.metadata.tables["range_executions"]
+        constraints = {str(constraint.name) for constraint in table.constraints}
+        expected_constraints = {
+            "ck_range_executions_range_execution_status",
+            "ck_range_executions_range_execution_bounds",
+            "ck_range_executions_range_execution_watermark_bounds",
+            "ck_range_executions_range_execution_attempts",
+            "ck_range_executions_range_execution_completion",
+            "ck_range_executions_range_execution_lease",
+            "ck_range_executions_range_execution_retry_schedule",
+            "ck_range_executions_range_execution_failure_metadata",
+            "uq_range_execution_bounds",
+        }
+        self.assertTrue(expected_constraints.issubset(constraints))
+        indexes = {index.name: index for index in table.indexes}
+        self.assertIn("ix_range_executions_status_lease", indexes)
+        self.assertIn("ix_range_executions_retry_due", indexes)
+        one_active = indexes["uq_range_execution_one_active"]
+        self.assertTrue(one_active.unique)
+        self.assertIsNotNone(one_active.dialect_options["postgresql"]["where"])
+        self.assertIsInstance(table.c.from_message_id_exclusive.type, BigInteger)
+        self.assertIsInstance(table.c.to_message_id_inclusive.type, BigInteger)
+        self.assertIsInstance(table.c.watermark_message_id.type, BigInteger)
+
+    def test_durable_wakeup_has_lease_constraints_and_unique_signal(self) -> None:
+        table = Base.metadata.tables["durable_wakeups"]
+        constraints = {str(constraint.name) for constraint in table.constraints}
+        self.assertTrue(
+            {
+                "ck_durable_wakeups_durable_wakeup_status",
+                "ck_durable_wakeups_durable_wakeup_attempts",
+                "ck_durable_wakeups_durable_wakeup_lease",
+                "uq_durable_wakeup_queue_entity",
+            }.issubset(constraints)
+        )
+        self.assertIn("ix_durable_wakeups_due", {index.name for index in table.indexes})
 
     def test_admin_and_published_configuration_invariants_are_in_metadata(self) -> None:
         admin_indexes = {index.name: index for index in Base.metadata.tables["admin_users"].indexes}
@@ -91,6 +130,23 @@ class DatabaseSchemaTests(unittest.TestCase):
             "source_channels": ("last_activity_at", "created_at", "updated_at"),
             "source_channel_profile_versions": ("published_at", "created_at"),
             "processing_ranges": ("start_at", "end_at", "created_at", "updated_at"),
+            "range_executions": (
+                "next_retry_at",
+                "lease_expires_at",
+                "last_failure_at",
+                "started_at",
+                "completed_at",
+                "created_at",
+                "updated_at",
+            ),
+            "durable_wakeups": (
+                "next_attempt_at",
+                "lease_expires_at",
+                "last_dispatched_at",
+                "completed_at",
+                "created_at",
+                "updated_at",
+            ),
             "messages": ("published_at", "edited_at", "created_at", "updated_at"),
         }
         for table_name, column_names in timestamp_columns.items():
