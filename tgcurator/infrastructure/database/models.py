@@ -228,6 +228,10 @@ class MessageRecord(TimestampMixin, Base):
             unique=True,
             postgresql_where=text("telegram_group_id IS NOT NULL"),
         ),
+        CheckConstraint(
+            "source_edited_at IS NULL OR source_edited_at >= sent_at",
+            name="ck_message_source_edited_after_sent",
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -238,6 +242,9 @@ class MessageRecord(TimestampMixin, Base):
     telegram_group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     media_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     visual_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_deleted_at: Mapped[datetime | None] = mapped_column(
@@ -270,6 +277,62 @@ class MessagePartRecord(CreatedAtMixin, Base):
         ForeignKey("source_channels.id", ondelete="RESTRICT"), nullable=False
     )
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ImageAssetRecord(TimestampMixin, Base):
+    """One image asset awaiting or retaining normalized archive evidence."""
+
+    __tablename__ = "image_assets"
+    __table_args__ = (
+        UniqueConstraint("message_id", "source_asset_id", name="uq_image_asset_message_source"),
+        CheckConstraint(
+            "archive_state IN ('pending', 'ready', 'deleted', 'failed')",
+            name="ck_image_asset_archive_state",
+        ),
+        CheckConstraint(
+            "archive_state <> 'ready' OR (storage_backend IS NOT NULL AND storage_key IS NOT NULL "
+            "AND content_type IS NOT NULL AND width IS NOT NULL AND height IS NOT NULL "
+            "AND source_sha256 IS NOT NULL AND archive_sha256 IS NOT NULL AND "
+            "perceptual_hash IS NOT NULL "
+            "AND archive_size_bytes IS NOT NULL AND archive_ready_at IS NOT NULL)",
+            name="ck_image_asset_ready_metadata",
+        ),
+        CheckConstraint(
+            "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
+            name="ck_image_asset_deleted_timestamp",
+        ),
+        CheckConstraint("width IS NULL OR width > 0", name="ck_image_asset_width_positive"),
+        CheckConstraint("height IS NULL OR height > 0", name="ck_image_asset_height_positive"),
+        CheckConstraint(
+            "archive_size_bytes IS NULL OR archive_size_bytes > 0",
+            name="ck_image_asset_archive_size_positive",
+        ),
+        Index("ix_image_assets_archive_state", "archive_state"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    source_asset_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_phash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archive_state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    storage_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    archive_ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class RangeExecutionRecord(TimestampMixin, Base):
