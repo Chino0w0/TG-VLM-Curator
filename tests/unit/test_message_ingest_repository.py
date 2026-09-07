@@ -13,6 +13,7 @@ from tgcurator.domain.messages import (
     normalize_telegram_messages,
 )
 from tgcurator.infrastructure.database.message_ingest_repository import (
+    image_archive_wakeups_insert_statement,
     message_parts_upsert_statement,
     message_upsert_statement,
 )
@@ -64,6 +65,20 @@ class MessageIngestRepositoryStatementTests(unittest.TestCase):
         self.assertIn(
             "ON CONFLICT ON CONSTRAINT uq_message_part_source_telegram DO NOTHING", parts_sql
         )
+
+    def test_image_archive_wakeups_are_durable_uuid_only_signals(self) -> None:
+        statement = image_archive_wakeups_insert_statement(image_asset_ids=(uuid4(), uuid4()))
+        self.assertIsNotNone(statement)
+        assert statement is not None
+        compiled = statement.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": False}
+        )
+        sql = str(compiled)
+
+        self.assertIn("INSERT INTO durable_wakeups", sql)
+        self.assertIn("ON CONFLICT ON CONSTRAINT uq_durable_wakeup_queue_entity DO NOTHING", sql)
+        self.assertIn("image_archive", compiled.params.values())
+        self.assertIsNone(image_archive_wakeups_insert_statement(image_asset_ids=()))
 
 
 if __name__ == "__main__":

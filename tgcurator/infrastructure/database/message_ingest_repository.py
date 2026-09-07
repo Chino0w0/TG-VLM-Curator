@@ -5,10 +5,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.dialects import postgresql
 
+from tgcurator.application.media.archive_wakeups import IMAGE_ARCHIVE_QUEUE
 from tgcurator.domain.messages import MediaKind, NormalizedTelegramMessage
 from tgcurator.shared import DomainValidationError
 
-from .models import ImageAssetRecord, MessagePartRecord, MessageRecord
+from .models import DurableWakeup, ImageAssetRecord, MessagePartRecord, MessageRecord
 from .session import AsyncDatabase
 
 
@@ -82,6 +83,30 @@ def image_assets_upsert_statement(*, message_id: UUID, message: NormalizedTelegr
     )
 
 
+def image_archive_wakeups_insert_statement(*, image_asset_ids: tuple[UUID, ...]):
+    """Create reconstructable durable archive wake-ups for pending image assets."""
+
+    if not image_asset_ids:
+        return None
+    return (
+        postgresql.insert(DurableWakeup)
+        .values(
+            [
+                {
+                    "id": uuid4(),
+                    "queue": IMAGE_ARCHIVE_QUEUE,
+                    "entity_id": image_asset_id,
+                    "status": "pending",
+                    "next_attempt_at": func.now(),
+                    "dispatch_attempts": 0,
+                }
+                for image_asset_id in image_asset_ids
+            ]
+        )
+        .on_conflict_do_nothing(constraint="uq_durable_wakeup_queue_entity")
+    )
+
+
 def message_parts_upsert_statement(*, message_id: UUID, message: NormalizedTelegramMessage):
     """Insert only newly observed component IDs; replays preserve their original ownership."""
 
@@ -119,6 +144,26 @@ class SqlAlchemyTelegramMessageIngestRepository:
                 )
                 if image_assets_statement is not None:
                     await session.execute(image_assets_statement)
+                    image_asset_ids = tuple(
+                        await session.scalars(
+                            select(ImageAssetRecord.id).where(
+                                ImageAssetRecord.message_id == message_id,
+                                ImageAssetRecord.source_asset_id.in_(
+                                    tuple(
+                                        asset.asset_id
+                                        for asset in message.content.media
+                                        if asset.kind is MediaKind.IMAGE
+                                    )
+                                ),
+                                ImageAssetRecord.archive_state == "pending",
+                            )
+                        )
+                    )
+                    wakeups_statement = image_archive_wakeups_insert_statement(
+                        image_asset_ids=image_asset_ids
+                    )
+                    if wakeups_statement is not None:
+                        await session.execute(wakeups_statement)
                 await session.execute(
                     message_parts_upsert_statement(message_id=message_id, message=message)
                 )

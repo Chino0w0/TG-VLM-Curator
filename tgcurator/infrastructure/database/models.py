@@ -305,6 +305,16 @@ class ImageAssetRecord(TimestampMixin, Base):
             "source_telegram_message_id IS NULL OR source_telegram_message_id > 0",
             name="ck_image_asset_source_message_positive",
         ),
+        CheckConstraint(
+            "(archive_lease_token IS NULL AND archive_lease_expires_at IS NULL) OR "
+            "(archive_state = 'pending' AND archive_lease_token IS NOT NULL "
+            "AND archive_lease_expires_at IS NOT NULL)",
+            name="ck_image_asset_archive_lease",
+        ),
+        CheckConstraint(
+            "archive_state <> 'failed' OR archive_failure_reason IS NOT NULL",
+            name="ck_image_asset_failure_reason",
+        ),
         CheckConstraint("width IS NULL OR width > 0", name="ck_image_asset_width_positive"),
         CheckConstraint("height IS NULL OR height > 0", name="ck_image_asset_height_positive"),
         CheckConstraint(
@@ -312,6 +322,11 @@ class ImageAssetRecord(TimestampMixin, Base):
             name="ck_image_asset_archive_size_positive",
         ),
         Index("ix_image_assets_archive_state", "archive_state"),
+        Index(
+            "ix_image_assets_pending_archive_lease",
+            "archive_state",
+            "archive_lease_expires_at",
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -323,6 +338,10 @@ class ImageAssetRecord(TimestampMixin, Base):
     source_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     perceptual_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     archive_state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    archive_lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    archive_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     storage_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
