@@ -1,5 +1,8 @@
 from .admin_repository import SqlAlchemyAdminBootstrapRepository
-from .image_archive_repository import SqlAlchemyImageArchiveMetadataRepository
+from .image_archive_repository import (
+    SqlAlchemyImageArchiveMetadataRepository,
+    SqlAlchemyImageArchiveWorkRepository,
+)
 from .message_ingest_repository import SqlAlchemyTelegramMessageIngestRepository
 from .processing_repository import (
     SqlAlchemyDurableWakeupRepository,
@@ -18,6 +21,7 @@ __all__ = [
     "SqlAlchemyAdminBootstrapRepository",
     "SqlAlchemyDurableWakeupRepository",
     "SqlAlchemyImageArchiveMetadataRepository",
+    "SqlAlchemyImageArchiveWorkRepository",
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
     "SqlAlchemySecretVault",

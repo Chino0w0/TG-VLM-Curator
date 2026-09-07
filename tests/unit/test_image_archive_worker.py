@@ -35,6 +35,7 @@ class ImageArchiveWorkerTests(unittest.TestCase):
         self.assertEqual(len(repository.ready), 1)
         self.assertEqual(repository.failed, [])
         self.assertEqual(repository.released, [])
+        self.assertEqual(repository.completed_wakeups, [repository.asset_id])
 
     def test_marks_terminal_protected_and_unavailable_sources_without_archiving(self) -> None:
         for error, reason in (
@@ -55,6 +56,7 @@ class ImageArchiveWorkerTests(unittest.TestCase):
                 self.assertEqual(repository.failed, [reason])
                 self.assertEqual(repository.ready, [])
                 self.assertEqual(repository.released, [])
+                self.assertEqual(repository.completed_wakeups, [repository.asset_id])
 
     def test_releases_retryable_download_failure_and_reraises(self) -> None:
         repository = _Repository(_claim())
@@ -68,6 +70,7 @@ class ImageArchiveWorkerTests(unittest.TestCase):
             asyncio.run(worker.process(image_asset_id=repository.asset_id, now=NOW))
         self.assertEqual(repository.released, [repository.asset_id])
         self.assertEqual(repository.failed, [])
+        self.assertEqual(repository.completed_wakeups, [])
 
     def test_never_downloads_a_source_message_already_recorded_as_deleted(self) -> None:
         repository = _Repository(_claim(source_deleted_at=NOW))
@@ -77,6 +80,17 @@ class ImageArchiveWorkerTests(unittest.TestCase):
         self.assertTrue(asyncio.run(worker.process(image_asset_id=repository.asset_id, now=NOW)))
         self.assertEqual(downloader.requests, [])
         self.assertEqual(repository.failed, ["source_message_deleted"])
+        self.assertEqual(repository.completed_wakeups, [repository.asset_id])
+
+    def test_completes_an_existing_terminal_wakeup_when_an_asset_cannot_be_claimed(self) -> None:
+        repository = _Repository(_claim())
+        repository.claim_result = None
+        worker = _worker(
+            repository=repository, downloader=_Downloader(content=b"source"), storage=_Storage()
+        )
+
+        self.assertFalse(asyncio.run(worker.process(image_asset_id=repository.asset_id, now=NOW)))
+        self.assertEqual(repository.completed_wakeups, [repository.asset_id])
 
 
 class _Repository:
@@ -86,6 +100,7 @@ class _Repository:
         self.ready: list[ImageArchiveReadyMetadata] = []
         self.failed: list[str] = []
         self.released: list[str] = []
+        self.completed_wakeups: list[str] = []
 
     async def claim(self, **_: object) -> ClaimedImageArchive | None:
         return self.claim_result
@@ -102,6 +117,10 @@ class _Repository:
 
     async def release(self, *, claim: ClaimedImageArchive, now: datetime) -> bool:
         self.released.append(claim.work_item.image_asset_id)
+        return True
+
+    async def complete_wakeup_if_terminal(self, *, image_asset_id: str, now: datetime) -> bool:
+        self.completed_wakeups.append(image_asset_id)
         return True
 
 

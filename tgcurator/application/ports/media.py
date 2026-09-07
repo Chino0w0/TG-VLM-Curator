@@ -62,6 +62,16 @@ class ImageProcessor(Protocol):
         """Decode, orient, resize, normalize, and visually fingerprint one source image."""
 
 
+class VideoFrameExtractor(Protocol):
+    """Probe and decode bounded image frames from unarchived video bytes."""
+
+    async def probe_duration(self, *, content: bytes) -> float:
+        """Return a finite positive duration in seconds."""
+
+    async def extract_frame(self, *, content: bytes, timestamp_seconds: float) -> bytes:
+        """Decode one non-empty still-image frame at a non-negative timestamp."""
+
+
 @dataclass(frozen=True, slots=True)
 class ImageArchiveReadyMetadata:
     """Verified immutable archive facts to persist only after storage publication succeeds."""
@@ -247,3 +257,6 @@ class ImageArchiveWorkRepository(Protocol):
 
     async def release(self, *, claim: ClaimedImageArchive, now: datetime) -> bool:
         """Return a retryable failed claim to pending without storing raw exception details."""
+
+    async def complete_wakeup_if_terminal(self, *, image_asset_id: str, now: datetime) -> bool:
+        """Complete the durable image wake-up only if the image archive is terminal."""
