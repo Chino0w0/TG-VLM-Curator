@@ -192,6 +192,7 @@ class ImageArchiveMetadataRepositoryStatementTests(unittest.TestCase):
         self.assertIsNotNone(statement)
         sql = str(statement.compile(dialect=postgresql.dialect()))
         self.assertIn("INSERT INTO image_assets", sql)
+        self.assertIn("source_telegram_message_id", sql)
         self.assertIn("ON CONFLICT ON CONSTRAINT uq_image_asset_message_source", sql)
         self.assertIsNone(image_assets_upsert_statement(message_id=uuid4(), message=text_message))
 
@@ -200,7 +201,9 @@ class ImageArchiveMetadataRepositoryStatementTests(unittest.TestCase):
         constraints = {constraint.name for constraint in table.constraints}
 
         self.assertIn("perceptual_hash", table.c)
+        self.assertIn("source_telegram_message_id", table.c)
         self.assertIn("ck_image_asset_archive_state", constraints)
+        self.assertIn("ck_image_asset_source_message_positive", constraints)
         self.assertIn("ck_image_asset_ready_metadata", constraints)
         self.assertIn("ck_image_asset_deleted_timestamp", constraints)
         self.assertIn("uq_image_asset_message_source", constraints)
