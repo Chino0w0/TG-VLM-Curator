@@ -14,6 +14,7 @@ from tgcurator.application.media.images import (
     ImageArchiveService,
 )
 from tgcurator.application.ports.media import (
+    ClaimedImageArchive,
     ImageArchiveReadyMetadata,
     ImageArchiveWorkRepository,
     ImageNormalizationProfile,
@@ -57,11 +58,12 @@ class ImageArchiveWorker:
             lease_duration=self.lease_duration,
         )
         if claim is None:
+            await self.repository.complete_wakeup_if_terminal(
+                image_asset_id=image_asset_id, now=now
+            )
             return False
         if claim.work_item.source_deleted_at is not None:
-            return await self.repository.mark_failed(
-                claim=claim, reason="source_message_deleted", now=now
-            )
+            return await self._mark_failed(claim=claim, reason="source_message_deleted", now=now)
         try:
             content = await self.media_downloader.download(
                 request=TelegramMediaDownloadRequest(
@@ -71,13 +73,9 @@ class ImageArchiveWorker:
                 )
             )
         except TelegramProtectedContentError:
-            return await self.repository.mark_failed(
-                claim=claim, reason="protected_content", now=now
-            )
+            return await self._mark_failed(claim=claim, reason="protected_content", now=now)
         except TelegramMediaUnavailableError:
-            return await self.repository.mark_failed(
-                claim=claim, reason="media_unavailable", now=now
-            )
+            return await self._mark_failed(claim=claim, reason="media_unavailable", now=now)
         except Exception:
             await self.repository.release(claim=claim, now=now)
             raise
@@ -106,7 +104,17 @@ class ImageArchiveWorker:
         except Exception:
             await self.repository.release(claim=claim, now=now)
             raise
+        await self.repository.complete_wakeup_if_terminal(
+            image_asset_id=claim.work_item.image_asset_id, now=now
+        )
         return True
+
+    async def _mark_failed(self, *, claim: ClaimedImageArchive, reason: str, now: datetime) -> bool:
+        marked_failed = await self.repository.mark_failed(claim=claim, reason=reason, now=now)
+        await self.repository.complete_wakeup_if_terminal(
+            image_asset_id=claim.work_item.image_asset_id, now=now
+        )
+        return marked_failed
 
 
 def _require_uuid(value: str, *, field: str) -> None:

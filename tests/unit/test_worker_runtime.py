@@ -41,6 +41,16 @@ class FakeRangeExecutionHistoryIngestion:
         return self._result
 
 
+class FakeImageArchiveWorker:
+    def __init__(self, *, result: bool = True) -> None:
+        self._result = result
+        self.requests: list[tuple[str, datetime]] = []
+
+    async def process(self, *, image_asset_id: str, now: datetime) -> bool:
+        self.requests.append((image_asset_id, now))
+        return self._result
+
+
 class WorkerRuntimeTests(unittest.TestCase):
     def test_claims_one_normalized_execution_uuid_without_configured_history_processing(
         self,
@@ -99,6 +109,44 @@ class WorkerRuntimeTests(unittest.TestCase):
             asyncio.run(runtime.handle_range_execution(execution_id="not-a-uuid", now=NOW))
 
         self.assertEqual(worker.requests, [])
+
+    def test_processes_normalized_image_uuid_with_an_injected_archive_worker(self) -> None:
+        image_worker = FakeImageArchiveWorker(result=True)
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            image_archive_worker=image_worker,  # type: ignore[arg-type]
+        )
+        image_asset_id = str(uuid4()).upper()
+
+        processed = asyncio.run(
+            runtime.handle_image_archive(image_asset_id=image_asset_id, now=NOW)
+        )
+
+        self.assertTrue(processed)
+        self.assertEqual(image_worker.requests, [(image_asset_id.lower(), NOW)])
+
+    def test_unconfigured_image_archive_runtime_never_fakes_completion(self) -> None:
+        runtime = WorkerRuntime(
+            database=FakeDatabase(), range_execution_worker=FakeRangeExecutionWorker(claim=None)
+        )
+
+        processed = asyncio.run(runtime.handle_image_archive(image_asset_id=str(uuid4()), now=NOW))
+
+        self.assertFalse(processed)
+
+    def test_rejects_non_uuid_image_archive_payload_before_worker_call(self) -> None:
+        image_worker = FakeImageArchiveWorker()
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            image_archive_worker=image_worker,  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(DomainValidationError):
+            asyncio.run(runtime.handle_image_archive(image_asset_id="not-a-uuid", now=NOW))
+
+        self.assertEqual(image_worker.requests, [])
 
 
 def _claim() -> ClaimedRangeExecution:
