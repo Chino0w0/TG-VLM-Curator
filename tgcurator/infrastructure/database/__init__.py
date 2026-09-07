@@ -1,4 +1,5 @@
 from .admin_repository import SqlAlchemyAdminBootstrapRepository
+from .message_ingest_repository import SqlAlchemyTelegramMessageIngestRepository
 from .processing_repository import (
     SqlAlchemyDurableWakeupRepository,
     SqlAlchemyProcessingRangeScheduleRepository,
@@ -16,4 +17,5 @@ __all__ = [
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
     "SqlAlchemySecretVault",
+    "SqlAlchemyTelegramMessageIngestRepository",
 ]

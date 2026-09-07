@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Protocol
 
+from tgcurator.domain.messages import TelegramMessage
+
 
 class TaskDispatcher(Protocol):
     """Best-effort wake-up mechanism. It never determines business completion."""
@@ -32,7 +34,7 @@ class TelegramGateway(Protocol):
 
     async def fetch_history(
         self, *, source_channel_id: str, from_at: datetime, to_at: datetime
-    ) -> tuple[Any, ...]: ...
+    ) -> tuple[TelegramMessage, ...]: ...
 
     async def forward(
         self,

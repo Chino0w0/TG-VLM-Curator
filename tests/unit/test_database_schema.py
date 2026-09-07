@@ -7,7 +7,7 @@ from tgcurator.infrastructure.database.base import Base
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_required_m1_and_m2_tables(self) -> None:
+    def test_schema_contains_required_m1_m2_and_m3_tables(self) -> None:
         expected = {
             "admin_users",
             "encrypted_secrets",
@@ -53,6 +53,27 @@ class DatabaseSchemaTests(unittest.TestCase):
         self.assertIn("ck_durable_wakeup_lease", wakeup_constraints)
         wakeup_indexes = {index.name for index in Base.metadata.tables["durable_wakeups"].indexes}
         self.assertIn("ix_durable_wakeups_due", wakeup_indexes)
+
+    def test_normalized_telegram_message_membership_constraints_are_in_metadata(self) -> None:
+        message_constraints = {
+            constraint.name for constraint in Base.metadata.tables["messages"].constraints
+        }
+        self.assertIn("ck_message_anchor_positive", message_constraints)
+        self.assertIn("ck_message_group_positive", message_constraints)
+        self.assertIn("ck_message_media_count_nonnegative", message_constraints)
+        message_indexes = {index.name: index for index in Base.metadata.tables["messages"].indexes}
+        self.assertTrue(message_indexes["uq_messages_source_group"].unique)
+        self.assertIsNotNone(
+            message_indexes["uq_messages_source_group"].dialect_options["postgresql"]["where"]
+        )
+
+        part_constraints = {
+            constraint.name for constraint in Base.metadata.tables["message_parts"].constraints
+        }
+        self.assertIn("uq_message_part_source_telegram", part_constraints)
+        self.assertIn("ck_message_part_telegram_positive", part_constraints)
+        part_indexes = {index.name for index in Base.metadata.tables["message_parts"].indexes}
+        self.assertIn("ix_message_parts_message", part_indexes)
 
     def test_admin_and_published_configuration_invariants_are_in_metadata(self) -> None:
         admin_indexes = {index.name: index for index in Base.metadata.tables["admin_users"].indexes}
