@@ -13,7 +13,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | Module | Scope | Status |
 | --- | --- | --- |
 | M0 | Domain foundation and framework-neutral ports | Complete |
-| M1 | API, environment settings, security, and initial PostgreSQL schema | Pending |
+| M1 | API, environment settings, security, and initial PostgreSQL schema | Complete |
 | M2 | Durable ProcessingRange and RangeExecution scheduling | Pending |
 | M3 | Telegram ingestion and media archive workflows | Pending |
 | M4 | Versioned analysis engine and provider adapters | Pending; model not deployed |
@@ -63,9 +63,9 @@ Acceptance commands:
 
 M0 requires no network, PostgreSQL, Redis, Telegram identity/session, or inference model.
 
-## M1 - API and versioned configuration skeleton
+## M1 - API and versioned configuration skeleton (complete)
 
-M1 will add, as one module:
+M1 adds, as one module:
 
 - FastAPI liveness/readiness endpoints and environment settings;
 - JSON structured logging with recursive secret redaction;
@@ -75,8 +75,12 @@ M1 will add, as one module:
 - AES-256-GCM secret encryption with key identifiers and per-record random nonces;
 - database constraints for draft/published/retired configuration versions.
 
-M1 readiness will check PostgreSQL. Missing inference providers are a degraded business
+M1 readiness checks PostgreSQL. Missing inference providers are a degraded business
 capability, not a reason to make the Web API unavailable.
+
+Acceptance uses the same formatting, lint, pytest, unittest, compileall, and pip checks as M0,
+plus offline PostgreSQL Alembic upgrade and downgrade rendering. It requires no Redis,
+Telegram credentials, running PostgreSQL server, or inference model.
 
 ## M2 - Durable processing scheduling
 

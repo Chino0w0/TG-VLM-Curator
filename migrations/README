@@ -1,0 +1,11 @@
+M1 PostgreSQL migrations.
+
+Supply TGCURATOR_DATABASE_URL (or DATABASE_URL) using the
+postgresql+asyncpg driver, then run:
+
+    python -m alembic upgrade head
+
+Offline SQL can be inspected without a running server:
+
+    python -m alembic upgrade head --sql
+    python -m alembic downgrade 94c2d3062de4:base --sql
