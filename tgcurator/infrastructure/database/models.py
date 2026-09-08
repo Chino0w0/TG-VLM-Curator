@@ -336,6 +336,19 @@ class ProcessingRangeRecord(TimestampMixin, Base):
             "OR processing_watermark_message_id <= active_high_watermark_message_id",
             name="processing_range_watermark_high_ceiling",
         ),
+        CheckConstraint(
+            "processing_watermark_message_id IS NULL "
+            "OR resolved_start_message_id IS NULL "
+            "OR processing_watermark_message_id >= resolved_start_message_id - 1",
+            name="processing_range_watermark_start_floor",
+        ),
+        CheckConstraint(
+            "end_mode <> 'fixed' "
+            "OR processing_watermark_message_id IS NULL "
+            "OR resolved_fixed_end_message_id IS NULL "
+            "OR processing_watermark_message_id <= resolved_fixed_end_message_id",
+            name="processing_range_watermark_fixed_ceiling",
+        ),
         Index("ix_processing_ranges_source_status", "source_channel_id", "status"),
     )
 
@@ -364,6 +377,153 @@ class ProcessingRangeRecord(TimestampMixin, Base):
         default=True,
         server_default=text("true"),
     )
+
+
+class RangeExecutionRecord(TimestampMixin, Base):
+    __tablename__ = "range_executions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'retry_wait', 'completed', 'failed')",
+            name="range_execution_status",
+        ),
+        CheckConstraint(
+            "from_message_id_exclusive >= 0 "
+            "AND to_message_id_inclusive > from_message_id_exclusive",
+            name="range_execution_bounds",
+        ),
+        CheckConstraint(
+            "watermark_message_id >= from_message_id_exclusive "
+            "AND watermark_message_id <= to_message_id_inclusive",
+            name="range_execution_watermark_bounds",
+        ),
+        CheckConstraint(
+            "max_attempts > 0 AND attempt_count >= 0 AND attempt_count <= max_attempts",
+            name="range_execution_attempts",
+        ),
+        CheckConstraint(
+            "status <> 'completed' "
+            "OR (watermark_message_id = to_message_id_inclusive AND completed_at IS NOT NULL)",
+            name="range_execution_completion",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'running' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="range_execution_lease",
+        ),
+        CheckConstraint(
+            "(status = 'retry_wait' AND next_retry_at IS NOT NULL) "
+            "OR (status <> 'retry_wait' AND next_retry_at IS NULL)",
+            name="range_execution_retry_schedule",
+        ),
+        CheckConstraint(
+            "status NOT IN ('retry_wait', 'failed') "
+            "OR (last_error_code IS NOT NULL "
+            "AND last_error_type IS NOT NULL AND last_failure_at IS NOT NULL)",
+            name="range_execution_failure_metadata",
+        ),
+        UniqueConstraint(
+            "processing_range_id",
+            "from_message_id_exclusive",
+            "to_message_id_inclusive",
+            name="uq_range_execution_bounds",
+        ),
+        Index("ix_range_executions_status_lease", "status", "lease_expires_at"),
+        Index("ix_range_executions_retry_due", "status", "next_retry_at"),
+        Index(
+            "uq_range_execution_one_active",
+            "processing_range_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running', 'retry_wait')"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    processing_range_id: Mapped[UUID] = mapped_column(
+        ForeignKey("processing_ranges.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_profile_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "source_channel_profile_versions.id",
+            name="fk_range_executions_profile_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    from_message_id_exclusive: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    to_message_id_inclusive: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    watermark_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=5,
+        server_default=text("5"),
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DurableWakeupRecord(TimestampMixin, Base):
+    __tablename__ = "durable_wakeups"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'leased', 'completed', 'cancelled')",
+            name="durable_wakeup_status",
+        ),
+        CheckConstraint("dispatch_attempts >= 0", name="durable_wakeup_attempts"),
+        CheckConstraint(
+            "(status = 'leased' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'leased' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="durable_wakeup_lease",
+        ),
+        UniqueConstraint("queue", "entity_id", name="uq_durable_wakeup_queue_entity"),
+        Index("ix_durable_wakeups_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    queue: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dispatch_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MessageRecord(TimestampMixin, Base):

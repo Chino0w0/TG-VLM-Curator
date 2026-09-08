@@ -5,8 +5,8 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 ## Current implementation status
 
-**M0 - Domain foundation** and **M1 - API, security, and PostgreSQL foundation** are
-complete.
+**M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**, and
+**M2 - durable processing scheduling** are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -26,6 +26,22 @@ M1 adds:
   secret-type authenticated data;
 - database constraints and triggers that enforce draft, published, and retired source profile
   version rules.
+
+M2 adds:
+
+- immutable message-ID execution windows using (from_message_id_exclusive,
+  to_message_id_inclusive] bounds;
+- FIXED boundary scheduling and quiet-period stabilization for LATEST ranges through an
+  injected, provider-neutral latest-boundary source;
+- PostgreSQL-owned execution leases, bounded retries, monotonic watermarks, and terminal
+  failure metadata that excludes exception messages;
+- reconstructable durable_wakeups plus a JSON-only Celery dispatcher whose broker payload
+  contains only a RangeExecution UUID;
+- scheduler and worker composition roots that keep PostgreSQL as business truth.
+
+M3 will provide the Telegram boundary/ingestion adapter. Until then, M2 never invents a LATEST
+boundary and its worker entry point only claims a durable execution lease; it does not mark
+Telegram processing complete or fabricate business results.
 
 The VLM model is not deployed yet. The repository intentionally keeps only the
 InferenceProvider boundary and never fabricates successful inference. API readiness checks
@@ -52,6 +68,13 @@ Create a Python 3.12+ virtual environment and install runtime plus development d
 Configure PostgreSQL through an asyncpg URL:
 
     $env:TGCURATOR_DATABASE_URL = "postgresql+asyncpg://curator:secret@localhost:5432/tgcurator"
+
+Configure the Celery broker used only for reconstructable wake-up delivery:
+
+    $env:TGCURATOR_CELERY_BROKER_URL = "redis://localhost:6379/0"
+
+Redis/Celery is not business state. Clearing the broker does not remove pending work because
+durable_wakeups and range_executions remain in PostgreSQL.
 
 For environments that use encrypted secrets, inject one base64-encoded 32-byte master key
 either directly or through a host-mounted read-only file:
@@ -83,6 +106,7 @@ model:
     .venv\Scripts\python.exe -m ruff check .
     .venv\Scripts\python.exe -m pytest
     .venv\Scripts\python.exe -m unittest discover -s tests/unit -v
+    .venv\Scripts\python.exe -m unittest discover -s tests/integration -v
     .venv\Scripts\python.exe -m compileall -q apps tgcurator tests
     .venv\Scripts\python.exe -m pip check
     git diff --check
