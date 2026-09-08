@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-REVISION = "94c2d3062de4"
+M1_REVISION = "94c2d3062de4"
+M2_REVISION = "2f1c6d8e4a90"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -31,7 +32,7 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         )
 
     def test_upgrade_renders_complete_m1_postgresql_ddl_without_connecting(self) -> None:
-        result = self.run_alembic("upgrade", "head", "--sql")
+        result = self.run_alembic("upgrade", M1_REVISION, "--sql")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         for table_name in (
@@ -59,8 +60,44 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         self.assertIn("draft profile versions can only be published", result.stdout)
         self.assertNotIn("sqlite", result.stdout.lower())
 
-    def test_downgrade_renders_trigger_constraint_and_table_cleanup(self) -> None:
-        result = self.run_alembic("downgrade", f"{REVISION}:base", "--sql")
+    def test_upgrade_renders_complete_m2_postgresql_ddl_without_connecting(self) -> None:
+        result = self.run_alembic("upgrade", "head", "--sql")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CREATE TABLE range_executions", result.stdout)
+        self.assertIn("CREATE TABLE durable_wakeups", result.stdout)
+        self.assertIn("CREATE UNIQUE INDEX uq_range_execution_one_active", result.stdout)
+        self.assertIn(
+            "ck_processing_ranges_processing_range_watermark_start_floor",
+            result.stdout,
+        )
+        self.assertIn(
+            "ck_processing_ranges_processing_range_watermark_fixed_ceiling",
+            result.stdout,
+        )
+        self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_m2_downgrade_renders_execution_and_wakeup_cleanup(self) -> None:
+        result = self.run_alembic(
+            "downgrade",
+            f"{M2_REVISION}:{M1_REVISION}",
+            "--sql",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DROP TABLE durable_wakeups", result.stdout)
+        self.assertIn("DROP TABLE range_executions", result.stdout)
+        self.assertIn(
+            "DROP CONSTRAINT ck_processing_ranges_processing_range_watermark_fixed_ceiling",
+            result.stdout,
+        )
+        self.assertIn(
+            "DROP CONSTRAINT ck_processing_ranges_processing_range_watermark_start_floor",
+            result.stdout,
+        )
+
+    def test_m1_downgrade_renders_trigger_constraint_and_table_cleanup(self) -> None:
+        result = self.run_alembic("downgrade", f"{M1_REVISION}:base", "--sql")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("DROP TRIGGER trg_source_profile_version_immutable", result.stdout)
