@@ -5,8 +5,9 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 ## Current implementation status
 
-**M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**, and
-**M2 - durable processing scheduling** are complete.
+**M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
+**M2 - durable processing scheduling**, and **M3 - Telegram ingestion and media archive
+workflows** are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -39,9 +40,19 @@ M2 adds:
   contains only a RangeExecution UUID;
 - scheduler and worker composition roots that keep PostgreSQL as business truth.
 
-M3 will provide the Telegram boundary/ingestion adapter. Until then, M2 never invents a LATEST
-boundary and its worker entry point only claims a durable execution lease; it does not mark
-Telegram processing complete or fabricate business results.
+M3 adds:
+
+- canonical, idempotent Telegram history and realtime ingestion with bounded media-group
+  aggregation and reconnect reconciliation;
+- independent monotonic observation and ingestion cursors, plus source edit/delete lifecycle
+  handling;
+- protected-content-aware Telegram downloads and immutable local archive publication;
+- deterministic Pillow WebP image normalization with durable leased archive work;
+- bounded FFprobe/FFmpeg video sampling with atomic frame publication and durable retries;
+- PostgreSQL metadata, constraints, and wake-ups for image and video archive state.
+
+Archive task payloads contain only asset UUIDs, and an unconfigured archive runtime returns an
+explicit not-processed result rather than fabricating completion.
 
 The VLM model is not deployed yet. The repository intentionally keeps only the
 InferenceProvider boundary and never fabricates successful inference. API readiness checks

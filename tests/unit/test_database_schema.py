@@ -22,11 +22,12 @@ M1_TABLES = {
     "messages",
 }
 M2_TABLES = {"range_executions", "durable_wakeups"}
+M3_TABLES = {"message_parts", "image_assets", "video_assets", "video_frames"}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_exactly_the_documented_m1_and_m2_tables(self) -> None:
-        self.assertEqual(set(Base.metadata.tables), M1_TABLES | M2_TABLES)
+    def test_schema_contains_exactly_the_documented_m1_through_m3_tables(self) -> None:
+        self.assertEqual(set(Base.metadata.tables), M1_TABLES | M2_TABLES | M3_TABLES)
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:
         constraints = {
@@ -127,7 +128,11 @@ class DatabaseSchemaTests(unittest.TestCase):
     def test_business_timestamps_are_timezone_aware(self) -> None:
         timestamp_columns = {
             "telegram_identities": ("last_connected_at", "created_at", "updated_at"),
-            "source_channels": ("last_activity_at", "created_at", "updated_at"),
+            "source_channels": (
+                "last_activity_at",
+                "created_at",
+                "updated_at",
+            ),
             "source_channel_profile_versions": ("published_at", "created_at"),
             "processing_ranges": ("start_at", "end_at", "created_at", "updated_at"),
             "range_executions": (
@@ -147,7 +152,38 @@ class DatabaseSchemaTests(unittest.TestCase):
                 "created_at",
                 "updated_at",
             ),
-            "messages": ("published_at", "edited_at", "created_at", "updated_at"),
+            "messages": (
+                "published_at",
+                "edited_at",
+                "source_deleted_at",
+                "created_at",
+                "updated_at",
+            ),
+            "message_parts": (
+                "published_at",
+                "edited_at",
+                "created_at",
+                "updated_at",
+            ),
+            "image_assets": (
+                "archive_next_retry_at",
+                "archive_lease_expires_at",
+                "archive_last_failure_at",
+                "archive_ready_at",
+                "archive_deleted_at",
+                "created_at",
+                "updated_at",
+            ),
+            "video_assets": (
+                "archive_next_retry_at",
+                "archive_lease_expires_at",
+                "archive_last_failure_at",
+                "archive_ready_at",
+                "archive_deleted_at",
+                "created_at",
+                "updated_at",
+            ),
+            "video_frames": ("created_at", "updated_at"),
         }
         for table_name, column_names in timestamp_columns.items():
             table = Base.metadata.tables[table_name]

@@ -9,6 +9,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 M1_REVISION = "94c2d3062de4"
 M2_REVISION = "2f1c6d8e4a90"
+M3_REVISION = "b8e6c4f2a137"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -61,7 +62,7 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         self.assertNotIn("sqlite", result.stdout.lower())
 
     def test_upgrade_renders_complete_m2_postgresql_ddl_without_connecting(self) -> None:
-        result = self.run_alembic("upgrade", "head", "--sql")
+        result = self.run_alembic("upgrade", M2_REVISION, "--sql")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CREATE TABLE range_executions", result.stdout)
@@ -76,6 +77,36 @@ class AlembicOfflineSqlTests(unittest.TestCase):
             result.stdout,
         )
         self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_upgrade_renders_complete_m3_postgresql_ddl_without_connecting(self) -> None:
+        result = self.run_alembic("upgrade", "head", "--sql")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for table_name in ("message_parts", "image_assets", "video_assets", "video_frames"):
+            self.assertIn(f"CREATE TABLE {table_name}", result.stdout)
+        self.assertIn("ADD COLUMN last_seen_message_id BIGINT", result.stdout)
+        self.assertIn("ADD COLUMN source_changed_after_processing BOOLEAN", result.stdout)
+        self.assertIn("ADD COLUMN source_deleted BOOLEAN", result.stdout)
+        self.assertIn("CREATE UNIQUE INDEX uq_messages_source_regular", result.stdout)
+        self.assertIn("CREATE UNIQUE INDEX uq_messages_source_grouped", result.stdout)
+        self.assertIn("CREATE INDEX ix_image_assets_archive_due", result.stdout)
+        self.assertIn("CREATE INDEX ix_video_assets_archive_due", result.stdout)
+        self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_m3_downgrade_restores_the_m2_schema(self) -> None:
+        result = self.run_alembic(
+            "downgrade",
+            f"{M3_REVISION}:{M2_REVISION}",
+            "--sql",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for table_name in ("video_frames", "video_assets", "image_assets", "message_parts"):
+            self.assertIn(f"DROP TABLE {table_name}", result.stdout)
+        self.assertIn("DROP COLUMN source_changed_after_processing", result.stdout)
+        self.assertIn("DROP COLUMN source_deleted", result.stdout)
+        self.assertIn("DROP COLUMN last_seen_message_id", result.stdout)
+        self.assertIn("ADD CONSTRAINT uq_message_source_primary UNIQUE", result.stdout)
 
     def test_m2_downgrade_renders_execution_and_wakeup_cleanup(self) -> None:
         result = self.run_alembic(
