@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any, Protocol
+
+from tgcurator.application.ports.processing import LatestMessageBoundary
+from tgcurator.domain.messages import TelegramMessage
 
 
 class TaskDispatcher(Protocol):
@@ -28,11 +30,15 @@ class ArchiveStorage(Protocol):
 class TelegramGateway(Protocol):
     """Telegram integration boundary; adapters translate platform errors to application errors."""
 
-    async def newest_message_at(self, *, source_channel_id: str) -> datetime | None: ...
+    async def newest_message(self, *, source_channel_id: str) -> LatestMessageBoundary | None: ...
 
     async def fetch_history(
-        self, *, source_channel_id: str, from_at: datetime, to_at: datetime
-    ) -> tuple[Any, ...]: ...
+        self,
+        *,
+        source_channel_id: str,
+        from_message_id_exclusive: int,
+        to_message_id_inclusive: int,
+    ) -> tuple[TelegramMessage, ...]: ...
 
     async def forward(
         self,

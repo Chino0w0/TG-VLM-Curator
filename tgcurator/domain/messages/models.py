@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
+from typing import Any
 
 from tgcurator.shared import DomainValidationError
 
@@ -27,6 +28,7 @@ class MediaAsset:
     original_visual_phash: str | None = None
     video_cover_phash: str | None = None
     representative_frame_phashes: tuple[str, ...] = ()
+    source_telegram_message_id: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.asset_id, str) or not self.asset_id.strip():
@@ -47,6 +49,12 @@ class MediaAsset:
             raise DomainValidationError("only video assets may define video_cover_phash")
         if self.kind is not MediaKind.VIDEO and self.representative_frame_phashes:
             raise DomainValidationError("only video assets may define representative_frame_phashes")
+        if self.source_telegram_message_id is not None and (
+            not isinstance(self.source_telegram_message_id, int)
+            or isinstance(self.source_telegram_message_id, bool)
+            or self.source_telegram_message_id <= 0
+        ):
+            raise DomainValidationError("source_telegram_message_id must be a positive integer")
 
     @property
     def duplicate_identity_phash(self) -> str | None:
@@ -56,6 +64,52 @@ class MediaAsset:
         if self.kind is MediaKind.VIDEO:
             return self.video_cover_phash.lower() if self.video_cover_phash else None
         return None
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the stable JSON snapshot persisted with one Telegram message part."""
+
+        return {
+            "asset_id": self.asset_id,
+            "kind": self.kind.value,
+            "original_visual_phash": self.original_visual_phash,
+            "video_cover_phash": self.video_cover_phash,
+            "representative_frame_phashes": list(self.representative_frame_phashes),
+            "source_telegram_message_id": self.source_telegram_message_id,
+        }
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, Any]) -> MediaAsset:
+        """Reconstruct a media asset from a durable, version-independent JSON snapshot."""
+
+        if not isinstance(value, Mapping):
+            raise DomainValidationError("media asset snapshot must be a JSON object")
+        allowed = {
+            "asset_id",
+            "kind",
+            "original_visual_phash",
+            "video_cover_phash",
+            "representative_frame_phashes",
+            "source_telegram_message_id",
+        }
+        if set(value) != allowed:
+            raise DomainValidationError("media asset snapshot has missing or unknown fields")
+        phashes = value["representative_frame_phashes"]
+        if not isinstance(phashes, list) or any(not isinstance(item, str) for item in phashes):
+            raise DomainValidationError(
+                "representative_frame_phashes must be a JSON array of strings"
+            )
+        try:
+            kind = MediaKind(value["kind"])
+        except (TypeError, ValueError) as error:
+            raise DomainValidationError("media asset snapshot has an invalid kind") from error
+        return cls(
+            asset_id=value["asset_id"],
+            kind=kind,
+            original_visual_phash=value["original_visual_phash"],
+            video_cover_phash=value["video_cover_phash"],
+            representative_frame_phashes=tuple(phashes),
+            source_telegram_message_id=value["source_telegram_message_id"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +132,23 @@ class MessageContent:
     @property
     def visual_fingerprint(self) -> str | None:
         return message_visual_fingerprint(self.media)
+
+
+def media_assets_to_json(assets: Iterable[MediaAsset]) -> list[dict[str, Any]]:
+    """Serialize media snapshots in caller order for deterministic PostgreSQL JSONB storage."""
+
+    values = tuple(assets)
+    if any(not isinstance(asset, MediaAsset) for asset in values):
+        raise DomainValidationError("media snapshots must contain MediaAsset values")
+    return [asset.to_json() for asset in values]
+
+
+def media_assets_from_json(values: object) -> tuple[MediaAsset, ...]:
+    """Deserialize a complete media snapshot without accepting ambiguous legacy shapes."""
+
+    if not isinstance(values, list):
+        raise DomainValidationError("media snapshot must be a JSON array")
+    return tuple(MediaAsset.from_json(value) for value in values)
 
 
 def message_visual_fingerprint(assets: Iterable[MediaAsset]) -> str | None:

@@ -4,9 +4,18 @@ import asyncio
 
 from celery import Celery
 
-from apps.worker.runtime import run_range_execution_task
+from apps.worker.runtime import (
+    run_image_archive_task,
+    run_range_execution_task,
+    run_video_archive_task,
+)
 from tgcurator.application import get_settings
-from tgcurator.infrastructure.queue import RANGE_EXECUTION_TASK_NAME, create_celery_client
+from tgcurator.infrastructure.queue import (
+    IMAGE_ARCHIVE_TASK_NAME,
+    RANGE_EXECUTION_TASK_NAME,
+    VIDEO_ARCHIVE_TASK_NAME,
+    create_celery_client,
+)
 
 
 def create_worker_celery_app() -> Celery:
@@ -28,3 +37,17 @@ def process_range_execution(execution_id: str) -> None:
     """Celery transport entry point; payload is only the RangeExecution UUID."""
 
     asyncio.run(run_range_execution_task(execution_id))
+
+
+@celery_app.task(name=IMAGE_ARCHIVE_TASK_NAME, ignore_result=True)
+def process_image_archive(image_asset_id: str) -> None:
+    """Celery transport entry point; payload is only the durable ImageAsset UUID."""
+
+    asyncio.run(run_image_archive_task(image_asset_id))
+
+
+@celery_app.task(name=VIDEO_ARCHIVE_TASK_NAME, ignore_result=True)
+def process_video_archive(video_asset_id: str) -> None:
+    """Celery transport entry point; payload is only the durable VideoAsset UUID."""
+
+    asyncio.run(run_video_archive_task(video_asset_id))

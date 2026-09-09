@@ -45,6 +45,7 @@ class ClaimedWakeup:
 class ClaimedRangeExecution:
     execution_id: str
     processing_range_id: str
+    source_channel_id: str
     source_profile_version_id: str
     from_message_id_exclusive: int
     to_message_id_inclusive: int

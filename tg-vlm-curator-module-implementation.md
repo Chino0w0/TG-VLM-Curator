@@ -1,6 +1,6 @@
 # TG-VLM-Curator module implementation plan
 
-Status date: 2026-09-07
+Status date: 2026-09-09
 
 Source specification: `tg-vlm-curator-architecture.md`.
 
@@ -15,7 +15,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M0 | Domain foundation and framework-neutral ports | Complete |
 | M1 | API, environment settings, security, and initial PostgreSQL schema | Complete |
 | M2 | Durable ProcessingRange and RangeExecution scheduling | Complete |
-| M3 | Telegram ingestion and media archive workflows | Pending |
+| M3 | Telegram ingestion and media archive workflows | Complete |
 | M4 | Versioned analysis engine and provider adapters | Pending; model not deployed |
 | M5 | Human review and routing workflows | Pending |
 | M6 | Publication and operations | Pending |
@@ -97,8 +97,8 @@ M2 adds, as one module:
 - one active execution per ProcessingRange, short compare-by-token leases, bounded retry state,
   safe error codes/types, and monotonic execution/range watermarks;
 - at-least-once Celery/Redis wake-up delivery containing only the immutable execution UUID;
-- scheduler and worker composition roots. M3 will attach Telegram ingestion to a claimed
-  execution, so M2 does not fabricate ingestion completion while that adapter is unavailable.
+- scheduler and worker composition roots designed for M3 to attach Telegram ingestion to a
+  claimed execution without fabricating business completion.
 
 PostgreSQL is the source of business truth. durable_wakeups are repairable broker signals,
 and Redis loss cannot delete RangeExecution state. FIXED windows never use quiet-period logic;
@@ -110,11 +110,20 @@ partial unique execution protection, wake-up repair, lease expiry, retries, term
 and monotonic completion. No running PostgreSQL, Redis, Telegram session, or inference model is
 required for the acceptance suite.
 
-## M3 - Telegram ingestion and archive workflows
+## M3 - Telegram ingestion and archive workflows (complete)
 
-M3 will add idempotent history/update ingestion, reconnect reconciliation, media-group
-normalization, protected-content-respecting downloads, atomic archive publication, image
-normalization, and durable image/video archive workers.
+M3 adds idempotent history/update ingestion through canonical Telegram DTOs, reconnect
+reconciliation with independent monotonic cursors, bounded media-group normalization, and source
+message edit/delete lifecycle handling. Image and video assets use protected-content-respecting
+Telegram downloads, atomic archive publication, short PostgreSQL leases, bounded retries, and
+terminal failure states. Pillow normalizes images to deterministic WebP artifacts; FFprobe and
+FFmpeg produce bounded video metadata and representative WebP frames without shell execution.
+Durable wake-ups contain only asset UUIDs, and unconfigured media runtimes never fabricate
+completion.
+
+Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline
+Alembic checks. Repository, worker, adapter, normalization, lifecycle, storage, and sampling tests
+require no running PostgreSQL, Redis, Telegram session, FFmpeg installation, or inference model.
 
 ## M4 - Analysis engine
 
