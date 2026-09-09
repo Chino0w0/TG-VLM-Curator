@@ -1,5 +1,25 @@
 from .admin import AdminBootstrapRepository, PasswordHasher
 from .contracts import ArchiveStorage, InferenceProvider, TaskDispatcher, TelegramGateway
+from .ingestion import IngestReport, TelegramMessageIngestRepository
+from .media import (
+    ClaimedImageArchive,
+    ClaimedVideoArchive,
+    ImageArchiveMetadataRepository,
+    ImageArchiveReadyMetadata,
+    ImageArchiveWorkItem,
+    ImageArchiveWorkRepository,
+    ImageNormalizationProfile,
+    ImageProcessor,
+    NormalizedImageArtifact,
+    TelegramMediaDownloader,
+    TelegramMediaDownloadRequest,
+    VideoArchiveReadyMetadata,
+    VideoArchiveWorkItem,
+    VideoArchiveWorkRepository,
+    VideoFrameReadyMetadata,
+    VideoMetadataProbe,
+    VideoProbeMetadata,
+)
 from .processing import (
     ClaimedRangeExecution,
     ClaimedWakeup,
@@ -11,17 +31,38 @@ from .processing import (
     RangeExecutionWorkerRepository,
     ScheduledProcessingRange,
 )
+from .reconciliation import SourceReconciliationCursorRepository
 from .secrets import SecretStatus, SecretVault
+from .source_lifecycle import SourceMessageLifecycleRepository
 
 __all__ = [
     "AdminBootstrapRepository",
     "ArchiveStorage",
+    "ClaimedImageArchive",
+    "ClaimedVideoArchive",
     "ClaimedRangeExecution",
     "ClaimedWakeup",
     "DurableWakeupRepository",
+    "ImageArchiveMetadataRepository",
+    "ImageArchiveReadyMetadata",
+    "ImageArchiveWorkItem",
+    "ImageArchiveWorkRepository",
+    "ImageNormalizationProfile",
+    "ImageProcessor",
+    "IngestReport",
     "LatestBoundarySource",
     "LatestMessageBoundary",
+    "NormalizedImageArtifact",
     "PendingRangeExecution",
+    "TelegramMediaDownloader",
+    "TelegramMediaDownloadRequest",
+    "TelegramMessageIngestRepository",
+    "VideoArchiveReadyMetadata",
+    "VideoArchiveWorkItem",
+    "VideoArchiveWorkRepository",
+    "VideoFrameReadyMetadata",
+    "VideoMetadataProbe",
+    "VideoProbeMetadata",
     "ProcessingRangeScheduleRepository",
     "RangeExecutionWorkerRepository",
     "ScheduledProcessingRange",
@@ -29,6 +70,8 @@ __all__ = [
     "PasswordHasher",
     "SecretStatus",
     "SecretVault",
+    "SourceMessageLifecycleRepository",
+    "SourceReconciliationCursorRepository",
     "TaskDispatcher",
     "TelegramGateway",
 ]

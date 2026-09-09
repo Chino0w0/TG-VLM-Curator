@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -149,6 +150,10 @@ class SourceChannel(TimestampMixin, Base):
             "latest_seen_message_id IS NULL OR latest_seen_message_id > 0",
             name="source_channel_latest_message_positive",
         ),
+        CheckConstraint(
+            "last_seen_message_id IS NULL OR last_seen_message_id > 0",
+            name="source_channel_last_seen_positive",
+        ),
         UniqueConstraint("telegram_peer_id", name="uq_source_channel_peer"),
     )
 
@@ -180,6 +185,7 @@ class SourceChannel(TimestampMixin, Base):
         nullable=True,
     )
     latest_seen_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_seen_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class DestinationChannel(TimestampMixin, Base):
@@ -527,13 +533,10 @@ class DurableWakeupRecord(TimestampMixin, Base):
 
 
 class MessageRecord(TimestampMixin, Base):
+    """One logical Telegram message; native media groups retain all component IDs."""
+
     __tablename__ = "messages"
     __table_args__ = (
-        UniqueConstraint(
-            "source_channel_id",
-            "primary_telegram_message_id",
-            name="uq_message_source_primary",
-        ),
         CheckConstraint(
             "cardinality(telegram_message_ids) > 0",
             name="message_parts_not_empty",
@@ -541,6 +544,18 @@ class MessageRecord(TimestampMixin, Base):
         CheckConstraint(
             "primary_telegram_message_id = ANY(telegram_message_ids)",
             name="message_primary_in_parts",
+        ),
+        CheckConstraint(
+            "primary_telegram_message_id > 0",
+            name="message_primary_positive",
+        ),
+        CheckConstraint(
+            "telegram_grouped_id IS NULL OR telegram_grouped_id > 0",
+            name="message_grouped_positive",
+        ),
+        CheckConstraint(
+            "edited_at IS NULL OR edited_at >= published_at",
+            name="message_edited_after_published",
         ),
         CheckConstraint("media_count >= 0", name="message_media_count_nonnegative"),
         CheckConstraint(
@@ -553,7 +568,30 @@ class MessageRecord(TimestampMixin, Base):
             "AND visual_fingerprint !~ '[^0-9a-f]')",
             name="message_visual_fingerprint_format",
         ),
+        CheckConstraint(
+            "(source_deleted IS FALSE AND source_deleted_at IS NULL) OR "
+            "(source_deleted IS TRUE AND source_deleted_at IS NOT NULL)",
+            name="message_source_deleted_state",
+        ),
+        CheckConstraint(
+            "source_deleted_at IS NULL OR source_deleted_at >= published_at",
+            name="message_source_deleted_after_published",
+        ),
         Index("ix_messages_source_published_at", "source_channel_id", "published_at"),
+        Index(
+            "uq_messages_source_regular",
+            "source_channel_id",
+            "primary_telegram_message_id",
+            unique=True,
+            postgresql_where=text("telegram_grouped_id IS NULL"),
+        ),
+        Index(
+            "uq_messages_source_grouped",
+            "source_channel_id",
+            "telegram_grouped_id",
+            unique=True,
+            postgresql_where=text("telegram_grouped_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -586,3 +624,326 @@ class MessageRecord(TimestampMixin, Base):
         server_default=text("0"),
     )
     visual_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_changed_after_processing: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    source_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    source_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MessagePartRecord(TimestampMixin, Base):
+    """A rich, independently editable Telegram component snapshot."""
+
+    __tablename__ = "message_parts"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_channel_id",
+            "telegram_message_id",
+            name="uq_message_part_source_telegram",
+        ),
+        CheckConstraint(
+            "telegram_message_id > 0",
+            name="message_part_telegram_message_positive",
+        ),
+        CheckConstraint(
+            "edited_at IS NULL OR edited_at >= published_at",
+            name="message_part_edited_after_published",
+        ),
+        CheckConstraint("media_count >= 0", name="message_part_media_count_nonnegative"),
+        CheckConstraint(
+            "jsonb_typeof(media) = 'array' AND jsonb_array_length(media) = media_count",
+            name="message_part_media_snapshot_count",
+        ),
+        Index("ix_message_parts_message", "message_id"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    source_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    original_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telegram_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    media: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    media_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+
+class ImageAssetRecord(TimestampMixin, Base):
+    """One source image with bounded durable archive attempts and immutable READY facts."""
+
+    __tablename__ = "image_assets"
+    __table_args__ = (
+        UniqueConstraint("message_id", "source_asset_id", name="uq_image_asset_message_source"),
+        CheckConstraint(
+            "archive_state IN ('pending', 'processing', 'retry_wait', 'ready', "
+            "'deleted', 'failed')",
+            name="image_asset_archive_state",
+        ),
+        CheckConstraint(
+            "source_telegram_message_id IS NULL OR source_telegram_message_id > 0",
+            name="image_asset_source_message_positive",
+        ),
+        CheckConstraint(
+            "archive_attempt_count >= 0 AND archive_attempt_count <= archive_max_attempts "
+            "AND archive_max_attempts > 0",
+            name="image_asset_archive_attempts",
+        ),
+        CheckConstraint(
+            "(archive_state = 'processing' AND archive_lease_token IS NOT NULL "
+            "AND archive_lease_expires_at IS NOT NULL AND archive_attempt_count > 0) OR "
+            "(archive_state <> 'processing' AND archive_lease_token IS NULL "
+            "AND archive_lease_expires_at IS NULL)",
+            name="image_asset_archive_lease",
+        ),
+        CheckConstraint(
+            "(archive_state = 'retry_wait' AND archive_next_retry_at IS NOT NULL) OR "
+            "(archive_state <> 'retry_wait' AND archive_next_retry_at IS NULL)",
+            name="image_asset_archive_retry_schedule",
+        ),
+        CheckConstraint(
+            "archive_state NOT IN ('retry_wait', 'failed') OR "
+            "(archive_last_error_code IS NOT NULL AND archive_last_error_type IS NOT NULL "
+            "AND archive_last_failure_at IS NOT NULL)",
+            name="image_asset_archive_failure_metadata",
+        ),
+        CheckConstraint(
+            "archive_state <> 'ready' OR (storage_backend IS NOT NULL AND storage_key IS NOT NULL "
+            "AND content_type IS NOT NULL AND width IS NOT NULL AND height IS NOT NULL "
+            "AND source_sha256 IS NOT NULL AND archive_sha256 IS NOT NULL "
+            "AND perceptual_hash IS NOT NULL AND archive_size_bytes IS NOT NULL "
+            "AND archive_ready_at IS NOT NULL)",
+            name="image_asset_ready_metadata",
+        ),
+        CheckConstraint(
+            "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
+            name="image_asset_deleted_timestamp",
+        ),
+        CheckConstraint("width IS NULL OR width > 0", name="image_asset_width_positive"),
+        CheckConstraint("height IS NULL OR height > 0", name="image_asset_height_positive"),
+        CheckConstraint(
+            "archive_size_bytes IS NULL OR archive_size_bytes > 0",
+            name="image_asset_archive_size_positive",
+        ),
+        Index("ix_image_assets_archive_state", "archive_state"),
+        Index("ix_image_assets_archive_due", "archive_state", "archive_next_retry_at"),
+        Index("ix_image_assets_archive_lease", "archive_state", "archive_lease_expires_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    source_asset_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_phash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archive_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    archive_attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    archive_max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default=text("5")
+    )
+    archive_next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    archive_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archive_last_failure_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    storage_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    archive_ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class VideoAssetRecord(TimestampMixin, Base):
+    """One source video whose durable visual evidence is stored in video_frames."""
+
+    __tablename__ = "video_assets"
+    __table_args__ = (
+        UniqueConstraint("message_id", "source_asset_id", name="uq_video_asset_message_source"),
+        CheckConstraint(
+            "archive_state IN ('pending', 'processing', 'retry_wait', 'ready', "
+            "'deleted', 'failed')",
+            name="video_asset_archive_state",
+        ),
+        CheckConstraint(
+            "source_telegram_message_id IS NULL OR source_telegram_message_id > 0",
+            name="video_asset_source_message_positive",
+        ),
+        CheckConstraint(
+            "archive_attempt_count >= 0 AND archive_attempt_count <= archive_max_attempts "
+            "AND archive_max_attempts > 0",
+            name="video_asset_archive_attempts",
+        ),
+        CheckConstraint(
+            "(archive_state = 'processing' AND archive_lease_token IS NOT NULL "
+            "AND archive_lease_expires_at IS NOT NULL AND archive_attempt_count > 0) OR "
+            "(archive_state <> 'processing' AND archive_lease_token IS NULL "
+            "AND archive_lease_expires_at IS NULL)",
+            name="video_asset_archive_lease",
+        ),
+        CheckConstraint(
+            "(archive_state = 'retry_wait' AND archive_next_retry_at IS NOT NULL) OR "
+            "(archive_state <> 'retry_wait' AND archive_next_retry_at IS NULL)",
+            name="video_asset_archive_retry_schedule",
+        ),
+        CheckConstraint(
+            "archive_state NOT IN ('retry_wait', 'failed') OR "
+            "(archive_last_error_code IS NOT NULL AND archive_last_error_type IS NOT NULL "
+            "AND archive_last_failure_at IS NOT NULL)",
+            name="video_asset_archive_failure_metadata",
+        ),
+        CheckConstraint(
+            "archive_state <> 'ready' OR (duration_seconds IS NOT NULL "
+            "AND source_sha256 IS NOT NULL AND archive_ready_at IS NOT NULL)",
+            name="video_asset_ready_metadata",
+        ),
+        CheckConstraint(
+            "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
+            name="video_asset_deleted_timestamp",
+        ),
+        CheckConstraint(
+            "duration_seconds IS NULL OR duration_seconds > 0",
+            name="video_asset_duration_positive",
+        ),
+        CheckConstraint(
+            "source_size_bytes IS NULL OR source_size_bytes > 0",
+            name="video_asset_source_size_positive",
+        ),
+        Index("ix_video_assets_archive_state", "archive_state"),
+        Index("ix_video_assets_archive_due", "archive_state", "archive_next_retry_at"),
+        Index("ix_video_assets_archive_lease", "archive_state", "archive_lease_expires_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    source_asset_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_cover_phash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archive_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    archive_attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    archive_max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default=text("5")
+    )
+    archive_next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    archive_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archive_last_failure_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    archive_ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class VideoFrameRecord(TimestampMixin, Base):
+    """A long-lived normalized cover or representative frame for one video."""
+
+    __tablename__ = "video_frames"
+    __table_args__ = (
+        UniqueConstraint(
+            "video_asset_id", "frame_role", "frame_index", name="uq_video_frame_role_index"
+        ),
+        UniqueConstraint("storage_backend", "storage_key", name="uq_video_frame_storage_key"),
+        CheckConstraint(
+            "frame_role IN ('cover', 'representative')",
+            name="video_frame_role",
+        ),
+        CheckConstraint(
+            "frame_index >= 0 AND (frame_role <> 'cover' OR frame_index = 0)",
+            name="video_frame_index",
+        ),
+        CheckConstraint("timestamp_seconds >= 0", name="video_frame_timestamp_nonnegative"),
+        CheckConstraint("content_type = 'image/webp'", name="video_frame_content_type"),
+        CheckConstraint("width > 0", name="video_frame_width_positive"),
+        CheckConstraint("height > 0", name="video_frame_height_positive"),
+        CheckConstraint("archive_size_bytes > 0", name="video_frame_archive_size_positive"),
+        Index("ix_video_frames_video", "video_asset_id", "frame_role", "frame_index"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    video_asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("video_assets.id", ondelete="CASCADE"), nullable=False
+    )
+    frame_role: Mapped[str] = mapped_column(String(24), nullable=False)
+    frame_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    timestamp_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    storage_backend: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    perceptual_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    archive_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)

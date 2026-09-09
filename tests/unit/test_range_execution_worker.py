@@ -73,6 +73,7 @@ class RangeExecutionWorkerTests(unittest.TestCase):
         claim = ClaimedRangeExecution(
             execution_id=execution_id,
             processing_range_id=str(uuid4()),
+            source_channel_id=str(uuid4()),
             source_profile_version_id=str(uuid4()),
             from_message_id_exclusive=99,
             to_message_id_inclusive=125,

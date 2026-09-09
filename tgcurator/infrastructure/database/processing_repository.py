@@ -46,7 +46,11 @@ def due_wakeup_claim_statement(*, now: datetime, limit: int):
 
 def range_execution_claim_statement(*, execution_id: UUID):
     return (
-        select(RangeExecutionRecord)
+        select(RangeExecutionRecord, ProcessingRangeRecord.source_channel_id)
+        .join(
+            ProcessingRangeRecord,
+            ProcessingRangeRecord.id == RangeExecutionRecord.processing_range_id,
+        )
         .where(RangeExecutionRecord.id == execution_id)
         .with_for_update(skip_locked=True)
     )
@@ -338,8 +342,14 @@ class SqlAlchemyRangeExecutionWorkerRepository:
         entity_id = UUID(execution_id)
         async with self._database.session() as session:
             async with session.begin():
-                row = await session.scalar(range_execution_claim_statement(execution_id=entity_id))
-                if row is None or row.status in {"completed", "failed"}:
+                result = await session.execute(
+                    range_execution_claim_statement(execution_id=entity_id)
+                )
+                claimed_row = result.one_or_none()
+                if claimed_row is None:
+                    return None
+                row, source_channel_id = claimed_row
+                if row.status in {"completed", "failed"}:
                     return None
                 eligible = (
                     row.status == "pending"
@@ -368,7 +378,11 @@ class SqlAlchemyRangeExecutionWorkerRepository:
                 row.lease_expires_at = now + lease_duration
                 row.started_at = row.started_at or now
                 row.updated_at = now
-                return self._claimed(row=row, lease_token=lease_token)
+                return self._claimed(
+                    row=row,
+                    source_channel_id=source_channel_id,
+                    lease_token=lease_token,
+                )
 
     async def advance_watermark(
         self,
@@ -581,10 +595,11 @@ class SqlAlchemyRangeExecutionWorkerRepository:
         await self._set_wakeup_terminal(session=session, entity_id=row.id, now=now)
 
     @staticmethod
-    def _claimed(*, row, lease_token: UUID) -> ClaimedRangeExecution:
+    def _claimed(*, row, source_channel_id: UUID, lease_token: UUID) -> ClaimedRangeExecution:
         return ClaimedRangeExecution(
             execution_id=str(row.id),
             processing_range_id=str(row.processing_range_id),
+            source_channel_id=str(source_channel_id),
             source_profile_version_id=str(row.source_profile_version_id),
             from_message_id_exclusive=row.from_message_id_exclusive,
             to_message_id_inclusive=row.to_message_id_inclusive,
