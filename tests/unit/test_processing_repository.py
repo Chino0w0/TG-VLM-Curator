@@ -314,7 +314,7 @@ class RangeExecutionWorkerRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_claim_pending_execution_creates_short_lived_lease(self) -> None:
         item = processing_range(status="active", active_high=125)
         row = execution_row(processing_range_id=item.id)
-        session = FakeSession(scalar_results=[row])
+        session = FakeSession(execute_results=[FakeResult((row, item.source_channel_id))])
         repository = SqlAlchemyRangeExecutionWorkerRepository(
             FakeDatabase(session)  # type: ignore[arg-type]
         )
@@ -516,7 +516,10 @@ class RangeExecutionWorkerRepositoryTests(unittest.IsolatedAsyncioTestCase):
             lease_token=uuid4(),
             lease_expires_at=NOW - timedelta(seconds=1),
         )
-        session = FakeSession(scalar_results=[row, item])
+        session = FakeSession(
+            scalar_results=[item],
+            execute_results=[FakeResult((row, item.source_channel_id))],
+        )
         repository = SqlAlchemyRangeExecutionWorkerRepository(
             FakeDatabase(session)  # type: ignore[arg-type]
         )
