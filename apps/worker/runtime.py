@@ -5,10 +5,12 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from tgcurator.application import Settings, get_settings
+from tgcurator.application.analysis import AnalysisOrchestrator, AnalysisStageRunWorker
 from tgcurator.application.media import ImageArchiveWorker, VideoArchiveWorker
 from tgcurator.application.processing import RangeExecutionHistoryIngestion, RangeExecutionWorker
 from tgcurator.infrastructure.database import (
     AsyncDatabase,
+    SqlAlchemyAnalysisStageRunRepository,
     SqlAlchemyRangeExecutionWorkerRepository,
 )
 from tgcurator.shared import DomainValidationError
@@ -23,6 +25,7 @@ class WorkerRuntime:
     range_execution_history_ingestion: RangeExecutionHistoryIngestion | None = None
     image_archive_worker: ImageArchiveWorker | None = None
     video_archive_worker: VideoArchiveWorker | None = None
+    analysis_stage_run_worker: AnalysisStageRunWorker | None = None
 
     async def handle_range_execution(self, *, execution_id: str, now: datetime) -> bool:
         normalized_execution_id = _normalize_execution_id(execution_id)
@@ -58,6 +61,15 @@ class WorkerRuntime:
             now=now,
         )
 
+    async def handle_analysis_stage_run(self, *, stage_run_id: str, now: datetime) -> bool:
+        normalized_stage_run_id = _normalize_uuid(stage_run_id, field="stage_run_id")
+        if self.analysis_stage_run_worker is None:
+            return False
+        return await self.analysis_stage_run_worker.process(
+            stage_run_id=normalized_stage_run_id,
+            now=now,
+        )
+
     async def close(self) -> None:
         await self.database.dispose()
 
@@ -71,6 +83,10 @@ def create_worker_runtime(*, settings: Settings) -> WorkerRuntime:
         database=database,
         range_execution_worker=RangeExecutionWorker(
             repository=SqlAlchemyRangeExecutionWorkerRepository(database)
+        ),
+        analysis_stage_run_worker=AnalysisStageRunWorker(
+            repository=SqlAlchemyAnalysisStageRunRepository(database),
+            orchestrator=AnalysisOrchestrator(provider=None),
         ),
     )
 
@@ -108,6 +124,21 @@ async def run_video_archive_task(video_asset_id: str, *, settings: Settings | No
     try:
         return await runtime.handle_video_archive(
             video_asset_id=video_asset_id,
+            now=datetime.now(UTC),
+        )
+    finally:
+        await runtime.close()
+
+
+async def run_analysis_stage_run_task(
+    stage_run_id: str, *, settings: Settings | None = None
+) -> bool:
+    """Run one durable analysis StageRun using the configured external provider, if any."""
+
+    runtime = create_worker_runtime(settings=settings or get_settings())
+    try:
+        return await runtime.handle_analysis_stage_run(
+            stage_run_id=stage_run_id,
             now=datetime.now(UTC),
         )
     finally:

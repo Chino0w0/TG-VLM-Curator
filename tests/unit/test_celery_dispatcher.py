@@ -4,9 +4,11 @@ import asyncio
 import unittest
 from uuid import uuid4
 
+from tgcurator.application.analysis import ANALYSIS_QUEUE
 from tgcurator.application.media import IMAGE_ARCHIVE_QUEUE, VIDEO_ARCHIVE_QUEUE
 from tgcurator.application.processing.scheduler import RANGE_EXECUTION_QUEUE
 from tgcurator.infrastructure.queue import (
+    ANALYSIS_TASK_NAME,
     IMAGE_ARCHIVE_TASK_NAME,
     RANGE_EXECUTION_TASK_NAME,
     VIDEO_ARCHIVE_TASK_NAME,
@@ -86,6 +88,24 @@ class CeleryTaskDispatcherTests(unittest.TestCase):
             ],
         )
 
+    def test_dispatches_only_a_normalized_analysis_stage_run_uuid(self) -> None:
+        celery = FakeCelery()
+        dispatcher = CeleryTaskDispatcher(celery)
+        stage_run_id = str(uuid4()).upper()
+
+        asyncio.run(dispatcher.dispatch(queue=ANALYSIS_QUEUE, entity_id=stage_run_id))
+
+        self.assertEqual(
+            celery.calls,
+            [
+                (
+                    ANALYSIS_TASK_NAME,
+                    [stage_run_id.lower()],
+                    {"queue": ANALYSIS_QUEUE},
+                )
+            ],
+        )
+
     def test_rejects_unknown_queues_and_non_uuid_payloads(self) -> None:
         celery = FakeCelery()
         dispatcher = CeleryTaskDispatcher(celery)
@@ -103,7 +123,12 @@ class CeleryTaskDispatcherTests(unittest.TestCase):
         self.assertEqual(client.conf.task_default_queue, RANGE_EXECUTION_QUEUE)
         self.assertEqual(
             tuple(queue.name for queue in client.conf.task_queues),
-            (RANGE_EXECUTION_QUEUE, IMAGE_ARCHIVE_QUEUE, VIDEO_ARCHIVE_QUEUE),
+            (
+                RANGE_EXECUTION_QUEUE,
+                IMAGE_ARCHIVE_QUEUE,
+                VIDEO_ARCHIVE_QUEUE,
+                ANALYSIS_QUEUE,
+            ),
         )
 
 
