@@ -1,4 +1,12 @@
 from .admin_repository import SqlAlchemyAdminBootstrapRepository
+from .analysis_repository import (
+    SqlAlchemyAnalysisStageRunRepository,
+    analysis_stage_run_claim_statement,
+    sanitize_error_code,
+    sanitize_error_type,
+    sanitize_identifier,
+    sanitize_json,
+)
 from .image_archive_repository import (
     SqlAlchemyImageArchiveMetadataRepository,
     SqlAlchemyImageArchiveWorkRepository,
@@ -23,11 +31,13 @@ __all__ = [
     "InvalidDatabaseUrlError",
     "SecretNotFoundError",
     "SecretTypeMismatchError",
+    "SqlAlchemyAnalysisStageRunRepository",
     "SqlAlchemyDurableWakeupRepository",
     "SqlAlchemyImageArchiveMetadataRepository",
     "SqlAlchemyImageArchiveWorkRepository",
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
+    "analysis_stage_run_claim_statement",
     "due_wakeup_claim_statement",
     "processing_range_freeze_statement",
     "range_execution_claim_statement",
@@ -37,5 +47,9 @@ __all__ = [
     "SqlAlchemySourceReconciliationCursorRepository",
     "SqlAlchemyTelegramMessageIngestRepository",
     "SqlAlchemyVideoArchiveWorkRepository",
+    "sanitize_error_code",
+    "sanitize_error_type",
+    "sanitize_identifier",
+    "sanitize_json",
     "validate_async_database_url",
 ]

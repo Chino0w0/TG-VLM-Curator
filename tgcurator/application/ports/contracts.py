@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Protocol
 
 from tgcurator.application.ports.processing import LatestMessageBoundary
 from tgcurator.domain.messages import TelegramMessage
@@ -52,16 +51,3 @@ class TelegramGateway(Protocol):
     async def send_metadata(
         self, *, identity_id: str, destination_channel_id: str, text: str, random_id: int
     ) -> str: ...
-
-
-class InferenceProvider(Protocol):
-    """Versioned HTTP inference capability, isolated from analysis domain rules."""
-
-    async def infer(
-        self,
-        *,
-        profile_version_id: str,
-        prompt: str,
-        input_manifest: Mapping[str, Any],
-        response_schema: Mapping[str, Any],
-    ) -> Mapping[str, Any]: ...

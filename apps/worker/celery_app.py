@@ -5,12 +5,14 @@ import asyncio
 from celery import Celery
 
 from apps.worker.runtime import (
+    run_analysis_stage_run_task,
     run_image_archive_task,
     run_range_execution_task,
     run_video_archive_task,
 )
 from tgcurator.application import get_settings
 from tgcurator.infrastructure.queue import (
+    ANALYSIS_TASK_NAME,
     IMAGE_ARCHIVE_TASK_NAME,
     RANGE_EXECUTION_TASK_NAME,
     VIDEO_ARCHIVE_TASK_NAME,
@@ -30,6 +32,13 @@ def create_worker_celery_app() -> Celery:
 
 
 celery_app = create_worker_celery_app()
+
+
+@celery_app.task(name=ANALYSIS_TASK_NAME, ignore_result=True)
+def process_analysis_stage_run(stage_run_id: str) -> None:
+    """Celery transport entry point; payload is only the durable StageRun UUID."""
+
+    asyncio.run(run_analysis_stage_run_task(stage_run_id))
 
 
 @celery_app.task(name=RANGE_EXECUTION_TASK_NAME, ignore_result=True)

@@ -6,8 +6,8 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 ## Current implementation status
 
 **M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
-**M2 - durable processing scheduling**, and **M3 - Telegram ingestion and media archive
-workflows** are complete.
+**M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
+workflows**, and **M4 - versioned analysis engine and provider adapters** are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -54,10 +54,25 @@ M3 adds:
 Archive task payloads contain only asset UUIDs, and an unconfigured archive runtime returns an
 explicit not-processed result rather than fabricating completion.
 
-The VLM model is not deployed yet. The repository intentionally keeps only the
-InferenceProvider boundary and never fabricates successful inference. API readiness checks
-PostgreSQL only; a missing inference provider remains a degraded business capability rather
-than making the administration API unavailable.
+M4, completed on 2026-09-09, adds:
+
+- immutable, publishable versions for labels, label sets, prompts, inference profiles, stages,
+  and analysis pipelines, including condition-checked DAG nodes;
+- dynamic structured-output schemas, stable target mapping, partial batch validation, immutable
+  input manifests, semantic cache keys, and GLOBAL/MEDIA multi-label results;
+- durable AnalysisRun, StageRun, InferenceCall, and ModelLabelAssignment persistence with leases,
+  bounded retries, cache provenance, sanitized audit payloads, and first-cause Negative Gate
+  blocking;
+- a provider-neutral analysis worker and an OpenAI-compatible external HTTP adapter whose
+  inference calls occur outside database transactions;
+- the dedicated `analysis` queue and UUID-only `tgcurator.analysis` wake-up task.
+
+No inference model or provider is bundled or deployed. A real external provider and its secret
+configuration are required for inference. The default runtime remains deliberately unconfigured;
+missing provider configuration records an explicit failed InferenceCall and durable StageRun
+retry or terminal-failure state instead of fabricating a successful result. API readiness checks
+PostgreSQL only, so provider unavailability remains a degraded business capability rather than
+making the administration API unavailable.
 
 See tg-vlm-curator-module-implementation.md for module boundaries and acceptance criteria.
 
