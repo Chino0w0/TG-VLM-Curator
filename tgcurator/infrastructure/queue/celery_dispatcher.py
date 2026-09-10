@@ -7,6 +7,7 @@ from uuid import UUID
 from celery import Celery
 from kombu import Queue
 
+from tgcurator.application.analysis import ANALYSIS_QUEUE
 from tgcurator.application.media import IMAGE_ARCHIVE_QUEUE, VIDEO_ARCHIVE_QUEUE
 from tgcurator.application.processing.scheduler import RANGE_EXECUTION_QUEUE
 from tgcurator.shared import DomainValidationError
@@ -14,10 +15,12 @@ from tgcurator.shared import DomainValidationError
 RANGE_EXECUTION_TASK_NAME = "tgcurator.range_execution"
 IMAGE_ARCHIVE_TASK_NAME = "tgcurator.image_archive"
 VIDEO_ARCHIVE_TASK_NAME = "tgcurator.video_archive"
+ANALYSIS_TASK_NAME = "tgcurator.analysis"
 _TASK_NAME_BY_QUEUE = {
     RANGE_EXECUTION_QUEUE: RANGE_EXECUTION_TASK_NAME,
     IMAGE_ARCHIVE_QUEUE: IMAGE_ARCHIVE_TASK_NAME,
     VIDEO_ARCHIVE_QUEUE: VIDEO_ARCHIVE_TASK_NAME,
+    ANALYSIS_QUEUE: ANALYSIS_TASK_NAME,
 }
 
 
@@ -48,6 +51,7 @@ def create_celery_client(*, broker_url: str, application_name: str = "tgcurator"
             Queue(RANGE_EXECUTION_QUEUE),
             Queue(IMAGE_ARCHIVE_QUEUE),
             Queue(VIDEO_ARCHIVE_QUEUE),
+            Queue(ANALYSIS_QUEUE),
         ),
         task_ignore_result=True,
         task_serializer="json",

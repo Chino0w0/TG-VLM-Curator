@@ -16,7 +16,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M1 | API, environment settings, security, and initial PostgreSQL schema | Complete |
 | M2 | Durable ProcessingRange and RangeExecution scheduling | Complete |
 | M3 | Telegram ingestion and media archive workflows | Complete |
-| M4 | Versioned analysis engine and provider adapters | Pending; model not deployed |
+| M4 | Versioned analysis engine and provider adapters | Complete (2026-09-09) |
 | M5 | Human review and routing workflows | Pending |
 | M6 | Publication and operations | Pending |
 
@@ -125,13 +125,30 @@ Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, a
 Alembic checks. Repository, worker, adapter, normalization, lifecycle, storage, and sampling tests
 require no running PostgreSQL, Redis, Telegram session, FFmpeg installation, or inference model.
 
-## M4 - Analysis engine
+## M4 - Analysis engine (complete 2026-09-09)
 
-M4 will add versioned labels, prompts, stages, pipelines, inference profiles, input manifests,
-dynamic response schemas, response validation, stage caching, text pre-screen, Negative Gate,
-and GLOBAL/MEDIA multi-label runs. Until a real model or provider is supplied, only
-provider-neutral interfaces and explicit not-ready behavior may exist; fake successful
-inference results are prohibited.
+M4 adds immutable draft/published/retired versions for labels, label sets, prompts, inference
+profiles, stages, and condition-checked pipeline DAGs. It persists immutable input manifests,
+dynamic structured-output schema snapshots, AnalysisRun and per-target StageRun state,
+InferenceCall audits, cache provenance, and formal ModelLabelAssignments. GLOBAL and MEDIA stages
+support stable target mapping, partial batch commits, independently retryable invalid or missing
+targets, semantic cache reuse, test-run isolation, and first-cause Negative Gate blocking.
+
+The application layer provides a provider-neutral orchestrator and durable leased worker. The
+infrastructure layer provides the initial OpenAI-compatible external HTTP adapter, PostgreSQL
+repository, and UUID-only Celery `analysis` wake-up. Provider I/O occurs outside database
+transactions, retries are bounded, and provider/error audit data is sanitized before persistence.
+
+No inference model or provider is bundled or deployed. A real external provider configuration and
+secret are required. The default worker runtime intentionally has no provider; each attempted call
+still persists its pending InferenceCall before invocation, then records
+`InferenceProviderNotConfigured` and moves affected StageRuns into explicit durable retry or
+terminal-failure state. Successful inference is never fabricated.
+
+Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline Alembic
+checks. Domain, orchestrator, worker, repository, provider-adapter, schema, migration, Celery, and
+runtime tests require no running PostgreSQL, Redis, Telegram session, external provider, or
+inference model.
 
 ## M5 - Human review and routing
 

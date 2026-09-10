@@ -6,119 +6,106 @@ Remote: https://github.com/Chino0w0/TG-VLM-Curator
 
 ## User delivery rules
 
-- Follow `tg-vlm-curator-module-implementation.md` and the architecture document.
+- Follow tg-vlm-curator-module-implementation.md and tg-vlm-curator-architecture.md.
 - A delivery unit is one complete documented module, not one file or one small change.
-- Use one branch for one module and open one PR only after the whole module is implemented and
-  tested.
-- Push every completed module branch to the GitHub remote.
-- Use English PR titles and bodies because Chinese PR text previously rendered incorrectly.
-- Local validation is primary.
-- The VLM model is not deployed. Keep provider-neutral interfaces and never fabricate successful
-  inference.
-- The user explicitly requested a pause after the M3 PR and handoff. Do not start M4 in this
-  continuation.
+- Use one branch, one commit, and one English pull request for each completed module.
+- Push completed module branches to the GitHub remote only after all local checks pass.
+- PostgreSQL is business truth; Redis/Celery messages are reconstructable UUID-only wake-ups.
+- Do not bundle, deploy, or fabricate an inference model/provider.
 
-## Current remote delivery
+## Current delivery
 
-- M0 PR #21, M1 PR #22, and M2 PR #23 are merged into `origin/main`.
-- M3 PR #24 is open: https://github.com/Chino0w0/TG-VLM-Curator/pull/24
-- PR base: `main`
-- PR head: `module/m3-telegram-ingestion-archive`
-- PR title: `feat(m3): add Telegram ingestion and archive workflows`
-- M3 implementation commit: `824bccd7889140a9b83f119d7ea127491be3cf32`
-- The remote M3 branch is pushed and tracks `origin/module/m3-telegram-ingestion-archive`.
+- M0, M1, M2, and M3 are merged into origin/main.
+- M4 is completed on branch module/m4-analysis-engine, based on origin/main at 787dab9.
+- M4 is delivered as one implementation commit and one English pull request against main.
+- M5 human review/routing and M6 publication/operations remain pending.
 
-## M3 completed scope
+## M4 completed scope
 
-M3 implements Telegram ingestion and durable image/video archival as one documented module:
+M4 implements the versioned analysis engine and external-provider adapter boundary:
 
-- Canonical Telegram DTOs shared by history, realtime updates, reconciliation, and lifecycle
-  handling.
-- Idempotent regular-message and grouped-message parent upserts.
-- Rich `message_parts` source snapshots and safe partial-album replay reconstruction.
-- Bounded native Telegram media-group aggregation with stable component ordering.
-- Independent monotonic `latest_seen_message_id` and `last_seen_message_id` reconnect cursors.
-- Frozen reconnect windows that advance ingestion state only after successful persistence.
-- Source message edit and delete lifecycle handling without stale snapshot regression.
-- Image/video asset synchronization with UUID-only durable archive wake-ups.
-- Protected-content-aware Telegram media downloads using exact source-message references.
-- Immutable, atomic local archive publication.
-- Deterministic Pillow WebP image normalization and perceptual-hash metadata.
-- Durable image archive claims with short leases, bounded retries, terminal states, sanitized
-  errors, and wake-up repair/completion.
-- FFprobe metadata extraction and bounded FFmpeg representative-frame sampling.
-- Video subprocesses use argument lists, `shell=False`, finite timeouts, terminate-then-kill
-  behavior, bounded output, and temporary-file cleanup.
-- Stable video archive keys for cover and representative WebP frames.
-- Atomic `video_frames` replacement and `video_assets` READY transitions after every frame has
-  been published.
-- Worker/Celery composition for `range_execution`, `image_archive`, and `video_archive` queues.
-- Unconfigured media runtimes return `False` and never fake archive completion.
-- One consolidated M3 Alembic revision: `b8e6c4f2a137_m3_telegram_ingestion_archive.py`.
+- Immutable draft/published/retired versions for label definitions, label sets, prompts,
+  inference profiles, analysis stages, and analysis pipelines.
+- Draft-only label bindings and pipeline nodes, published-version immutability, validated DAG
+  dependencies, and deterministic run_if fact conditions.
+- Dynamic dense/sparse JSON Schemas keyed to stable message or asset target IDs.
+- Strict structured-output validation with partial batch commits and per-target retry for missing
+  or invalid results.
+- Immutable InputManifest snapshots and semantic cache keys isolated by stage, prompt, label set,
+  response schema, inference profile, provider parameters, and actual inputs.
+- GLOBAL and MEDIA multi-label results, formal ModelLabelAssignments, test-run isolation, and
+  first-cause Negative Gate blocking of later analysis.
+- Durable AnalysisRun, StageRun, InferenceCall, and assignment persistence with short leases,
+  expired-lease recovery, bounded attempts, exact cache provenance, and sanitized error/audit
+  payloads.
+- Provider-neutral orchestration that persists a pending InferenceCall before provider I/O and
+  keeps network calls outside database transactions.
+- An initial OpenAI-compatible external HTTP adapter with secret resolution, structured-output
+  requests, bounded response handling, stable retry classification, and credential/URL redaction.
+- Celery/runtime registration for the dedicated analysis queue and UUID-only
+  tgcurator.analysis task.
 
-Important implementation locations:
+## Provider availability and failure behavior
 
-- `tgcurator/domain/messages/telegram.py`
-- `tgcurator/application/ingestion.py`
-- `tgcurator/application/realtime_ingestion.py`
-- `tgcurator/application/reconciliation.py`
-- `tgcurator/application/source_lifecycle.py`
-- `tgcurator/application/media/archive_worker.py`
-- `tgcurator/application/media/video_archive_worker.py`
-- `tgcurator/infrastructure/telegram/`
-- `tgcurator/infrastructure/archive/local_storage.py`
-- `tgcurator/infrastructure/media/pillow_processor.py`
-- `tgcurator/infrastructure/media/ffmpeg.py`
-- `tgcurator/infrastructure/database/message_ingest_repository.py`
-- `tgcurator/infrastructure/database/image_archive_repository.py`
-- `tgcurator/infrastructure/database/video_archive_repository.py`
-- `migrations/versions/b8e6c4f2a137_m3_telegram_ingestion_archive.py`
+No inference model or provider is bundled or deployed. An operator must configure a real external
+provider endpoint and secret before inference can succeed. The default runtime intentionally uses
+AnalysisOrchestrator(provider=None).
 
-## Final M3 validation
+Missing provider configuration is not treated as success and does not fabricate labels. The worker
+first persists the pending InferenceCall, records InferenceProviderNotConfigured, and moves each
+affected StageRun into explicit durable retry_wait state or terminal failed state when its bounded
+attempt limit is reached. API readiness continues to depend on PostgreSQL rather than the optional
+inference provider.
 
-All required local gates passed before the implementation commit:
+## M4 migration
 
-- Ruff format check: 133 files already formatted.
-- Ruff lint: all checks passed.
-- Pytest: 204 passed; 2 dependency deprecation warnings.
-- Unit unittest suite: 197 passed.
-- Integration unittest suite: 7 passed.
-- `compileall`: passed.
-- `pip check`: no broken requirements.
-- Offline Alembic PostgreSQL upgrade to M3 head: passed.
-- Offline Alembic M3-to-M2 downgrade: passed.
-- `git diff --check`: passed.
+- Revision: c4a9e7d2f5b1
+- Down revision: b8e6c4f2a137
+- File: migrations/versions/c4a9e7d2f5b1_m4_versioned_analysis_engine.py
+- Chronology date: September 9, 2026
+- Adds 19 M4 tables, message Negative Gate cause columns/foreign keys, lifecycle constraints,
+  partial unique indexes, and PostgreSQL immutability/draft-only triggers.
+- Offline upgrade to M4 and downgrade from M4 to M3 are covered by integration tests.
 
-The two pytest warnings come from FastAPI/Starlette compatibility shims: the deprecated
-`starlette.testclient` httpx import path and the deprecated AnyIO `BlockingPortal` alias. They do
-not fail the suite. Git also reported informational CRLF-to-LF normalization warnings while
-staging three existing files.
+## Important implementation locations
 
-## Model availability
+- tgcurator/domain/analysis/
+- tgcurator/application/analysis/
+- tgcurator/application/ports/analysis.py
+- tgcurator/infrastructure/database/analysis_repository.py
+- tgcurator/infrastructure/inference/openai_compatible.py
+- tgcurator/infrastructure/queue/celery_dispatcher.py
+- apps/worker/runtime.py
+- apps/worker/celery_app.py
+- migrations/versions/c4a9e7d2f5b1_m4_versioned_analysis_engine.py
+- tests/unit/test_analysis_engine_domain.py
+- tests/unit/test_analysis_orchestrator.py
+- tests/unit/test_analysis_worker.py
+- tests/unit/test_analysis_repository.py
+- tests/unit/test_openai_compatible_inference.py
+- tests/integration/test_alembic_offline_sql.py
 
-The VLM model/provider is still not deployed. M3 contains no fake inference success path. M4 may
-add provider-neutral analysis contracts and explicit not-ready behavior, but real inference must
-remain unconfigured until a real provider is supplied.
+## Final M4 validation
 
-## Critical local branch warning
+The M4 branch passes the required local gates without a running PostgreSQL server, Redis broker,
+Telegram identity/session, external inference provider, or inference model:
 
-The local branch named `main` is not authoritative. It currently points to
-`1f8a990373f2d69cd1f702cc674067e58983f8b5`, while `origin/main` points to
-`9a54a817a8cab966ff42f446348acddef2be7cd6`; the branches have diverged. Do not push, reset,
-delete, merge, or rewrite local `main` without a deliberate audit. Use `origin/main` and the
-remote PR history as the source of truth.
+- Ruff formatting check and lint.
+- Full pytest suite: 252 passed with two dependency deprecation warnings.
+- Unit unittest discovery suite: 243 passed.
+- Integration unittest discovery suite: 9 passed.
+- compileall for apps, tgcurator, and tests.
+- pip check.
+- Offline PostgreSQL Alembic upgrade to M4 and M4-to-M3 downgrade rendering.
+- git diff --check and final working-tree audit.
 
-## Next continuation
+The two pytest warnings are existing FastAPI/Starlette compatibility deprecations for the httpx
+TestClient import path and the AnyIO BlockingPortal alias; they do not fail the suite.
 
-- The prior agent stopped after committing and pushing this handoff update to PR #24.
-- Start M4 only after the user explicitly requests another continuation.
-- Before starting M4, fetch the remote and inspect whether PR #24 has merged.
-- Keep M4 on a new module branch and a separate PR; do not add M4 work to the M3 branch or PR.
-- Preserve explicit not-ready behavior while the model remains unavailable.
+## Next modules
 
-## Current pause state
-
-- Active branch: `module/m3-telegram-ingestion-archive`.
-- M3 implementation is committed, pushed, and submitted as PR #24.
-- This handoff document records the final M3 delivery state.
-- No product-code changes remain pending, and no M4 work has started.
+- M5 remains pending: preserve model/manual/effective labels separately, add human review, persist
+  routing evaluations, and create PublicationIntent records.
+- M6 remains pending: publication leases and attempts, FloodWait retry, partial recovery,
+  reconciliation, metrics, service health, archive cleanup dry-runs, and failure injection.
+- Keep future work on separate module branches and separate pull requests.

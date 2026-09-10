@@ -60,6 +60,16 @@ class FakeVideoArchiveWorker:
         return self._result
 
 
+class FakeAnalysisStageRunWorker:
+    def __init__(self, *, result: bool = True) -> None:
+        self._result = result
+        self.requests: list[tuple[str, datetime]] = []
+
+    async def process(self, *, stage_run_id: str, now: datetime) -> bool:
+        self.requests.append((stage_run_id, now))
+        return self._result
+
+
 class WorkerRuntimeTests(unittest.TestCase):
     def test_claims_one_normalized_execution_uuid_without_configured_history_processing(
         self,
@@ -194,6 +204,46 @@ class WorkerRuntimeTests(unittest.TestCase):
             asyncio.run(runtime.handle_video_archive(video_asset_id="not-a-uuid", now=NOW))
 
         self.assertEqual(video_worker.requests, [])
+
+    def test_processes_normalized_analysis_uuid_with_an_injected_worker(self) -> None:
+        analysis_worker = FakeAnalysisStageRunWorker(result=True)
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            analysis_stage_run_worker=analysis_worker,  # type: ignore[arg-type]
+        )
+        stage_run_id = str(uuid4()).upper()
+
+        processed = asyncio.run(
+            runtime.handle_analysis_stage_run(stage_run_id=stage_run_id, now=NOW)
+        )
+
+        self.assertTrue(processed)
+        self.assertEqual(analysis_worker.requests, [(stage_run_id.lower(), NOW)])
+
+    def test_unconfigured_analysis_runtime_never_fakes_completion(self) -> None:
+        runtime = WorkerRuntime(
+            database=FakeDatabase(), range_execution_worker=FakeRangeExecutionWorker(claim=None)
+        )
+
+        processed = asyncio.run(
+            runtime.handle_analysis_stage_run(stage_run_id=str(uuid4()), now=NOW)
+        )
+
+        self.assertFalse(processed)
+
+    def test_rejects_non_uuid_analysis_payload_before_worker_call(self) -> None:
+        analysis_worker = FakeAnalysisStageRunWorker()
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            analysis_stage_run_worker=analysis_worker,  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(DomainValidationError):
+            asyncio.run(runtime.handle_analysis_stage_run(stage_run_id="not-a-uuid", now=NOW))
+
+        self.assertEqual(analysis_worker.requests, [])
 
 
 def _claim() -> ClaimedRangeExecution:

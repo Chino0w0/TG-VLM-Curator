@@ -577,6 +577,15 @@ class MessageRecord(TimestampMixin, Base):
             "source_deleted_at IS NULL OR source_deleted_at >= published_at",
             name="message_source_deleted_after_published",
         ),
+        CheckConstraint(
+            "(blocked_from_analysis IS FALSE AND blocked_at IS NULL "
+            "AND blocked_by_stage_run_id IS NULL "
+            "AND blocked_by_label_assignment_id IS NULL) OR "
+            "(blocked_from_analysis IS TRUE AND blocked_at IS NOT NULL "
+            "AND blocked_by_stage_run_id IS NOT NULL "
+            "AND blocked_by_label_assignment_id IS NOT NULL)",
+            name="message_analysis_block_state",
+        ),
         Index("ix_messages_source_published_at", "source_channel_id", "published_at"),
         Index(
             "uq_messages_source_regular",
@@ -638,6 +647,31 @@ class MessageRecord(TimestampMixin, Base):
     )
     source_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    blocked_from_analysis: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    blocked_by_stage_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "stage_runs.id",
+            name="fk_messages_blocked_stage_run",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    blocked_by_label_assignment_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "model_label_assignments.id",
+            name="fk_messages_blocked_assignment",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        nullable=True,
     )
 
 
@@ -947,3 +981,1013 @@ class VideoFrameRecord(TimestampMixin, Base):
     archive_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     perceptual_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     archive_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class LabelDefinitionRecord(TimestampMixin, Base):
+    __tablename__ = "label_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class LabelDefinitionVersionRecord(CreatedAtMixin, Base):
+    __tablename__ = "label_definition_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "label_definition_id",
+            "version_number",
+            name="uq_label_definition_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="version_lifecycle",
+        ),
+        CheckConstraint("char_length(btrim(key)) > 0", name="key_not_blank"),
+        CheckConstraint(
+            "char_length(btrim(display_name)) > 0",
+            name="display_name_not_blank",
+        ),
+        CheckConstraint("scope IN ('global', 'media')", name="scope"),
+        Index(
+            "uq_label_definition_one_published",
+            "label_definition_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+        Index(
+            "uq_label_definition_published_key",
+            "key",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    label_definition_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "label_definitions.id",
+            name="fk_label_definition_versions_definition",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    negative: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LabelSetRecord(TimestampMixin, Base):
+    __tablename__ = "label_sets"
+    __table_args__ = (CheckConstraint("char_length(btrim(name)) > 0", name="name_not_blank"),)
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class LabelSetVersionRecord(CreatedAtMixin, Base):
+    __tablename__ = "label_set_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "label_set_id",
+            "version_number",
+            name="uq_label_set_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="version_lifecycle",
+        ),
+        Index(
+            "uq_label_set_one_published",
+            "label_set_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    label_set_id: Mapped[UUID] = mapped_column(
+        ForeignKey("label_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LabelBindingRecord(TimestampMixin, Base):
+    __tablename__ = "label_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "label_set_version_id",
+            "label_definition_version_id",
+            name="uq_label_binding_definition",
+        ),
+        UniqueConstraint(
+            "label_set_version_id",
+            "output_order",
+            name="uq_label_binding_output_order",
+        ),
+        CheckConstraint(
+            "activation_threshold >= 0 AND activation_threshold <= 1",
+            name="threshold",
+        ),
+        CheckConstraint("output_order >= 0", name="output_order_nonnegative"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    label_set_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("label_set_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    label_definition_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "label_definition_versions.id",
+            name="fk_label_definition_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    activation_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    prompt_hint: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    output_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PromptTemplateRecord(TimestampMixin, Base):
+    __tablename__ = "prompt_templates"
+    __table_args__ = (CheckConstraint("char_length(btrim(name)) > 0", name="name_not_blank"),)
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class PromptTemplateVersionRecord(CreatedAtMixin, Base):
+    __tablename__ = "prompt_template_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "prompt_template_id",
+            "version_number",
+            name="uq_prompt_template_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="version_lifecycle",
+        ),
+        CheckConstraint(
+            "char_length(btrim(system_prompt)) > 0 OR char_length(btrim(user_prompt_template)) > 0",
+            name="content_not_blank",
+        ),
+        Index(
+            "uq_prompt_template_one_published",
+            "prompt_template_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    prompt_template_id: Mapped[UUID] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    system_prompt: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    user_prompt_template: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    declared_variables: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), nullable=False, default=list, server_default=text("'{}'")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InferenceProfileRecord(TimestampMixin, Base):
+    __tablename__ = "inference_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class InferenceProfileVersionRecord(CreatedAtMixin, Base):
+    __tablename__ = "inference_profile_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "inference_profile_id",
+            "version_number",
+            name="uq_inference_profile_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="version_lifecycle",
+        ),
+        CheckConstraint(
+            "char_length(btrim(provider_adapter)) > 0",
+            name="provider_not_blank",
+        ),
+        CheckConstraint(
+            "char_length(btrim(base_url)) > 0",
+            name="base_url_not_blank",
+        ),
+        CheckConstraint(
+            "char_length(btrim(model_name)) > 0",
+            name="model_not_blank",
+        ),
+        CheckConstraint(
+            "char_length(btrim(api_secret_reference)) > 0",
+            name="secret_ref_not_blank",
+        ),
+        CheckConstraint("timeout_seconds > 0", name="timeout_positive"),
+        CheckConstraint("max_concurrency > 0", name="concurrency_positive"),
+        CheckConstraint("max_images > 0", name="images_positive"),
+        CheckConstraint("max_input_tokens > 0", name="tokens_positive"),
+        CheckConstraint(
+            "jsonb_typeof(sampling_parameters) = 'object'",
+            name="sampling_object",
+        ),
+        Index(
+            "uq_inference_profile_one_published",
+            "inference_profile_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    inference_profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "inference_profiles.id",
+            name="fk_inference_profile_versions_profile",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    provider_adapter: Mapped[str] = mapped_column(String(128), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    api_secret_reference: Mapped[str] = mapped_column(String(512), nullable=False)
+    capabilities: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), nullable=False, default=list, server_default=text("'{}'")
+    )
+    timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    max_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_images: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    structured_output_support: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    sampling_parameters: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnalysisStageTemplateRecord(TimestampMixin, Base):
+    __tablename__ = "analysis_stage_templates"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="template_name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class AnalysisStageTemplateVersionRecord(CreatedAtMixin, Base):
+    __tablename__ = "analysis_stage_template_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_stage_template_id",
+            "version_number",
+            name="uq_analysis_stage_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="version_lifecycle",
+        ),
+        CheckConstraint("char_length(btrim(name)) > 0", name="name_not_blank"),
+        CheckConstraint("target_scope IN ('global', 'media')", name="scope"),
+        CheckConstraint(
+            "execution_mode IN ('batch_messages', 'single_message', 'per_asset', 'batch_assets')",
+            name="execution_mode",
+        ),
+        CheckConstraint(
+            "(target_scope = 'global' AND execution_mode IN "
+            "('batch_messages', 'single_message')) OR "
+            "(target_scope = 'media' AND execution_mode IN ('per_asset', 'batch_assets'))",
+            name="scope_mode",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(structured_output_policy) = 'object'",
+            name="output_policy_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(input_policy) = 'object'",
+            name="input_policy_object",
+        ),
+        CheckConstraint(
+            "visual_composition_policy IN ('raw', 'contact_sheet', 'adaptive')",
+            name="visual_policy",
+        ),
+        CheckConstraint(
+            "cache_policy IN ('none', 'message', 'message_visual', 'asset')",
+            name="cache_policy",
+        ),
+        CheckConstraint("timeout_seconds > 0", name="timeout_positive"),
+        CheckConstraint(
+            "jsonb_typeof(retry_policy) = 'object'",
+            name="retry_policy_object",
+        ),
+        CheckConstraint("max_batch_size > 0", name="batch_positive"),
+        CheckConstraint("max_concurrency > 0", name="concurrency_positive"),
+        CheckConstraint(
+            "execution_mode IN ('batch_messages', 'batch_assets') OR max_batch_size = 1",
+            name="non_batch_size",
+        ),
+        Index(
+            "uq_analysis_stage_one_published",
+            "analysis_stage_template_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    analysis_stage_template_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_stage_templates.id",
+            name="fk_analysis_stage_versions_template",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    target_scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_template_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "prompt_template_versions.id",
+            name="fk_analysis_stage_versions_prompt",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    label_set_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "label_set_versions.id",
+            name="fk_analysis_stage_versions_label_set",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    structured_output_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    input_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    visual_composition_policy: Mapped[str] = mapped_column(String(32), nullable=False)
+    inference_profile_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "inference_profile_versions.id",
+            name="fk_analysis_stage_versions_profile",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    cache_policy: Mapped[str] = mapped_column(String(32), nullable=False)
+    timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    retry_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    max_batch_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnalysisPipelineRecord(TimestampMixin, Base):
+    __tablename__ = "analysis_pipelines"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class AnalysisPipelineVersionRecord(CreatedAtMixin, Base):
+    __tablename__ = "analysis_pipeline_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_pipeline_id",
+            "version_number",
+            name="uq_analysis_pipeline_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="version_lifecycle",
+        ),
+        Index(
+            "uq_analysis_pipeline_one_published",
+            "analysis_pipeline_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    analysis_pipeline_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_pipelines.id",
+            name="fk_analysis_pipeline_versions_pipeline",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PipelineStageNodeRecord(TimestampMixin, Base):
+    __tablename__ = "pipeline_stage_nodes"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_pipeline_version_id",
+            "node_key",
+            name="uq_pipeline_stage_node_key",
+        ),
+        UniqueConstraint(
+            "analysis_pipeline_version_id",
+            "output_order",
+            name="uq_pipeline_stage_output_order",
+        ),
+        CheckConstraint(
+            "char_length(btrim(node_key)) > 0",
+            name="node_key_not_blank",
+        ),
+        CheckConstraint(
+            "run_if IS NULL OR jsonb_typeof(run_if) = 'object'",
+            name="run_if_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(parameter_overrides) = 'object'",
+            name="overrides_object",
+        ),
+        CheckConstraint("output_order >= 0", name="output_order_nonnegative"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    analysis_pipeline_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_pipeline_versions.id",
+            name="fk_pipeline_nodes_pipeline_version",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    node_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    analysis_stage_template_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_stage_template_versions.id",
+            name="fk_analysis_stage_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    depends_on: Mapped[list[str]] = mapped_column(
+        ARRAY(String(128)), nullable=False, default=list, server_default=text("'{}'")
+    )
+    run_if: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    parameter_overrides: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    output_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AnalysisRunRecord(TimestampMixin, Base):
+    __tablename__ = "analysis_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "run_mode IN ('formal', 'reanalysis', 'test')",
+            name="mode",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'blocked_negative_gate', 'failed')",
+            name="status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(facts_snapshot) = 'object'",
+            name="facts_object",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND started_at IS NULL AND completed_at IS NULL) OR "
+            "(status = 'running' AND started_at IS NOT NULL AND completed_at IS NULL) OR "
+            "(status IN ('completed', 'blocked_negative_gate', 'failed') "
+            "AND started_at IS NOT NULL AND completed_at IS NOT NULL)",
+            name="lifecycle",
+        ),
+        CheckConstraint(
+            "status <> 'failed' OR (last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
+            name="failure_metadata",
+        ),
+        Index("ix_analysis_runs_message_created", "message_id", "created_at"),
+        Index("ix_analysis_runs_status", "status"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    analysis_pipeline_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_pipeline_versions.id",
+            name="fk_analysis_runs_pipeline_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    run_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="formal", server_default=text("'formal'")
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    facts_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InputManifestRecord(CreatedAtMixin, Base):
+    __tablename__ = "input_manifests"
+    __table_args__ = (
+        CheckConstraint("manifest_version > 0", name="version_positive"),
+        CheckConstraint(
+            "jsonb_typeof(content) = 'object'",
+            name="content_object",
+        ),
+        CheckConstraint(
+            "char_length(input_manifest_hash) = 64 AND input_manifest_hash !~ '[^0-9a-f]'",
+            name="hash_format",
+        ),
+        Index("ix_input_manifests_hash", "input_manifest_hash"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    analysis_stage_template_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_stage_template_versions.id",
+            name="fk_analysis_stage_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    manifest_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    input_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class InferenceCallRecord(CreatedAtMixin, Base):
+    __tablename__ = "inference_calls"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'failed')",
+            name="status",
+        ),
+        CheckConstraint("attempt > 0", name="attempt_positive"),
+        CheckConstraint(
+            "char_length(btrim(provider_adapter)) > 0",
+            name="provider_not_blank",
+        ),
+        CheckConstraint(
+            "char_length(btrim(model_name)) > 0",
+            name="model_not_blank",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(request_summary) = 'object'",
+            name="request_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(structured_output_schema) = 'object'",
+            name="schema_object",
+        ),
+        CheckConstraint(
+            "char_length(structured_output_schema_hash) = 64 "
+            "AND structured_output_schema_hash !~ '[^0-9a-f]'",
+            name="schema_hash_format",
+        ),
+        CheckConstraint(
+            "raw_response IS NULL OR jsonb_typeof(raw_response) = 'object'",
+            name="response_object",
+        ),
+        CheckConstraint(
+            "token_usage IS NULL OR jsonb_typeof(token_usage) = 'object'",
+            name="usage_object",
+        ),
+        CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="latency_nonnegative",
+        ),
+        CheckConstraint(
+            "http_status IS NULL OR (http_status >= 100 AND http_status <= 599)",
+            name="http_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND completed_at IS NULL) OR "
+            "(status = 'succeeded' AND completed_at IS NOT NULL "
+            "AND raw_response IS NOT NULL AND error_code IS NULL AND error_type IS NULL) OR "
+            "(status = 'failed' AND completed_at IS NOT NULL "
+            "AND error_code IS NOT NULL AND error_type IS NOT NULL "
+            "AND retryable IS NOT NULL)",
+            name="lifecycle",
+        ),
+        Index("ix_inference_calls_manifest", "input_manifest_id"),
+        Index(
+            "ix_inference_calls_stage_created", "analysis_stage_template_version_id", "created_at"
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    input_manifest_id: Mapped[UUID] = mapped_column(
+        ForeignKey("input_manifests.id", ondelete="RESTRICT"), nullable=False
+    )
+    analysis_stage_template_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_stage_template_versions.id",
+            name="fk_analysis_stage_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    provider_adapter: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    request_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    structured_output_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    structured_output_schema_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StageRunRecord(TimestampMixin, Base):
+    __tablename__ = "stage_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_run_id",
+            "pipeline_stage_node_id",
+            "analysis_stage_template_version_id",
+            "target_id",
+            name="uq_stage_run_business_target",
+        ),
+        CheckConstraint(
+            "target_scope IN ('global', 'media')",
+            name="target_scope",
+        ),
+        CheckConstraint(
+            "target_kind IN ('message', 'image_asset', 'video_asset')",
+            name="target_kind",
+        ),
+        CheckConstraint(
+            "(target_kind = 'message' AND target_scope = 'global' "
+            "AND target_id = message_id AND image_asset_id IS NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(target_kind = 'image_asset' AND target_scope = 'media' "
+            "AND target_id = image_asset_id AND image_asset_id IS NOT NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(target_kind = 'video_asset' AND target_scope = 'media' "
+            "AND target_id = video_asset_id AND video_asset_id IS NOT NULL "
+            "AND image_asset_id IS NULL)",
+            name="target_identity",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'retry_wait', 'succeeded', 'failed', "
+            "'skipped_condition', 'skipped_negative_gate')",
+            name="status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0 AND attempt_count <= max_attempts AND max_attempts > 0",
+            name="attempts",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND lease_token IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL AND attempt_count > 0) OR "
+            "(status <> 'running' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="lease",
+        ),
+        CheckConstraint(
+            "(status = 'retry_wait' AND next_retry_at IS NOT NULL) OR "
+            "(status <> 'retry_wait' AND next_retry_at IS NULL)",
+            name="retry_schedule",
+        ),
+        CheckConstraint(
+            "status NOT IN ('retry_wait', 'failed') OR "
+            "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL "
+            "AND retryable IS NOT NULL AND last_failure_at IS NOT NULL)",
+            name="failure_metadata",
+        ),
+        CheckConstraint(
+            "status NOT IN "
+            "('succeeded', 'failed', 'skipped_condition', 'skipped_negative_gate') "
+            "OR completed_at IS NOT NULL",
+            name="terminal_timestamp",
+        ),
+        CheckConstraint(
+            "status <> 'succeeded' OR (parsed_result IS NOT NULL "
+            "AND result_origin IS NOT NULL AND input_manifest_id IS NOT NULL)",
+            name="success_result",
+        ),
+        CheckConstraint(
+            "result_origin IS NULL OR result_origin IN ('inference', 'cache')",
+            name="result_origin",
+        ),
+        CheckConstraint(
+            "(result_origin IS NULL AND reused_from_stage_run_id IS NULL) OR "
+            "(result_origin = 'inference' AND reused_from_stage_run_id IS NULL) OR "
+            "(result_origin = 'cache' AND reused_from_stage_run_id IS NOT NULL)",
+            name="cache_source",
+        ),
+        CheckConstraint(
+            "cache_policy IN ('none', 'message', 'message_visual', 'asset')",
+            name="cache_policy",
+        ),
+        CheckConstraint(
+            "semantic_cache_key IS NULL OR "
+            "(char_length(semantic_cache_key) = 64 "
+            "AND semantic_cache_key !~ '[^0-9a-f]')",
+            name="cache_key_format",
+        ),
+        CheckConstraint(
+            "parsed_result IS NULL OR jsonb_typeof(parsed_result) = 'object'",
+            name="result_object",
+        ),
+        Index("ix_stage_runs_status_lease", "status", "lease_expires_at"),
+        Index("ix_stage_runs_retry_due", "status", "next_retry_at"),
+        Index("ix_stage_runs_analysis_node", "analysis_run_id", "pipeline_stage_node_id"),
+        Index(
+            "uq_stage_run_direct_target",
+            "analysis_run_id",
+            "analysis_stage_template_version_id",
+            "target_id",
+            unique=True,
+            postgresql_where=text("pipeline_stage_node_id IS NULL"),
+        ),
+        Index(
+            "ix_stage_runs_semantic_cache",
+            "semantic_cache_key",
+            postgresql_where=text("status = 'succeeded' AND semantic_cache_key IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    pipeline_stage_node_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("pipeline_stage_nodes.id", ondelete="RESTRICT"), nullable=True
+    )
+    analysis_stage_template_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "analysis_stage_template_versions.id",
+            name="fk_analysis_stage_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    target_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    image_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("image_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    video_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("video_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default=text("3")
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    input_manifest_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("input_manifests.id", ondelete="RESTRICT"), nullable=True
+    )
+    inference_call_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("inference_calls.id", ondelete="RESTRICT"), nullable=True
+    )
+    parsed_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    cache_policy: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="none", server_default=text("'none'")
+    )
+    cache_scope_identity: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    semantic_cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_origin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reused_from_stage_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("stage_runs.id", ondelete="RESTRICT"), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ModelLabelAssignmentRecord(CreatedAtMixin, Base):
+    __tablename__ = "model_label_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "stage_run_id",
+            "label_definition_version_id",
+            name="uq_model_assignment_stage_label",
+        ),
+        CheckConstraint(
+            "target_scope IN ('global', 'media')",
+            name="target_scope",
+        ),
+        CheckConstraint(
+            "target_kind IN ('message', 'image_asset', 'video_asset')",
+            name="target_kind",
+        ),
+        CheckConstraint(
+            "(target_kind = 'message' AND target_scope = 'global' "
+            "AND target_id = message_id AND image_asset_id IS NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(target_kind = 'image_asset' AND target_scope = 'media' "
+            "AND target_id = image_asset_id AND image_asset_id IS NOT NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(target_kind = 'video_asset' AND target_scope = 'media' "
+            "AND target_id = video_asset_id AND video_asset_id IS NOT NULL "
+            "AND image_asset_id IS NULL)",
+            name="target_identity",
+        ),
+        CheckConstraint("score >= 0 AND score <= 1", name="score"),
+        CheckConstraint(
+            "char_length(btrim(label_key)) > 0",
+            name="label_key_not_blank",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'array'",
+            name="evidence_array",
+        ),
+        Index("ix_model_assignments_message", "message_id", "target_scope"),
+        Index("ix_model_assignments_target", "target_id", "activated"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    stage_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("stage_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    target_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    image_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("image_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    video_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("video_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    label_definition_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "label_definition_versions.id",
+            name="fk_label_definition_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    label_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    activated: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    negative: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
