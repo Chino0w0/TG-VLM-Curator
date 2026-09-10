@@ -11,6 +11,7 @@ M1_REVISION = "94c2d3062de4"
 M2_REVISION = "2f1c6d8e4a90"
 M3_REVISION = "b8e6c4f2a137"
 M4_REVISION = "c4a9e7d2f5b1"
+M5_REVISION = "d7b3f9a1e6c2"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -146,6 +147,210 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         self.assertIn("input manifests are immutable", result.stdout)
         self.assertIn("TIMESTAMP WITH TIME ZONE", result.stdout)
         self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_upgrade_renders_complete_m5_postgresql_ddl_without_connecting(self) -> None:
+        result = self.run_alembic("upgrade", M5_REVISION, "--sql")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for table_name in (
+            "manual_label_assignments",
+            "message_review_events",
+            "routing_policies",
+            "routing_policy_versions",
+            "routing_rules",
+            "rendering_templates",
+            "rendering_template_versions",
+            "routing_actions",
+            "routing_evaluations",
+            "publication_intents",
+        ):
+            self.assertIn(f"CREATE TABLE {table_name}", result.stdout)
+        self.assertIn(
+            "ALTER TABLE messages ADD COLUMN review_status VARCHAR(24) "
+            "DEFAULT 'unreviewed' NOT NULL",
+            result.stdout,
+        )
+        for constraint_name in (
+            "ck_messages_message_review_status",
+            "ck_manual_label_assignments_manual_label_target_identity",
+            "ck_manual_label_assignments_manual_label_payload",
+            "ck_message_review_events_review_event_status_changed",
+            "ck_routing_policy_versions_routing_version_lifecycle",
+            "ck_routing_rules_routing_rule_condition_object",
+            "ck_routing_actions_routing_action_rendering_template",
+            "ck_rendering_template_versions_rendering_content_hash_format",
+            "ck_routing_evaluations_routing_evaluation_hash_format",
+            "ck_publication_intents_publication_intent_status",
+            "ck_publication_intents_publication_intent_rendering_template",
+            "uq_publication_intent_evaluation_action",
+            "uq_publication_intents_business_idempotency_key",
+        ):
+            self.assertIn(constraint_name, result.stdout)
+        for foreign_key_name in (
+            "fk_routing_rules_policy_version",
+            "fk_rendering_versions_template",
+            "fk_routing_actions_rendering_version",
+            "fk_routing_evaluations_policy_version",
+            "fk_publication_intents_evaluation",
+            "fk_publication_intents_policy_version",
+            "fk_publication_intents_destination",
+            "fk_publication_intents_rendering_version",
+        ):
+            self.assertIn(foreign_key_name, result.stdout)
+        self.assertIn("facts_snapshot JSONB NOT NULL", result.stdout)
+        self.assertIn("rule_outcomes JSONB NOT NULL", result.stdout)
+        self.assertIn("condition JSONB NOT NULL", result.stdout)
+        self.assertIn(
+            "CREATE UNIQUE INDEX uq_routing_policy_one_published",
+            result.stdout,
+        )
+        self.assertIn(
+            "CREATE UNIQUE INDEX uq_rendering_template_one_published",
+            result.stdout,
+        )
+        self.assertIn(
+            "CREATE INDEX ix_publication_intents_pending ON publication_intents "
+            "(status, created_at) WHERE status = 'pending'",
+            result.stdout,
+        )
+        for function_name in (
+            "tgcurator_reject_manual_label_assignment_mutation",
+            "tgcurator_reject_message_review_event_mutation",
+            "tgcurator_enforce_routing_version_immutability",
+            "tgcurator_require_draft_routing_policy_version",
+            "tgcurator_require_draft_routing_action_owner",
+            "tgcurator_reject_routing_evaluation_mutation",
+            "tgcurator_enforce_publication_intent_identity",
+        ):
+            self.assertIn(f"CREATE FUNCTION {function_name}()", result.stdout)
+        for trigger_name in (
+            "trg_manual_label_assignments_append_only",
+            "trg_message_review_events_append_only",
+            "trg_routing_policy_version_immutable",
+            "trg_rendering_template_version_immutable",
+            "trg_routing_rules_draft_only",
+            "trg_routing_actions_draft_only",
+            "trg_routing_evaluations_immutable",
+            "trg_publication_intents_identity_immutable",
+        ):
+            self.assertIn(f"CREATE TRIGGER {trigger_name}", result.stdout)
+        for invariant_message in (
+            "manual label assignments are append-only",
+            "message review events are append-only",
+            "published routing configuration version content is immutable",
+            "routing rules may mutate only for draft routing policy versions",
+            "routing actions may mutate only for draft routing policy versions",
+            "routing evaluations are immutable",
+            "publication intents cannot be deleted",
+            "publication intent identity is immutable",
+        ):
+            self.assertIn(invariant_message, result.stdout)
+        self.assertIn(
+            "to_jsonb(NEW) - ''state'' - ''archived_at'' - ''updated_at''",
+            result.stdout,
+        )
+        self.assertIn(
+            "to_jsonb(NEW) - ''status'' - ''updated_at''",
+            result.stdout,
+        )
+        self.assertIn("TIMESTAMP WITH TIME ZONE", result.stdout)
+        self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_m5_downgrade_restores_the_m4_schema(self) -> None:
+        result = self.run_alembic(
+            "downgrade",
+            f"{M5_REVISION}:{M4_REVISION}",
+            "--sql",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        trigger_names = (
+            "trg_publication_intents_identity_immutable",
+            "trg_routing_evaluations_immutable",
+            "trg_routing_actions_draft_only",
+            "trg_routing_rules_draft_only",
+            "trg_rendering_template_version_immutable",
+            "trg_routing_policy_version_immutable",
+            "trg_message_review_events_append_only",
+            "trg_manual_label_assignments_append_only",
+        )
+        for trigger_name in trigger_names:
+            self.assertIn(f"DROP TRIGGER {trigger_name}", result.stdout)
+        function_names = (
+            "tgcurator_enforce_publication_intent_identity",
+            "tgcurator_reject_routing_evaluation_mutation",
+            "tgcurator_require_draft_routing_action_owner",
+            "tgcurator_require_draft_routing_policy_version",
+            "tgcurator_enforce_routing_version_immutability",
+            "tgcurator_reject_message_review_event_mutation",
+            "tgcurator_reject_manual_label_assignment_mutation",
+        )
+        for function_name in function_names:
+            self.assertIn(f"DROP FUNCTION {function_name}()", result.stdout)
+        for index_name in (
+            "ix_publication_intents_pending",
+            "ix_publication_intents_message",
+            "ix_routing_evaluations_message",
+            "ix_routing_actions_rule",
+            "ix_routing_rules_policy_order",
+            "uq_rendering_template_one_published",
+            "uq_routing_policy_one_published",
+            "ix_review_events_message_created",
+            "ix_manual_labels_target_label",
+            "ix_manual_labels_message_created",
+        ):
+            self.assertIn(f"DROP INDEX {index_name}", result.stdout)
+        table_names = (
+            "publication_intents",
+            "routing_evaluations",
+            "routing_actions",
+            "routing_rules",
+            "rendering_template_versions",
+            "routing_policy_versions",
+            "rendering_templates",
+            "routing_policies",
+            "message_review_events",
+            "manual_label_assignments",
+        )
+        for table_name in table_names:
+            self.assertIn(f"DROP TABLE {table_name}", result.stdout)
+        self.assertIn(
+            "ALTER TABLE messages DROP CONSTRAINT ck_messages_message_review_status",
+            result.stdout,
+        )
+        self.assertIn("ALTER TABLE messages DROP COLUMN review_status", result.stdout)
+
+        first_table_drop = min(
+            result.stdout.index(f"DROP TABLE {table_name}") for table_name in table_names
+        )
+        last_trigger_drop = max(
+            result.stdout.index(f"DROP TRIGGER {trigger_name}") for trigger_name in trigger_names
+        )
+        last_function_drop = max(
+            result.stdout.index(f"DROP FUNCTION {function_name}()")
+            for function_name in function_names
+        )
+        self.assertLess(last_trigger_drop, first_table_drop)
+        self.assertLess(last_function_drop, first_table_drop)
+
+        ordered_tables = (
+            "publication_intents",
+            "routing_evaluations",
+            "routing_actions",
+            "routing_rules",
+            "rendering_template_versions",
+            "routing_policy_versions",
+            "rendering_templates",
+            "routing_policies",
+        )
+        table_positions = [
+            result.stdout.index(f"DROP TABLE {table_name}") for table_name in ordered_tables
+        ]
+        self.assertEqual(table_positions, sorted(table_positions))
+        self.assertLess(
+            result.stdout.index("DROP TABLE manual_label_assignments"),
+            result.stdout.index("DROP COLUMN review_status"),
+        )
 
     def test_m4_downgrade_restores_the_m3_schema(self) -> None:
         result = self.run_alembic(

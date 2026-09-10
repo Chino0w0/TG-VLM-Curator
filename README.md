@@ -7,7 +7,8 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 **M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
 **M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
-workflows**, and **M4 - versioned analysis engine and provider adapters** are complete.
+workflows**, **M4 - versioned analysis engine and provider adapters**, and **M5 - human
+review and routing workflows** are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -73,6 +74,27 @@ missing provider configuration records an explicit failed InferenceCall and dura
 retry or terminal-failure state instead of fabricating a successful result. API readiness checks
 PostgreSQL only, so provider unavailability remains a degraded business capability rather than
 making the administration API unavailable.
+
+M5, completed on 2026-09-09, adds:
+
+- append-only manual `set`/`clear` label events and append-only review-status transition
+  events, with `review_status` retained only as explicit workflow/filter state rather than an
+  implicit routing gate;
+- separate model, manual, and effective label namespaces for GLOBAL and MEDIA targets: the latest
+  manual event by `(created_at, event_id)` wins, a set overrides the matching model value, and a
+  clear removes the override and falls back to the model value when one exists;
+- publishable routing-policy and rendering-template versions with draft-only rules/actions, plus a
+  non-executable routing DSL for activation and score predicates, `any_media`/`none_media`,
+  deterministic `(-priority, rule_id)` ordering, `stop_on_match`, and conservative unknown
+  propagation;
+- canonical PostgreSQL routing-fact snapshots and SHA-256 hashes, write-free dry runs, duplicate
+  request-ID reuse, and explicit reroutes that use new request IDs while retaining prior history;
+- atomic persistence of each formal routing evaluation with zero-to-many durable
+  `PublicationIntent(status="pending")` records and stable publication identity fields.
+
+Routing performs no LLM/provider inference, Telegram calls, Celery dispatch, or publication worker
+work. M5 stops at durable pending intents; publication leases, attempts, retries, FloodWait
+handling, Telegram delivery, and reconciliation remain M6.
 
 See tg-vlm-curator-module-implementation.md for module boundaries and acceptance criteria.
 

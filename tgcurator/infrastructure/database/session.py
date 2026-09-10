@@ -70,10 +70,12 @@ class AsyncDatabase:
         return True
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
+    async def session(self, *, isolation_level: str | None = None) -> AsyncIterator[AsyncSession]:
         await self.connect()
         assert self._session_factory is not None
         async with self._session_factory() as session:
+            if isolation_level is not None:
+                await session.connection(execution_options={"isolation_level": isolation_level})
             yield session
 
     async def dispose(self) -> None:

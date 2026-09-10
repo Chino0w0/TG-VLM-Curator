@@ -17,7 +17,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M2 | Durable ProcessingRange and RangeExecution scheduling | Complete |
 | M3 | Telegram ingestion and media archive workflows | Complete |
 | M4 | Versioned analysis engine and provider adapters | Complete (2026-09-09) |
-| M5 | Human review and routing workflows | Pending |
+| M5 | Human review and routing workflows | Complete (2026-09-09) |
 | M6 | Publication and operations | Pending |
 
 ## Dependency rule
@@ -150,10 +150,42 @@ checks. Domain, orchestrator, worker, repository, provider-adapter, schema, migr
 runtime tests require no running PostgreSQL, Redis, Telegram session, external provider, or
 inference model.
 
-## M5 - Human review and routing
+## M5 - Human review and routing (complete 2026-09-09)
 
-M5 will preserve model, manual, and effective labels separately; add review workflows; and
-persist routing evaluations plus PublicationIntent records.
+M5 adds append-only manual label assignment events with explicit `set` and `clear` operations
+for GLOBAL message targets and MEDIA image/video targets. Model assignments remain immutable,
+manual edits never mutate an AnalysisRun, and current routing facts expose independent `model`,
+`manual`, and `effective` namespaces. Events are resolved by `(created_at, event_id)`: the
+latest manual set overrides the corresponding model assignment, while the latest clear removes the
+manual override and falls back to the model value when one exists.
+
+Message review uses explicit `unreviewed`, `in_review`, `reviewed`, and `needs_attention`
+workflow state plus append-only transition history. `review_status` is available for filtering
+and as an explicit routing fact, but routing does not treat it as an implicit approval gate.
+
+Versioned routing policies, rules, actions, rendering templates, and template versions are stored
+in PostgreSQL with draft-only editing and published-version immutability. The constrained routing
+DSL evaluates GLOBAL/MEDIA labels across model/manual/effective namespaces, activation state,
+scores, `any_media` and `none_media` predicates, ordinary message/source/media facts, and
+unknown propagation that cannot be inverted into a match. Enabled rules execute in stable
+`(-priority, rule_id)` order, accumulate zero-to-many actions, and stop only after a matched
+`stop_on_match` rule.
+
+Each routing request loads one PostgreSQL snapshot, resolves labels, canonicalizes and hashes the
+facts, and evaluates without external side effects. Dry runs return the complete decision while
+writing nothing. A duplicate formal request ID reuses its original evaluation and intents; an
+explicit reroute uses a new request ID and preserves the prior history. Formal persistence is one
+atomic `RoutingEvaluation + PublicationIntents[]` transaction, and each produced intent starts
+as `pending` with immutable routing/publication identity fields and a stable business
+idempotency key.
+
+M5 calls no LLM, inference provider, Telegram client, Celery dispatcher, or publishing worker. It
+creates durable pending PublicationIntent records only. Publication leases and attempts, retries,
+FloodWait handling, Telegram calls, partial recovery, and reconciliation remain M6.
+
+Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline Alembic
+checks. Domain, service, repository, schema, and migration tests require no running PostgreSQL,
+Redis, Telegram session, external inference provider, or inference model.
 
 ## M6 - Publication and operations
 
