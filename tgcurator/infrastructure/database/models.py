@@ -563,6 +563,10 @@ class MessageRecord(TimestampMixin, Base):
             name="message_processing_status",
         ),
         CheckConstraint(
+            "review_status IN ('unreviewed', 'in_review', 'reviewed', 'needs_attention')",
+            name="message_review_status",
+        ),
+        CheckConstraint(
             "visual_fingerprint IS NULL "
             "OR (char_length(visual_fingerprint) = 64 "
             "AND visual_fingerprint !~ '[^0-9a-f]')",
@@ -625,6 +629,12 @@ class MessageRecord(TimestampMixin, Base):
         nullable=False,
         default="ingested",
         server_default=text("'ingested'"),
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="unreviewed",
+        server_default=text("'unreviewed'"),
     )
     media_count: Mapped[int] = mapped_column(
         Integer,
@@ -1990,4 +2000,460 @@ class ModelLabelAssignmentRecord(CreatedAtMixin, Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+
+class ManualLabelAssignmentRecord(CreatedAtMixin, Base):
+    __tablename__ = "manual_label_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope IN ('global', 'media')",
+            name="manual_label_target_scope",
+        ),
+        CheckConstraint(
+            "target_kind IN ('message', 'image_asset', 'video_asset')",
+            name="manual_label_target_kind",
+        ),
+        CheckConstraint(
+            "(target_kind = 'message' AND target_scope = 'global' "
+            "AND target_id = message_id AND image_asset_id IS NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(target_kind = 'image_asset' AND target_scope = 'media' "
+            "AND target_id = image_asset_id AND image_asset_id IS NOT NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(target_kind = 'video_asset' AND target_scope = 'media' "
+            "AND target_id = video_asset_id AND video_asset_id IS NOT NULL "
+            "AND image_asset_id IS NULL)",
+            name="manual_label_target_identity",
+        ),
+        CheckConstraint(
+            "operation IN ('set', 'clear')",
+            name="manual_label_operation",
+        ),
+        CheckConstraint(
+            "(operation = 'set' AND score IS NOT NULL AND activated IS NOT NULL) OR "
+            "(operation = 'clear' AND score IS NULL AND activated IS NULL)",
+            name="manual_label_payload",
+        ),
+        CheckConstraint(
+            "score IS NULL OR (score >= 0 AND score <= 1)",
+            name="manual_label_score",
+        ),
+        CheckConstraint(
+            "char_length(btrim(label_key)) > 0",
+            name="manual_label_key_not_blank",
+        ),
+        Index(
+            "ix_manual_labels_message_created",
+            "message_id",
+            "created_at",
+        ),
+        Index(
+            "ix_manual_labels_target_label",
+            "target_id",
+            "label_definition_version_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    target_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    image_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("image_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    video_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("video_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    label_definition_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "label_definition_versions.id",
+            name="fk_manual_labels_definition_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    label_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    operation: Mapped[str] = mapped_column(String(16), nullable=False)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    activated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    actor_admin_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MessageReviewEventRecord(CreatedAtMixin, Base):
+    __tablename__ = "message_review_events"
+    __table_args__ = (
+        CheckConstraint(
+            "old_status IN ('unreviewed', 'in_review', 'reviewed', 'needs_attention')",
+            name="review_event_old_status",
+        ),
+        CheckConstraint(
+            "new_status IN ('unreviewed', 'in_review', 'reviewed', 'needs_attention')",
+            name="review_event_new_status",
+        ),
+        CheckConstraint(
+            "old_status <> new_status",
+            name="review_event_status_changed",
+        ),
+        Index("ix_review_events_message_created", "message_id", "created_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    old_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    new_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    actor_admin_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RoutingPolicyRecord(TimestampMixin, Base):
+    __tablename__ = "routing_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="routing_policy_name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class RoutingPolicyVersionRecord(TimestampMixin, Base):
+    __tablename__ = "routing_policy_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "routing_policy_id",
+            "version_number",
+            name="uq_routing_policy_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="routing_version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="routing_version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="routing_version_lifecycle",
+        ),
+        Index(
+            "uq_routing_policy_one_published",
+            "routing_policy_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    routing_policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("routing_policies.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RoutingRuleRecord(TimestampMixin, Base):
+    __tablename__ = "routing_rules"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(condition) = 'object'",
+            name="routing_rule_condition_object",
+        ),
+        Index(
+            "ix_routing_rules_policy_order",
+            "routing_policy_version_id",
+            "priority",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    routing_policy_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "routing_policy_versions.id",
+            name="fk_routing_rules_policy_version",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    condition: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    stop_on_match: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+
+class RenderingTemplateRecord(TimestampMixin, Base):
+    __tablename__ = "rendering_templates"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="rendering_template_name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class RenderingTemplateVersionRecord(TimestampMixin, Base):
+    __tablename__ = "rendering_template_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "rendering_template_id",
+            "version_number",
+            name="uq_rendering_template_version_number",
+        ),
+        UniqueConstraint(
+            "rendering_template_id",
+            "content_hash",
+            name="uq_rendering_template_content_hash",
+        ),
+        CheckConstraint("version_number > 0", name="rendering_version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="rendering_version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) OR "
+            "(state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) OR "
+            "(state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="rendering_version_lifecycle",
+        ),
+        CheckConstraint(
+            "char_length(content_hash) = 64 AND content_hash !~ '[^0-9a-f]'",
+            name="rendering_content_hash_format",
+        ),
+        Index(
+            "uq_rendering_template_one_published",
+            "rendering_template_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    rendering_template_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "rendering_templates.id",
+            name="fk_rendering_versions_template",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default=text("'draft'")
+    )
+    template_text: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RoutingActionRecord(TimestampMixin, Base):
+    __tablename__ = "routing_actions"
+    __table_args__ = (
+        UniqueConstraint(
+            "routing_rule_id",
+            "output_order",
+            name="uq_routing_action_output_order",
+        ),
+        CheckConstraint(
+            "publication_mode IN ('native_forward_with_supplement', 'copy_with_caption', "
+            "'forward_only', 'metadata_only')",
+            name="routing_action_publication_mode",
+        ),
+        CheckConstraint(
+            "(publication_mode = 'forward_only' AND rendering_template_version_id IS NULL) OR "
+            "(publication_mode <> 'forward_only' AND rendering_template_version_id IS NOT NULL)",
+            name="routing_action_rendering_template",
+        ),
+        CheckConstraint(
+            "output_order >= 0",
+            name="routing_action_output_order_nonnegative",
+        ),
+        Index("ix_routing_actions_rule", "routing_rule_id", "output_order"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    routing_rule_id: Mapped[UUID] = mapped_column(
+        ForeignKey("routing_rules.id", ondelete="CASCADE"), nullable=False
+    )
+    destination_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey("destination_channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    publication_mode: Mapped[str] = mapped_column(String(48), nullable=False)
+    rendering_template_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "rendering_template_versions.id",
+            name="fk_routing_actions_rendering_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    publish_identity_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("telegram_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    output_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class RoutingEvaluationRecord(CreatedAtMixin, Base):
+    __tablename__ = "routing_evaluations"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(routing_request_id)) > 0",
+            name="routing_evaluation_request_not_blank",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(facts_snapshot) = 'object'",
+            name="routing_evaluation_facts_object",
+        ),
+        CheckConstraint(
+            "char_length(facts_hash) = 64 AND facts_hash !~ '[^0-9a-f]'",
+            name="routing_evaluation_hash_format",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(rule_outcomes) = 'array'",
+            name="routing_evaluation_outcomes_array",
+        ),
+        Index("ix_routing_evaluations_message", "message_id", "created_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    routing_request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    routing_policy_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "routing_policy_versions.id",
+            name="fk_routing_evaluations_policy_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    facts_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    facts_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule_outcomes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    stopped_at_rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("routing_rules.id", ondelete="RESTRICT"), nullable=True
+    )
+
+
+class PublicationIntentRecord(TimestampMixin, Base):
+    __tablename__ = "publication_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "routing_evaluation_id",
+            "routing_action_id",
+            name="uq_publication_intent_evaluation_action",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'sent', 'partial', 'retry_wait', "
+            "'failed', 'cancelled')",
+            name="publication_intent_status",
+        ),
+        CheckConstraint(
+            "publication_mode IN ('native_forward_with_supplement', 'copy_with_caption', "
+            "'forward_only', 'metadata_only')",
+            name="publication_intent_mode",
+        ),
+        CheckConstraint(
+            "(publication_mode = 'forward_only' AND rendering_template_version_id IS NULL) OR "
+            "(publication_mode <> 'forward_only' AND rendering_template_version_id IS NOT NULL)",
+            name="publication_intent_rendering_template",
+        ),
+        CheckConstraint(
+            "char_length(btrim(routing_request_id)) > 0",
+            name="publication_intent_request_not_blank",
+        ),
+        CheckConstraint(
+            "char_length(business_idempotency_key) > 0",
+            name="publication_intent_key_not_blank",
+        ),
+        Index("ix_publication_intents_message", "message_id", "created_at"),
+        Index(
+            "ix_publication_intents_pending",
+            "status",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    routing_evaluation_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "routing_evaluations.id",
+            name="fk_publication_intents_evaluation",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    routing_request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    routing_policy_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "routing_policy_versions.id",
+            name="fk_publication_intents_policy_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    routing_rule_id: Mapped[UUID] = mapped_column(
+        ForeignKey("routing_rules.id", ondelete="RESTRICT"), nullable=False
+    )
+    routing_action_id: Mapped[UUID] = mapped_column(
+        ForeignKey("routing_actions.id", ondelete="RESTRICT"), nullable=False
+    )
+    destination_channel_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "destination_channels.id",
+            name="fk_publication_intents_destination",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    publish_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("telegram_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    publication_mode: Mapped[str] = mapped_column(String(48), nullable=False)
+    rendering_template_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "rendering_template_versions.id",
+            name="fk_publication_intents_rendering_version",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    business_idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="pending", server_default=text("'pending'")
     )

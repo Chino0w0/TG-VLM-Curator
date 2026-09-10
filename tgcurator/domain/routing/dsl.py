@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
+from hashlib import sha256
 from numbers import Real
 from typing import Any
 
@@ -72,6 +74,14 @@ def _validate(
     if operator == "not":
         _validate(payload, allowed_fact_keys=allowed_fact_keys, depth=depth + 1)
         return
+    if operator == "label":
+        _validate_label_payload(payload, media_context=False)
+        return
+    if operator in {"any_media", "none_media"}:
+        if not isinstance(payload, Mapping) or set(payload) != {"label"}:
+            raise DomainValidationError(f"{operator} requires exactly one label condition")
+        _validate_label_payload(payload["label"], media_context=True)
+        return
     if operator == "label_score":
         _validate_comparison_payload(
             payload, allowed_fact_keys=allowed_fact_keys, numeric_only=True
@@ -127,6 +137,32 @@ def _validate_fact(fact: Any, allowed_fact_keys: set[str] | None) -> None:
         raise DomainValidationError(f"fact is not allowed by the routing schema: {fact!r}")
 
 
+def _validate_label_payload(payload: Any, *, media_context: bool) -> None:
+    if not isinstance(payload, Mapping):
+        raise DomainValidationError("label condition must be an object")
+    comparisons = {"score_gt", "score_gte", "score_lt", "score_lte", "score_eq"}
+    allowed = {"namespace", "scope", "key", *comparisons}
+    if set(payload) - allowed:
+        raise DomainValidationError("label condition contains unsupported fields")
+    if payload.get("namespace") not in {"model", "manual", "effective"}:
+        raise DomainValidationError("label namespace must be model, manual, or effective")
+    if not isinstance(payload.get("key"), str) or not payload["key"].strip():
+        raise DomainValidationError("label key must not be blank")
+    scope = payload.get("scope")
+    expected_scope = "media" if media_context else "global"
+    if scope is not None and scope != expected_scope:
+        raise DomainValidationError("label scope is incompatible with its routing context")
+    if not media_context and scope != "global":
+        raise DomainValidationError("global label conditions must specify scope=global")
+    selected = comparisons.intersection(payload)
+    if len(selected) > 1:
+        raise DomainValidationError("label condition accepts at most one score comparison")
+    if selected:
+        threshold = payload[next(iter(selected))]
+        if not _is_number(threshold) or not 0.0 <= float(threshold) <= 1.0:
+            raise DomainValidationError("label score comparison must be in [0, 1]")
+
+
 def _evaluate(condition: Mapping[str, Any], facts: Mapping[str, Any]) -> bool | _Unknown:
     if "fact" in condition or "op" in condition:
         return _evaluate_leaf(condition, facts)
@@ -150,15 +186,30 @@ def _evaluate(condition: Mapping[str, Any], facts: Mapping[str, Any]) -> bool | 
     if operator == "not":
         result = _evaluate(payload, facts)
         return _UNKNOWN if result is _UNKNOWN else not result
+    if operator == "label":
+        return _evaluate_label(payload, facts)
+    if operator in {"any_media", "none_media"}:
+        media = _resolve_fact(facts, f"labels.{payload['label']['namespace']}.media")
+        if not isinstance(media, Mapping):
+            return _UNKNOWN
+        saw_unknown = False
+        for entry in media.values():
+            result = _evaluate_label(payload["label"], facts, media_entry=entry)
+            if result is True:
+                return False if operator == "none_media" else True
+            saw_unknown = saw_unknown or result is _UNKNOWN
+        if saw_unknown:
+            return _UNKNOWN
+        return operator == "none_media"
     if operator == "label_score":
         return _compare(
-            facts.get(payload["fact"], _UNKNOWN),
+            _resolve_fact(facts, payload["fact"]),
             payload["op"],
             payload["value"],
             numeric_only=True,
         )
     if operator == "label_present":
-        value = facts.get(payload["fact"], _UNKNOWN)
+        value = _resolve_fact(facts, payload["fact"])
         if value is _UNKNOWN or not _is_number(value):
             return _UNKNOWN
         return value >= payload.get("minimum_score", 0.0)
@@ -166,15 +217,54 @@ def _evaluate(condition: Mapping[str, Any], facts: Mapping[str, Any]) -> bool | 
 
 
 def _evaluate_leaf(payload: Mapping[str, Any], facts: Mapping[str, Any]) -> bool | _Unknown:
+    actual = _resolve_fact(facts, payload["fact"])
     if payload["op"] == "exists":
-        if payload["fact"] not in facts:
+        return _UNKNOWN if actual is _UNKNOWN else actual is not None
+    return _compare(actual, payload["op"], payload["value"], numeric_only=False)
+
+
+def _resolve_fact(facts: Mapping[str, Any], fact: str) -> Any:
+    if fact in facts:
+        return facts[fact]
+    current: Any = facts
+    for component in fact.split("."):
+        if not isinstance(current, Mapping) or component not in current:
             return _UNKNOWN
-        return facts[payload["fact"]] is not None
+        current = current[component]
+    return current
+
+
+def _evaluate_label(
+    payload: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    media_entry: Any = None,
+) -> bool | _Unknown:
+    if media_entry is None:
+        value = _resolve_fact(
+            facts,
+            f"labels.{payload['namespace']}.global.{payload['key']}",
+        )
+    elif isinstance(media_entry, Mapping):
+        labels = media_entry.get("labels", _UNKNOWN)
+        value = labels.get(payload["key"], _UNKNOWN) if isinstance(labels, Mapping) else _UNKNOWN
+    else:
+        return _UNKNOWN
+    if not isinstance(value, Mapping):
+        return _UNKNOWN
+    comparisons = {
+        "score_gt": "gt",
+        "score_gte": "gte",
+        "score_lt": "lt",
+        "score_lte": "lte",
+        "score_eq": "eq",
+    }
+    selected = next((name for name in comparisons if name in payload), None)
+    if selected is None:
+        activated = value.get("activated", _UNKNOWN)
+        return activated if isinstance(activated, bool) else _UNKNOWN
     return _compare(
-        facts.get(payload["fact"], _UNKNOWN),
-        payload["op"],
-        payload["value"],
-        numeric_only=False,
+        value.get("score", _UNKNOWN), comparisons[selected], payload[selected], numeric_only=True
     )
 
 
@@ -219,6 +309,41 @@ def _compare(actual: Any, operator: str, expected: Any, *, numeric_only: bool) -
             return _UNKNOWN
         return actual.startswith(expected)
     return _UNKNOWN
+
+
+def canonical_facts_snapshot(facts: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a detached JSON facts object with deterministic key ordering."""
+    if not isinstance(facts, Mapping):
+        raise DomainValidationError("facts must be a mapping")
+    try:
+        canonical = json.dumps(
+            facts,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        decoded = json.loads(canonical)
+    except (TypeError, ValueError) as exc:
+        raise DomainValidationError("facts must be finite JSON-compatible data") from exc
+    if not isinstance(decoded, dict):
+        raise DomainValidationError("facts must encode a JSON object")
+    return decoded
+
+
+def canonical_facts_json(facts: Mapping[str, Any]) -> str:
+    snapshot = canonical_facts_snapshot(facts)
+    return json.dumps(
+        snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def facts_snapshot_hash(facts: Mapping[str, Any]) -> str:
+    return sha256(canonical_facts_json(facts).encode("utf-8")).hexdigest()
 
 
 def _is_number(value: Any) -> bool:

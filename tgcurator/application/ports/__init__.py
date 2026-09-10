@@ -47,6 +47,16 @@ from .processing import (
     ScheduledProcessingRange,
 )
 from .reconciliation import SourceReconciliationCursorRepository
+from .review import ReviewRepository
+from .routing import (
+    PublicationIntentDraft,
+    RoutingEvaluationDraft,
+    RoutingExecutionResult,
+    RoutingRepository,
+    RoutingRequest,
+    RoutingSnapshot,
+    validate_routing_request_reuse,
+)
 from .secrets import SecretStatus, SecretVault
 from .source_lifecycle import SourceMessageLifecycleRepository
 
@@ -83,7 +93,14 @@ __all__ = [
     "PasswordHasher",
     "PendingRangeExecution",
     "ProcessingRangeScheduleRepository",
+    "PublicationIntentDraft",
     "RangeExecutionWorkerRepository",
+    "ReviewRepository",
+    "RoutingEvaluationDraft",
+    "RoutingExecutionResult",
+    "RoutingRepository",
+    "RoutingRequest",
+    "RoutingSnapshot",
     "ScheduledProcessingRange",
     "SecretStatus",
     "SecretVault",
@@ -101,4 +118,5 @@ __all__ = [
     "VideoFrameReadyMetadata",
     "VideoMetadataProbe",
     "VideoProbeMetadata",
+    "validate_routing_request_reuse",
 ]
