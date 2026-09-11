@@ -44,13 +44,25 @@ M4_TABLES = {
     "stage_runs",
     "model_label_assignments",
 }
+M5_TABLES = {
+    "manual_label_assignments",
+    "message_review_events",
+    "routing_policies",
+    "routing_policy_versions",
+    "routing_rules",
+    "rendering_templates",
+    "rendering_template_versions",
+    "routing_actions",
+    "routing_evaluations",
+    "publication_intents",
+}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_exactly_the_documented_m1_through_m4_tables(self) -> None:
+    def test_schema_contains_exactly_the_documented_m1_through_m5_tables(self) -> None:
         self.assertEqual(
             set(Base.metadata.tables),
-            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES,
+            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES,
         )
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:
@@ -296,6 +308,109 @@ class DatabaseSchemaTests(unittest.TestCase):
             self.assertTrue(constraint.use_alter)
             self.assertEqual(constraint.referred_table.name, referred_table)
 
+    def test_m5_review_history_and_workflow_state_are_explicit(self) -> None:
+        message = Base.metadata.tables["messages"]
+        self.assertEqual(message.c.review_status.default.arg, "unreviewed")
+        self.assertEqual(str(message.c.review_status.server_default.arg), "'unreviewed'")
+        self.assertIn(
+            "ck_messages_message_review_status",
+            {str(constraint.name) for constraint in message.constraints},
+        )
+
+        manual = Base.metadata.tables["manual_label_assignments"]
+        self.assertTrue(
+            {
+                "ck_manual_label_assignments_manual_label_target_scope",
+                "ck_manual_label_assignments_manual_label_target_kind",
+                "ck_manual_label_assignments_manual_label_target_identity",
+                "ck_manual_label_assignments_manual_label_operation",
+                "ck_manual_label_assignments_manual_label_payload",
+                "ck_manual_label_assignments_manual_label_score",
+                "ck_manual_label_assignments_manual_label_key_not_blank",
+            }.issubset({str(constraint.name) for constraint in manual.constraints})
+        )
+        self.assertTrue(
+            {"ix_manual_labels_message_created", "ix_manual_labels_target_label"}.issubset(
+                {index.name for index in manual.indexes}
+            )
+        )
+
+        review = Base.metadata.tables["message_review_events"]
+        self.assertTrue(
+            {
+                "ck_message_review_events_review_event_old_status",
+                "ck_message_review_events_review_event_new_status",
+                "ck_message_review_events_review_event_status_changed",
+            }.issubset({str(constraint.name) for constraint in review.constraints})
+        )
+        self.assertIn("ix_review_events_message_created", {index.name for index in review.indexes})
+
+    def test_m5_version_lifecycle_indexes_and_json_snapshots_are_constrained(self) -> None:
+        version_tables = {
+            "routing_policy_versions": (
+                "routing_version_positive",
+                "routing_version_state",
+                "routing_version_lifecycle",
+                "uq_routing_policy_one_published",
+            ),
+            "rendering_template_versions": (
+                "rendering_version_positive",
+                "rendering_version_state",
+                "rendering_version_lifecycle",
+                "uq_rendering_template_one_published",
+            ),
+        }
+        for table_name, (*constraint_suffixes, published_index_name) in version_tables.items():
+            table = Base.metadata.tables[table_name]
+            constraints = {str(constraint.name) for constraint in table.constraints}
+            for suffix in constraint_suffixes:
+                self.assertIn(f"ck_{table_name}_{suffix}", constraints)
+            published = {index.name: index for index in table.indexes}[published_index_name]
+            self.assertTrue(published.unique)
+            self.assertIsNotNone(published.dialect_options["postgresql"]["where"])
+
+        self.assertIsInstance(Base.metadata.tables["routing_rules"].c.condition.type, JSONB)
+        evaluation = Base.metadata.tables["routing_evaluations"]
+        self.assertIsInstance(evaluation.c.facts_snapshot.type, JSONB)
+        self.assertIsInstance(evaluation.c.rule_outcomes.type, JSONB)
+        self.assertIn(
+            "ck_routing_evaluations_routing_evaluation_hash_format",
+            {str(constraint.name) for constraint in evaluation.constraints},
+        )
+        rendering = Base.metadata.tables["rendering_template_versions"]
+        self.assertIn(
+            "ck_rendering_template_versions_rendering_content_hash_format",
+            {str(constraint.name) for constraint in rendering.constraints},
+        )
+        action = Base.metadata.tables["routing_actions"]
+        self.assertIn(
+            "ck_routing_actions_routing_action_rendering_template",
+            {str(constraint.name) for constraint in action.constraints},
+        )
+
+    def test_m5_publication_intent_identity_and_pending_scan_are_unique(self) -> None:
+        evaluation = Base.metadata.tables["routing_evaluations"]
+        self.assertIn(
+            "uq_routing_evaluations_routing_request_id",
+            {str(constraint.name) for constraint in evaluation.constraints},
+        )
+
+        intent = Base.metadata.tables["publication_intents"]
+        constraints = {str(constraint.name) for constraint in intent.constraints}
+        self.assertTrue(
+            {
+                "uq_publication_intent_evaluation_action",
+                "uq_publication_intents_business_idempotency_key",
+                "ck_publication_intents_publication_intent_status",
+                "ck_publication_intents_publication_intent_mode",
+                "ck_publication_intents_publication_intent_rendering_template",
+            }.issubset(constraints)
+        )
+        indexes = {index.name: index for index in intent.indexes}
+        self.assertIn("ix_publication_intents_message", indexes)
+        pending = indexes["ix_publication_intents_pending"]
+        self.assertIsNotNone(pending.dialect_options["postgresql"]["where"])
+
     def test_all_m4_timestamps_and_message_block_time_are_timezone_aware(self) -> None:
         for table_name in M4_TABLES:
             table = Base.metadata.tables[table_name]
@@ -306,6 +421,14 @@ class DatabaseSchemaTests(unittest.TestCase):
         blocked_at = Base.metadata.tables["messages"].c.blocked_at.type
         self.assertIsInstance(blocked_at, DateTime)
         self.assertTrue(blocked_at.timezone)
+
+    def test_all_m5_timestamps_are_timezone_aware(self) -> None:
+        for table_name in M5_TABLES:
+            table = Base.metadata.tables[table_name]
+            timestamp_columns = [column for column in table.c if isinstance(column.type, DateTime)]
+            self.assertTrue(timestamp_columns, table_name)
+            for column in timestamp_columns:
+                self.assertTrue(column.type.timezone, f"{table_name}.{column.name}")
 
     def test_business_timestamps_are_timezone_aware(self) -> None:
         timestamp_columns = {

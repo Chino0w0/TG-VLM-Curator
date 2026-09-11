@@ -1,6 +1,6 @@
 # Agent Handoff - TG-VLM-Curator
 
-Updated: September 9, 2026 (Asia/Shanghai)
+Updated: September 10, 2026 (Asia/Shanghai)
 Workspace: E:\Project\TG-VLM-Curator
 Remote: https://github.com/Chino0w0/TG-VLM-Curator
 
@@ -15,88 +15,101 @@ Remote: https://github.com/Chino0w0/TG-VLM-Curator
 
 ## Current delivery
 
-- M0, M1, M2, and M3 are merged into origin/main.
-- M4 is completed on branch module/m4-analysis-engine, based on origin/main at 787dab9.
-- M4 is delivered as one implementation commit and one English pull request against main.
-- M5 human review/routing and M6 publication/operations remain pending.
+- M0, M1, M2, M3, and M4 are merged into origin/main.
+- M4 was merged through English pull request #25 at merge commit b27d0b5; its implementation
+  commit remains 9bc76d4.
+- M5 human review/routing is the current delivery on branch module/m5-human-review-routing, based
+  directly on the M4 merge commit.
+- M5 implementation, migration, tests, documentation, and final local validation are complete on
+  the branch and are delivered as exactly one implementation commit and one English pull request.
+- M6 publication/operations remains pending.
 
-## M4 completed scope
+## M5 completed scope
 
-M4 implements the versioned analysis engine and external-provider adapter boundary:
+M5 implements append-only human review, deterministic routing, and the durable handoff to future
+publication execution:
 
-- Immutable draft/published/retired versions for label definitions, label sets, prompts,
-  inference profiles, analysis stages, and analysis pipelines.
-- Draft-only label bindings and pipeline nodes, published-version immutability, validated DAG
-  dependencies, and deterministic run_if fact conditions.
-- Dynamic dense/sparse JSON Schemas keyed to stable message or asset target IDs.
-- Strict structured-output validation with partial batch commits and per-target retry for missing
-  or invalid results.
-- Immutable InputManifest snapshots and semantic cache keys isolated by stage, prompt, label set,
-  response schema, inference profile, provider parameters, and actual inputs.
-- GLOBAL and MEDIA multi-label results, formal ModelLabelAssignments, test-run isolation, and
-  first-cause Negative Gate blocking of later analysis.
-- Durable AnalysisRun, StageRun, InferenceCall, and assignment persistence with short leases,
-  expired-lease recovery, bounded attempts, exact cache provenance, and sanitized error/audit
-  payloads.
-- Provider-neutral orchestration that persists a pending InferenceCall before provider I/O and
-  keeps network calls outside database transactions.
-- An initial OpenAI-compatible external HTTP adapter with secret resolution, structured-output
-  requests, bounded response handling, stable retry classification, and credential/URL redaction.
-- Celery/runtime registration for the dedicated analysis queue and UUID-only
-  tgcurator.analysis task.
+- Append-only manual label events with `set` and `clear` operations for GLOBAL message targets
+  and MEDIA image/video targets; model assignments and AnalysisRuns are never mutated.
+- Independent model, manual, and effective label namespaces. The latest manual event by
+  `(created_at, event_id)` wins; set overrides a matching model value, while clear removes the
+  override and falls back to model state.
+- Explicit append-only message review transitions across `unreviewed`, `in_review`,
+  `reviewed`, and `needs_attention`. `review_status` is workflow/filter state and an
+  available fact, not an implicit routing gate.
+- Immutable published/archived routing-policy and rendering-template versions with draft-only
+  routing rules and actions.
+- A constrained non-executable routing DSL supporting ordinary facts, model/manual/effective
+  GLOBAL and MEDIA labels, activation and score predicates, `any_media`/`none_media`, stable
+  `(-priority, rule_id)` order, `stop_on_match`, and conservative unknown propagation.
+- Canonical facts snapshots and SHA-256 hashes derived from one PostgreSQL routing snapshot.
+- Write-free dry runs, duplicate formal request-ID reuse, and explicit rerouting through new
+  request IDs without deleting earlier evaluations or intents.
+- Atomic formal persistence of one immutable RoutingEvaluation and zero-to-many pending
+  PublicationIntents with immutable identity fields and stable business idempotency keys.
 
-## Provider availability and failure behavior
+## M5 execution boundary
 
-No inference model or provider is bundled or deployed. An operator must configure a real external
-provider endpoint and secret before inference can succeed. The default runtime intentionally uses
-AnalysisOrchestrator(provider=None).
+Routing loads business state from PostgreSQL and produces deterministic decisions. It calls no LLM,
+external inference provider, Telegram client, Celery dispatcher, or publishing worker. Dry runs
+write nothing. Formal runs write only their routing evaluation and pending publication intents.
 
-Missing provider configuration is not treated as success and does not fabricate labels. The worker
-first persists the pending InferenceCall, records InferenceProviderNotConfigured, and moves each
-affected StageRun into explicit durable retry_wait state or terminal failed state when its bounded
-attempt limit is reached. API readiness continues to depend on PostgreSQL rather than the optional
-inference provider.
+Publication leases, attempts, retries, FloodWait handling, Telegram delivery, partial recovery, and
+reconciliation belong to M6 and must not be pulled into M5.
 
-## M4 migration
+## M5 migration
 
-- Revision: c4a9e7d2f5b1
-- Down revision: b8e6c4f2a137
-- File: migrations/versions/c4a9e7d2f5b1_m4_versioned_analysis_engine.py
+- Revision: d7b3f9a1e6c2
+- Down revision: c4a9e7d2f5b1
+- File: migrations/versions/d7b3f9a1e6c2_m5_human_review_routing.py
 - Chronology date: September 9, 2026
-- Adds 19 M4 tables, message Negative Gate cause columns/foreign keys, lifecycle constraints,
-  partial unique indexes, and PostgreSQL immutability/draft-only triggers.
-- Offline upgrade to M4 and downgrade from M4 to M3 are covered by integration tests.
+- Adds `messages.review_status` and ten tables for manual labels, review events, routing policies
+  and versions, rules, rendering templates and versions, actions, evaluations, and publication
+  intents.
+- Adds JSONB snapshots, lifecycle/hash/identity constraints, short explicit foreign-key names,
+  published-version and pending-intent partial indexes, and PostgreSQL append-only/immutability/
+  draft-only triggers.
+- Offline upgrade to M5 and downgrade from M5 to M4 are covered by integration tests, including
+  dependency-safe trigger, function, index, and table removal ordering.
 
 ## Important implementation locations
 
-- tgcurator/domain/analysis/
-- tgcurator/application/analysis/
-- tgcurator/application/ports/analysis.py
-- tgcurator/infrastructure/database/analysis_repository.py
-- tgcurator/infrastructure/inference/openai_compatible.py
-- tgcurator/infrastructure/queue/celery_dispatcher.py
-- apps/worker/runtime.py
-- apps/worker/celery_app.py
-- migrations/versions/c4a9e7d2f5b1_m4_versioned_analysis_engine.py
-- tests/unit/test_analysis_engine_domain.py
-- tests/unit/test_analysis_orchestrator.py
-- tests/unit/test_analysis_worker.py
-- tests/unit/test_analysis_repository.py
-- tests/unit/test_openai_compatible_inference.py
+- tgcurator/domain/review/
+- tgcurator/domain/routing/
+- tgcurator/domain/publishing/idempotency.py
+- tgcurator/application/review/
+- tgcurator/application/routing/
+- tgcurator/application/ports/review.py
+- tgcurator/application/ports/routing.py
+- tgcurator/infrastructure/database/review_repository.py
+- tgcurator/infrastructure/database/routing_repository.py
+- tgcurator/infrastructure/database/models.py
+- migrations/versions/d7b3f9a1e6c2_m5_human_review_routing.py
+- tests/unit/test_review.py
+- tests/unit/test_review_service.py
+- tests/unit/test_review_repository.py
+- tests/unit/test_routing.py
+- tests/unit/test_routing_service.py
+- tests/unit/test_routing_repository.py
+- tests/unit/test_publishing.py
+- tests/unit/test_database_schema.py
 - tests/integration/test_alembic_offline_sql.py
 
-## Final M4 validation
+## Final M5 validation
 
-The M4 branch passes the required local gates without a running PostgreSQL server, Redis broker,
-Telegram identity/session, external inference provider, or inference model:
+The M5 working tree passes the required local gates without a running PostgreSQL server, Redis
+broker, Telegram identity/session, external inference provider, inference model, or publication
+worker:
 
-- Ruff formatting check and lint.
-- Full pytest suite: 252 passed with two dependency deprecation warnings.
-- Unit unittest discovery suite: 243 passed.
-- Integration unittest discovery suite: 9 passed.
+- Focused M5 domain, service, repository, publishing, schema, and migration suite: 65 passed.
+- Ruff formatting check: 175 files already formatted.
+- Ruff lint: all checks passed.
+- Full pytest suite: 286 passed with two dependency deprecation warnings.
+- Unit unittest discovery suite: 275 passed.
+- Integration unittest discovery suite: 11 passed.
 - compileall for apps, tgcurator, and tests.
-- pip check.
-- Offline PostgreSQL Alembic upgrade to M4 and M4-to-M3 downgrade rendering.
+- pip check: no broken requirements.
+- Offline PostgreSQL Alembic upgrade through M5 and M5-to-M4 downgrade rendering.
 - git diff --check and final working-tree audit.
 
 The two pytest warnings are existing FastAPI/Starlette compatibility deprecations for the httpx
@@ -104,8 +117,6 @@ TestClient import path and the AnyIO BlockingPortal alias; they do not fail the 
 
 ## Next modules
 
-- M5 remains pending: preserve model/manual/effective labels separately, add human review, persist
-  routing evaluations, and create PublicationIntent records.
 - M6 remains pending: publication leases and attempts, FloodWait retry, partial recovery,
   reconciliation, metrics, service health, archive cleanup dry-runs, and failure injection.
 - Keep future work on separate module branches and separate pull requests.

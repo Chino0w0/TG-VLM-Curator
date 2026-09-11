@@ -21,6 +21,8 @@ from .processing_repository import (
     range_execution_claim_statement,
 )
 from .reconciliation_repository import SqlAlchemySourceReconciliationCursorRepository
+from .review_repository import SqlAlchemyReviewRepository
+from .routing_repository import SqlAlchemyRoutingRepository, routing_evaluation_insert_statement
 from .secret_vault import SecretNotFoundError, SecretTypeMismatchError, SqlAlchemySecretVault
 from .session import AsyncDatabase, InvalidDatabaseUrlError, validate_async_database_url
 from .source_lifecycle_repository import SqlAlchemySourceMessageLifecycleRepository
@@ -37,10 +39,13 @@ __all__ = [
     "SqlAlchemyImageArchiveWorkRepository",
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
+    "SqlAlchemyReviewRepository",
+    "SqlAlchemyRoutingRepository",
     "analysis_stage_run_claim_statement",
     "due_wakeup_claim_statement",
     "processing_range_freeze_statement",
     "range_execution_claim_statement",
+    "routing_evaluation_insert_statement",
     "SqlAlchemyAdminBootstrapRepository",
     "SqlAlchemySecretVault",
     "SqlAlchemySourceMessageLifecycleRepository",
