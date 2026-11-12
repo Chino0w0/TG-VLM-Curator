@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from celery.signals import worker_shutting_down
+from celery.signals import worker_process_shutdown, worker_shutting_down
 
 from tgcurator.application import get_settings
 from tgcurator.application.analysis import ANALYSIS_QUEUE
@@ -114,6 +114,7 @@ def main(argv: list[str] | None = None) -> None:
     from apps.worker.runtime import terminate_registered_media_extractors
 
     @worker_shutting_down.connect
+    @worker_process_shutdown.connect
     def _on_worker_shutdown(**_kwargs: object) -> None:
         terminate_registered_media_extractors()
 

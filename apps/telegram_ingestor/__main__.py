@@ -41,6 +41,9 @@ async def run_ingestor_daemon(
     ticks = 0
     try:
         while not managed_stop.is_set():
+            poll = getattr(runtime, "poll_updates", None)
+            if poll is not None:
+                await poll(now=datetime.now(UTC))
             await runtime.flush_due_groups(now=datetime.now(UTC))
             ticks += 1
             if once:
