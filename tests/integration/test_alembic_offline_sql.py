@@ -12,6 +12,7 @@ M2_REVISION = "2f1c6d8e4a90"
 M3_REVISION = "b8e6c4f2a137"
 M4_REVISION = "c4a9e7d2f5b1"
 M5_REVISION = "d7b3f9a1e6c2"
+M6_REVISION = "e6d4a8b2c951"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -255,6 +256,136 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         )
         self.assertIn("TIMESTAMP WITH TIME ZONE", result.stdout)
         self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_upgrade_renders_complete_m6_postgresql_ddl_without_connecting(self) -> None:
+        result = self.run_alembic("upgrade", M6_REVISION, "--sql")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for table_name in (
+            "publish_attempts",
+            "publish_records",
+            "archive_cleanup_dry_runs",
+            "archive_cleanup_jobs",
+            "archive_cleanup_items",
+        ):
+            self.assertIn(f"CREATE TABLE {table_name}", result.stdout)
+        for column_name in (
+            "protected_content_fallback",
+            "rendered_context",
+            "main_random_ids",
+            "completed_parts",
+            "lease_token",
+            "completed_at",
+        ):
+            self.assertIn(
+                f"ALTER TABLE publication_intents ADD COLUMN {column_name}",
+                result.stdout,
+            )
+        for table_name in ("image_assets", "video_assets"):
+            self.assertIn(
+                f"ALTER TABLE {table_name} ADD COLUMN cleanup_job_id UUID",
+                result.stdout,
+            )
+            self.assertIn(
+                f"ALTER TABLE {table_name} ADD COLUMN previous_archive_size BIGINT",
+                result.stdout,
+            )
+        for column_name in (
+            "archive_state",
+            "archive_deleted_at",
+            "cleanup_job_id",
+            "previous_archive_size",
+        ):
+            self.assertIn(
+                f"ALTER TABLE video_frames ADD COLUMN {column_name}",
+                result.stdout,
+            )
+        for constraint_name in (
+            "ck_publication_intents_publication_intent_lease",
+            "ck_publication_intents_publication_intent_rendered_snapshot",
+            "ck_publish_attempts_publish_attempt_status",
+            "ck_publish_records_publish_record_remote_ids",
+            "ck_archive_cleanup_jobs_cleanup_job_lease",
+            "ck_archive_cleanup_items_cleanup_item_deletion_token",
+            "ck_image_assets_image_asset_cleanup_audit",
+            "ck_video_assets_video_asset_cleanup_audit",
+            "ck_video_frames_video_frame_cleanup_audit",
+        ):
+            self.assertIn(constraint_name, result.stdout)
+        self.assertIn(
+            "CREATE INDEX ix_publication_intents_pending ON publication_intents "
+            "(status, created_at) WHERE status IN ('pending', 'partial')",
+            result.stdout,
+        )
+        self.assertIn("CREATE INDEX ix_publication_intents_status_lease", result.stdout)
+        self.assertIn("CREATE INDEX ix_publication_intents_retry_due", result.stdout)
+        self.assertIn("CREATE INDEX ix_cleanup_jobs_status_lease", result.stdout)
+        self.assertIn("CREATE INDEX ix_cleanup_items_job_status", result.stdout)
+        self.assertIn(
+            "CREATE OR REPLACE FUNCTION tgcurator_enforce_publication_intent_identity()",
+            result.stdout,
+        )
+        self.assertIn("- ''main_random_ids''", result.stdout)
+        self.assertIn("- ''completed_at''", result.stdout)
+        self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_m6_downgrade_restores_the_m5_schema(self) -> None:
+        result = self.run_alembic(
+            "downgrade",
+            f"{M6_REVISION}:{M5_REVISION}",
+            "--sql",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for table_name in (
+            "archive_cleanup_items",
+            "archive_cleanup_jobs",
+            "archive_cleanup_dry_runs",
+            "publish_records",
+            "publish_attempts",
+        ):
+            self.assertIn(f"DROP TABLE {table_name}", result.stdout)
+        for table_name in ("image_assets", "video_assets"):
+            self.assertIn(
+                f"ALTER TABLE {table_name} DROP COLUMN cleanup_job_id",
+                result.stdout,
+            )
+            self.assertIn(
+                f"ALTER TABLE {table_name} DROP COLUMN previous_archive_size",
+                result.stdout,
+            )
+        for column_name in (
+            "archive_state",
+            "archive_deleted_at",
+            "cleanup_job_id",
+            "previous_archive_size",
+        ):
+            self.assertIn(
+                f"ALTER TABLE video_frames DROP COLUMN {column_name}",
+                result.stdout,
+            )
+        for column_name in (
+            "protected_content_fallback",
+            "rendered_context",
+            "main_random_ids",
+            "completed_parts",
+            "lease_token",
+            "completed_at",
+        ):
+            self.assertIn(
+                f"ALTER TABLE publication_intents DROP COLUMN {column_name}",
+                result.stdout,
+            )
+        self.assertIn(
+            "CREATE INDEX ix_publication_intents_pending ON publication_intents "
+            "(status, created_at) WHERE status = 'pending'",
+            result.stdout,
+        )
+        self.assertIn(
+            "CREATE OR REPLACE FUNCTION tgcurator_enforce_publication_intent_identity()",
+            result.stdout,
+        )
+        self.assertNotIn("- ''main_random_ids''", result.stdout)
 
     def test_m5_downgrade_restores_the_m4_schema(self) -> None:
         result = self.run_alembic(

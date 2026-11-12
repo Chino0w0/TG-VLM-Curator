@@ -7,11 +7,24 @@ from .analysis_repository import (
     sanitize_identifier,
     sanitize_json,
 )
+from .cleanup_repository import (
+    SqlAlchemyArchiveCleanupRepository,
+    cleanup_asset_in_use_statement,
+    cleanup_complete_wakeup_statement,
+    cleanup_image_candidates_statement,
+    cleanup_job_claim_statement,
+    cleanup_repair_candidates_statement,
+    cleanup_video_candidates_statement,
+)
 from .image_archive_repository import (
     SqlAlchemyImageArchiveMetadataRepository,
     SqlAlchemyImageArchiveWorkRepository,
 )
 from .message_ingest_repository import SqlAlchemyTelegramMessageIngestRepository
+from .operations_repository import (
+    SqlAlchemyOperationsBacklogRepository,
+    operations_backlog_statement,
+)
 from .processing_repository import (
     SqlAlchemyDurableWakeupRepository,
     SqlAlchemyProcessingRangeScheduleRepository,
@@ -19,6 +32,12 @@ from .processing_repository import (
     due_wakeup_claim_statement,
     processing_range_freeze_statement,
     range_execution_claim_statement,
+)
+from .publication_repository import (
+    SqlAlchemyPublicationRepository,
+    publication_complete_wakeup_statement,
+    publication_intent_claim_statement,
+    publication_repair_candidates_statement,
 )
 from .reconciliation_repository import SqlAlchemySourceReconciliationCursorRepository
 from .review_repository import SqlAlchemyReviewRepository
@@ -34,16 +53,29 @@ __all__ = [
     "SecretNotFoundError",
     "SecretTypeMismatchError",
     "SqlAlchemyAnalysisStageRunRepository",
+    "SqlAlchemyArchiveCleanupRepository",
     "SqlAlchemyDurableWakeupRepository",
+    "SqlAlchemyPublicationRepository",
     "SqlAlchemyImageArchiveMetadataRepository",
     "SqlAlchemyImageArchiveWorkRepository",
+    "SqlAlchemyOperationsBacklogRepository",
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",
     "SqlAlchemyReviewRepository",
     "SqlAlchemyRoutingRepository",
     "analysis_stage_run_claim_statement",
+    "cleanup_asset_in_use_statement",
+    "cleanup_complete_wakeup_statement",
+    "cleanup_image_candidates_statement",
+    "cleanup_job_claim_statement",
+    "cleanup_repair_candidates_statement",
+    "cleanup_video_candidates_statement",
     "due_wakeup_claim_statement",
+    "operations_backlog_statement",
     "processing_range_freeze_statement",
+    "publication_complete_wakeup_statement",
+    "publication_intent_claim_statement",
+    "publication_repair_candidates_statement",
     "range_execution_claim_statement",
     "routing_evaluation_insert_statement",
     "SqlAlchemyAdminBootstrapRepository",

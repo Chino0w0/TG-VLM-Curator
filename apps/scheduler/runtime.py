@@ -6,7 +6,13 @@ from datetime import datetime
 from pydantic import SecretStr
 
 from tgcurator.application import Settings
+from tgcurator.application.ports.cleanup import ArchiveCleanupRepository
+from tgcurator.application.ports.operations import (
+    OperationsBacklogRepository,
+    OperationsTelemetry,
+)
 from tgcurator.application.ports.processing import LatestBoundarySource
+from tgcurator.application.ports.publishing import PublicationRepository
 from tgcurator.application.processing import (
     DurableWakeupDispatcher,
     ProcessingRangeScheduler,
@@ -15,9 +21,13 @@ from tgcurator.application.processing import (
 )
 from tgcurator.infrastructure.database import (
     AsyncDatabase,
+    SqlAlchemyArchiveCleanupRepository,
     SqlAlchemyDurableWakeupRepository,
+    SqlAlchemyOperationsBacklogRepository,
     SqlAlchemyProcessingRangeScheduleRepository,
+    SqlAlchemyPublicationRepository,
 )
+from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.infrastructure.queue import CeleryTaskDispatcher, create_celery_client
 
 
@@ -25,6 +35,8 @@ from tgcurator.infrastructure.queue import CeleryTaskDispatcher, create_celery_c
 class SchedulerCycleReport:
     range_schedule: RangeScheduleReport
     wakeup_dispatch: WakeupDispatchReport
+    repaired_publication_wakeups: int = 0
+    repaired_cleanup_wakeups: int = 0
 
 
 @dataclass(slots=True)
@@ -38,13 +50,67 @@ class SchedulerRuntime:
     database: AsyncDatabase
     range_scheduler: ProcessingRangeScheduler
     wakeup_dispatcher: DurableWakeupDispatcher
+    publication_repository: PublicationRepository | None = None
+    cleanup_repository: ArchiveCleanupRepository | None = None
+    backlog_repository: OperationsBacklogRepository | None = None
+    telemetry: OperationsTelemetry | None = None
 
-    async def run_once(self, *, now: datetime, dispatch_limit: int = 100) -> SchedulerCycleReport:
-        range_schedule = await self.range_scheduler.schedule(now=now)
-        wakeup_dispatch = await self.wakeup_dispatcher.dispatch_due(now=now, limit=dispatch_limit)
+    async def run_once(
+        self,
+        *,
+        now: datetime,
+        dispatch_limit: int = 100,
+        publication_repair_limit: int = 500,
+        cleanup_repair_limit: int = 500,
+    ) -> SchedulerCycleReport:
+        try:
+            repaired_publication_wakeups = 0
+            if self.publication_repository is not None:
+                repaired_publication_wakeups = await self.publication_repository.repair_wakeups(
+                    now=now,
+                    limit=publication_repair_limit,
+                )
+            repaired_cleanup_wakeups = 0
+            if self.cleanup_repository is not None:
+                repaired_cleanup_wakeups = await self.cleanup_repository.repair_wakeups(
+                    now=now,
+                    limit=cleanup_repair_limit,
+                )
+            range_schedule = await self.range_scheduler.schedule(now=now)
+            wakeup_dispatch = await self.wakeup_dispatcher.dispatch_due(
+                now=now,
+                limit=dispatch_limit,
+            )
+            if self.telemetry is not None:
+                if self.backlog_repository is not None:
+                    backlog = await self.backlog_repository.observe_backlog(now=now)
+                    self.telemetry.observe_backlog(
+                        publication_pending=backlog.publication_pending,
+                        publication_partial=backlog.publication_partial,
+                        publication_retry_due=backlog.publication_retry_due,
+                        cleanup_pending=backlog.cleanup_pending,
+                        cleanup_retry_due=backlog.cleanup_retry_due,
+                        durable_wakeups_due=backlog.durable_wakeups_due,
+                        observed_at=now,
+                    )
+                self.telemetry.heartbeat_scheduler(
+                    at=now,
+                    database_ready=True,
+                    broker_ready=wakeup_dispatch.failed_dispatches == 0,
+                )
+        except Exception:
+            if self.telemetry is not None:
+                self.telemetry.heartbeat_scheduler(
+                    at=now,
+                    database_ready=False,
+                    broker_ready=False,
+                )
+            raise
         return SchedulerCycleReport(
             range_schedule=range_schedule,
             wakeup_dispatch=wakeup_dispatch,
+            repaired_publication_wakeups=repaired_publication_wakeups,
+            repaired_cleanup_wakeups=repaired_cleanup_wakeups,
         )
 
     async def close(self) -> None:
@@ -55,6 +121,7 @@ def create_scheduler_runtime(
     *,
     settings: Settings,
     latest_boundary_source: LatestBoundarySource,
+    telemetry: OperationsTelemetry | None = None,
 ) -> SchedulerRuntime:
     """Compose durable scheduling with a Celery producer.
 
@@ -77,6 +144,10 @@ def create_scheduler_runtime(
         database=database,
         range_scheduler=range_scheduler,
         wakeup_dispatcher=wakeup_dispatcher,
+        publication_repository=SqlAlchemyPublicationRepository(database),
+        cleanup_repository=SqlAlchemyArchiveCleanupRepository(database),
+        backlog_repository=SqlAlchemyOperationsBacklogRepository(database),
+        telemetry=telemetry if telemetry is not None else OperationsMonitor(),
     )
 
 

@@ -163,6 +163,20 @@ def analysis_stage_run_claim_statement(*, stage_run_id: UUID, now: datetime):
     )
 
 
+def analysis_target_asset_lock_statement(*, target_kind: str, asset_id: UUID):
+    """Lock a READY media asset before a media-target stage run can start."""
+
+    if target_kind == "image_asset":
+        model = ImageAssetRecord
+    elif target_kind == "video_asset":
+        model = VideoAssetRecord
+    else:
+        raise DomainValidationError("target_kind must identify an image or video asset")
+    return (
+        select(model).where(model.id == asset_id, model.archive_state == "ready").with_for_update()
+    )
+
+
 class SqlAlchemyAnalysisStageRunRepository:
     """PostgreSQL-backed, lease-safe persistence for provider-neutral analysis work."""
 
@@ -191,6 +205,15 @@ class SqlAlchemyAnalysisStageRunRepository:
                 )
                 if run is None or run.status in _TERMINAL_RUN_STATUSES:
                     return None
+                if row.target_kind in ("image_asset", "video_asset"):
+                    asset = await session.scalar(
+                        analysis_target_asset_lock_statement(
+                            target_kind=row.target_kind,
+                            asset_id=row.target_id,
+                        )
+                    )
+                    if asset is None:
+                        return None
                 if row.attempt_count >= row.max_attempts:
                     await self._terminalize_exhausted(session=session, row=row, run=run, now=now)
                     return None
