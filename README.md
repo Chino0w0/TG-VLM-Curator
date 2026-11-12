@@ -10,8 +10,9 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
 review and routing workflows**, **M6 - publication, archive cleanup, and operations**,
 **M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**,
-**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**, and
-**M9 - React + TypeScript + Vite web administration console**
+**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**,
+**M9 - React + TypeScript + Vite web administration console**, and
+**M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification**
 are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
@@ -175,8 +176,28 @@ M9, completed on 2026-11-12, adds:
   evaluation, mandatory two-step `Archive Management` (`Dry-Run` before `Confirm`), `Operations`
   step-level retries, and sanitized `Audit Log` browsing.
 
-See tg-vlm-curator-module-implementation.md for module boundaries, the M10 roadmap, and
-acceptance criteria.
+M10, completed on 2026-11-12, adds:
+
+- production `docker/backend.Dockerfile`, `docker/web.Dockerfile`, `docker/nginx.conf`,
+  `.dockerignore`, `.env.example`, and `docker-compose.yml` orchestrating the ten core services
+  (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`,
+  `worker-analysis`, `worker-publish`, `worker-maintenance`), four persistent volumes
+  (`postgres-data`, `redis-data`, `archive-data`, `temp-media`), and read-only file secret
+  `app_master_key`, with strictly zero bundled LLM/VLM services;
+- graceful `SIGTERM` daemon entrypoints (`python -m apps.scheduler`,
+  `python -m apps.telegram_ingestor`, `python -m apps.worker --role ...`), active `ffprobe`/`ffmpeg`
+  child-process termination on worker shutdown, and `tgcurator-healthcheck` (`apps/healthcheck.py`)
+  enforcing PostgreSQL-only readiness on `api`/`ingestor` and PostgreSQL + Redis readiness on
+  `scheduler`/`worker`;
+- operator backup and restore scripts (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
+  `scripts/restore-postgres.sh`) plus the `StorageConsistencyScanner` and
+  `tgcurator-check-consistency` CLI (`apps/worker/consistency_cli.py`) verifying `READY` archive
+  blobs and reporting corrupted or orphan files;
+- end-to-end closed-loop pipeline, recovery, cleanup, consistency, and Admin API security
+  verification (`tests/e2e/test_closed_loop_pipeline.py`) driven by deterministic
+  `FakeTelegramAdapter` and `FakeInferenceProvider` harnesses.
+
+See tg-vlm-curator-module-implementation.md for module boundaries and acceptance criteria.
 
 ## Dependency direction
 
@@ -227,6 +248,26 @@ Health endpoints:
 - GET /health/live checks the API process;
 - GET /health/ready checks PostgreSQL and returns HTTP 503 when unavailable.
 
+## Docker Compose deployment & operations
+
+Generate a 32-byte base64 master key in `secrets/app_master_key.txt` (backed up independently in an
+offline secret vault — PostgreSQL backups cannot decrypt secrets without this key), configure `.env`
+from `.env.example`, start the stack, apply migrations, and bootstrap the sole administrator:
+
+    Copy-Item .env.example .env
+    New-Item -ItemType Directory -Force secrets | Out-Null
+    python -c "import base64, os; open('secrets/app_master_key.txt', 'w').write(base64.b64encode(os.urandom(32)).decode())"
+    docker compose up -d --build
+    docker compose exec api alembic upgrade head
+    docker compose exec api tgcurator-bootstrap-admin --username curator
+
+Backup, restore, and post-restore archive storage consistency verification:
+
+    bash scripts/backup-postgres.sh
+    bash scripts/backup-media.sh
+    bash scripts/restore-postgres.sh --yes-restore backups/<dump>.dump
+    docker compose exec worker-maintenance tgcurator-check-consistency --verify-sha256
+
 Run the module acceptance suite without requiring Redis, Telegram credentials, or an inference
 model:
 
@@ -235,7 +276,8 @@ model:
     .venv\Scripts\python.exe -m pytest
     .venv\Scripts\python.exe -m unittest discover -s tests/unit -v
     .venv\Scripts\python.exe -m unittest discover -s tests/integration -v
-    .venv\Scripts\python.exe -m compileall -q apps tgcurator tests
+    .venv\Scripts\python.exe -m unittest discover -s tests/e2e -v
+    .venv\Scripts\python.exe -m compileall -q apps tgcurator migrations tests
     .venv\Scripts\python.exe -m pip check
     Set-Location web ; npm.cmd run typecheck ; npm.cmd test ; npm.cmd run build ; Set-Location ..
     git diff --check

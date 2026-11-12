@@ -31,6 +31,14 @@ class Settings(BaseSettings):
         ),
     )
     app_master_key_id: str = "primary"
+    archive_root: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TGCURATOR_ARCHIVE_ROOT", "ARCHIVE_ROOT"),
+    )
+    temp_media_dir: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TGCURATOR_TEMP_MEDIA_DIR", "TEMP_MEDIA_DIR"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

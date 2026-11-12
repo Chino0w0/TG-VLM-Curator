@@ -22,11 +22,36 @@ Remote: https://github.com/Chino0w0/TG-VLM-Curator
   `module/m6-publication-lifecycle`.
 - M8 (`module/m8-admin-api`) is open as PR #29 (`6b086aa`), stacked on
   `module/m7-pipeline-orchestration`.
-- M9 (`module/m9-web-admin`) is stacked on `module/m8-admin-api` and delivers the complete React +
-  TypeScript + Vite single-administrator web console under `web/` across all architectural
-  workspaces, backed by strict `tsc --noEmit`, Vitest + Testing Library component tests, and Vite
-  production builds.
-- M10 remains in tg-vlm-curator-module-implementation.md.
+- M9 (`module/m9-web-admin`) is open as PR #30 (`eb08a7b`), stacked on `module/m8-admin-api`.
+- M10 (`module/m10-deployment-and-operations`) is stacked on `module/m9-web-admin` and completes the
+  entire first-edition TG-VLM-Curator architecture (M0-M10): production 10-service Docker Compose
+  topology, graceful `SIGTERM` daemons and FFmpeg child-process cleanup, backup/restore scripts,
+  `StorageConsistencyScanner`, and closed-loop E2E verification.
+
+## M10 completed scope
+
+M10 delivers the production container topology, operational tooling, and closed-loop E2E suite:
+
+- Container & Compose topology (`docker/backend.Dockerfile`, `docker/web.Dockerfile`,
+  `docker/nginx.conf`, `.dockerignore`, `.env.example`, `docker-compose.yml`): exact 10 core
+  services (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`,
+  `worker-analysis`, `worker-publish`, `worker-maintenance`), 4 named volumes (`postgres-data`,
+  `redis-data`, `archive-data`, `temp-media`), read-only file secret `app_master_key`, and strictly
+  zero bundled LLM/VLM services.
+- Daemon lifecycles, subprocess cleanup, and health probes (`apps/scheduler/__main__.py`,
+  `apps/telegram_ingestor/__main__.py`, `apps/worker/__main__.py`, `apps/worker/runtime.py`,
+  `tgcurator/infrastructure/media/ffmpeg.py`, `apps/healthcheck.py`): graceful `SIGTERM`/`SIGINT`
+  shutdown loops, media-group flush before ingestor exit, active `ffprobe`/`ffmpeg` child-process
+  termination on worker shutdown, `_LocalStorageResolver` archive cleanup wiring, and PostgreSQL vs
+  PostgreSQL+Redis service readiness probes (`tgcurator-healthcheck`).
+- Backup/restore & consistency scanner (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
+  `scripts/restore-postgres.sh`, `tgcurator/domain/archive/consistency.py`,
+  `tgcurator/application/maintenance/consistency.py`,
+  `tgcurator/infrastructure/database/consistency_repository.py`, `apps/worker/consistency_cli.py`):
+  UTC timestamp + SHA-256 backup manifests, independent `APP_MASTER_KEY` vault reminders, and
+  `tgcurator-check-consistency` verifying `READY` archive blobs against observed files.
+- Closed-loop E2E & topology tests (`tests/e2e/test_closed_loop_pipeline.py`,
+  `tests/unit/test_consistency_scanner.py`, `tests/unit/test_deployment_topology.py`).
 
 ## M9 completed scope
 
@@ -148,8 +173,10 @@ and publication settlement into one continuous PostgreSQL-backed lifecycle:
 - tests/unit/test_pipeline_coordinator.py
 - tests/unit/test_telegram_ingestor_runtime.py
 
-## Next modules
+## Stacked PR chain (all left open for user review)
 
-- M10 (`module/m10-deployment-and-operations`): Docker Compose 10-service topology, graceful
-  daemon lifecycles, backup/restore scripts, storage consistency scanner, and closed-loop E2E
-  verification.
+- `main` <- PR #27 `module/m6-publication-lifecycle`
+- `module/m6-publication-lifecycle` <- PR #28 `module/m7-pipeline-orchestration`
+- `module/m7-pipeline-orchestration` <- PR #29 `module/m8-admin-api`
+- `module/m8-admin-api` <- PR #30 `module/m9-web-admin`
+- `module/m9-web-admin` <- PR #31 `module/m10-deployment-and-operations`

@@ -17,6 +17,7 @@ from .cleanup_repository import (
     cleanup_repair_candidates_statement,
     cleanup_video_candidates_statement,
 )
+from .consistency_repository import SqlAlchemyArchiveConsistencyRepository
 from .image_archive_repository import (
     SqlAlchemyImageArchiveMetadataRepository,
     SqlAlchemyImageArchiveWorkRepository,
@@ -56,6 +57,7 @@ __all__ = [
     "SecretTypeMismatchError",
     "SqlAlchemyAnalysisStageRunRepository",
     "SqlAlchemyArchiveCleanupRepository",
+    "SqlAlchemyArchiveConsistencyRepository",
     "SqlAlchemyDurableWakeupRepository",
     "SqlAlchemyPublicationRepository",
     "SqlAlchemyImageArchiveMetadataRepository",
