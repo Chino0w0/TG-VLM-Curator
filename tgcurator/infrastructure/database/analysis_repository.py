@@ -554,7 +554,9 @@ class SqlAlchemyAnalysisStageRunRepository:
                     created_at=now,
                 )
                 session.add(manifest_row)
+                await session.flush()
                 session.add(inference_call)
+                await session.flush()
                 for row in rows.values():
                     row.input_manifest_id = manifest_row.id
                     row.inference_call_id = inference_call.id
@@ -896,6 +898,11 @@ class SqlAlchemyAnalysisStageRunRepository:
                 )
                 if run is None:
                     return False
+                if run.run_mode == "reanalysis":
+                    from .reanalysis_repository import advance_reanalysis_in_session
+
+                    await advance_reanalysis_in_session(session=session, run=run, now=now)
+                    return True
                 stages = tuple(
                     await session.scalars(
                         select(StageRunRecord)
