@@ -296,20 +296,36 @@ schema, and offline Alembic (`a8b2d4e1f305`) gates across session/CSRF security,
 isolation, configuration immutability, DAG/DSL validation, Prompt Test Bench side-effect isolation,
 cursor pagination, review/reroute/skip/cleanup workflows, and `/metrics` exposition.
 
-## M9 - React + TypeScript + Vite web administration console (pending)
+## M9 - React + TypeScript + Vite web administration console (complete 2026-11-12)
 
 M9 implements the single-administrator React + TypeScript + Vite SPA under `web/` covering all
-eleven architectural workspaces:
+architectural workspaces and administration workflows:
 
-- `Dashboard`, `Source Channels`, `Processing Ranges`, and `Telegram Identities`;
-- cursor-paginated `Messages` browser, full causal `Message Detail` view (raw Telegram snapshot
-  through media archive, `AnalysisRun`/`StageRun`/`InferenceCall`, `ModelLabelAssignment`, manual
-  events, `RoutingEvaluation`, `PublicationIntent`, `PublishRecord`, and `AuditEvent`), and
-  `Review` queue workflows;
-- `Analysis Configuration` with interactive `Prompt Test Bench`, `Routing` rule/template authoring
-  with dry-run comparison, two-step `Archive Management` (`Dry-Run` before `Confirm`), plus
-  `Operations` and `Audit Log` views, backed by strict TypeScript typechecking, component tests,
-  and production build checks.
+- `LoginView` and `AdminApiClient` (`web/src/api/client.ts`) with `credentials: "include"` session
+  cookie propagation, automatic `X-CSRF-Token` injection on mutating requests, autofill-compliant
+  username/password controls, accessible password reveal toggle, and explicit logout;
+- `Dashboard`, `Source Channels`, `Processing Ranges` (`FIXED` / `LATEST` steady-state quiet window
+  watermarks, pause/resume, `RangeExecution` drill-down), and `Telegram Identities` (write-only
+  `EncryptedSecret` creation and rotation that immediately scrub plaintext and display `"Configured"`
+  metadata only, plus `TelegramCapabilityResolver` simulation);
+- cursor-paginated `Messages` browser across all 16 Section 37 filters, full 6-stage causal-chain
+  `Message Detail` inspector (Telegram parts -> normalized SHA-256/pHash assets & `DuplicateMatch`
+  -> `AnalysisRun`/`StageRun`/`InputManifest`/`InferenceCall` -> side-by-side `Model`, `Manual`, and
+  `Effective` label namespaces -> `RoutingEvaluation`/`PublicationIntent`/`PublishRecord` ->
+  `AuditEvent` & audited watermark skip), and `Review` workspace (append-only manual label `set` /
+  `clear`, review status transitions, explicit reanalysis, and incremental re-route destination
+  diffs);
+- `Analysis Configuration` across all eight analysis/profile families enforcing `DRAFT -> PUBLISHED
+  -> ARCHIVED` immutability (read-only published versions + clone-to-draft) plus interactive
+  side-effect-free `Prompt Test Bench` (`run_mode="test"`), `Routing` workspace (`DestinationChannel`
+  management, `RenderingTemplate` & `RoutingPolicy` versioning, and historical dry-run evaluator),
+  two-step `Archive Management` (`Dry-Run` preview required before native `<dialog>` confirmation,
+  automatically invalidated on any filter mutation), `Operations` targeted step-level retry, and
+  redacted `Audit Log` browser.
+
+Acceptance extends the backend gates with strict TypeScript typechecking (`npm run typecheck`),
+Vitest + Testing Library component/workflow verification (`npm test`), and production Vite bundle
+compilation (`npm run build`).
 
 ## M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification (pending)
 

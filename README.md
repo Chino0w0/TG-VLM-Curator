@@ -9,8 +9,9 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 **M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
 workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
 review and routing workflows**, **M6 - publication, archive cleanup, and operations**,
-**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**, and
-**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**
+**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**,
+**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**, and
+**M9 - React + TypeScript + Vite web administration console**
 are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
@@ -158,7 +159,23 @@ M8, completed on 2026-11-12, adds:
   comparison, two-step archive cleanup (`Dry-Run` -> hash-verified `Confirm`), operations/audit
   queries, and Prometheus text exposition (`GET /metrics`).
 
-See tg-vlm-curator-module-implementation.md for module boundaries, the M9-M10 roadmap, and
+M9, completed on 2026-11-12, adds:
+
+- the single-administrator React + TypeScript + Vite SPA under `web/` with cookie-backed session
+  authentication, automatic `X-CSRF-Token` attachment on mutating requests, and responsive
+  accessibility-hardened tables, forms, tabs, and native `<dialog>` confirmations;
+- `Dashboard`, `Source Channels`, `Processing Ranges` (`FIXED`/`LATEST` steady-state watermarks),
+  and `Telegram Identities` (write-only `EncryptedSecret` storage and rotation that immediately
+  scrub plaintext and display metadata only);
+- cursor-paginated `Messages` across all 16 Section 37 filters, the 6-stage `Message Detail` causal
+  chain inspector, and `Review` workflows (append-only manual label overrides preserving raw
+  `ModelLabelAssignment`s, explicit reanalysis, and incremental dry-run/formal re-route diffs);
+- `Analysis Configuration` enforcing `DRAFT -> PUBLISHED -> ARCHIVED` immutability plus interactive
+  `Prompt Test Bench` (`run_mode="test"`), `Routing` rule/template authoring and historical dry-run
+  evaluation, mandatory two-step `Archive Management` (`Dry-Run` before `Confirm`), `Operations`
+  step-level retries, and sanitized `Audit Log` browsing.
+
+See tg-vlm-curator-module-implementation.md for module boundaries, the M10 roadmap, and
 acceptance criteria.
 
 ## Dependency direction
@@ -220,6 +237,7 @@ model:
     .venv\Scripts\python.exe -m unittest discover -s tests/integration -v
     .venv\Scripts\python.exe -m compileall -q apps tgcurator tests
     .venv\Scripts\python.exe -m pip check
+    Set-Location web ; npm.cmd run typecheck ; npm.cmd test ; npm.cmd run build ; Set-Location ..
     git diff --check
 
 The Alembic integration tests render PostgreSQL upgrade and downgrade SQL offline, so the test
