@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sqlalchemy.dialects.postgresql import dialect
+from sqlalchemy.dialects.postgresql.asyncpg import dialect
 
 from tgcurator.infrastructure.database.models import (
     InferenceCallRecord,
@@ -23,6 +23,10 @@ class NullableJsonPersistenceTests(unittest.TestCase):
                 column = model.__table__.c[field]
                 self.assertTrue(column.nullable)
                 self.assertTrue(column.type.none_as_null)
-                process = column.type.bind_processor(dialect())
+                # Exercise the asyncpg driver used by production; the generic
+                # PostgreSQL dialect selects a different driver across SQLAlchemy releases.
+                pg = dialect()
+                process = column.type.dialect_impl(pg).bind_processor(pg)
+                self.assertIsNotNone(process)
                 self.assertIsNone(process(None))
                 self.assertEqual(process({"valid": True}), '{"valid": true}')
