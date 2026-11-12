@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, delete, exists, func, null, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -869,12 +869,13 @@ class SqlAlchemyAdminBackend:
                     else:
                         existing_pub.state = "archived"
                         existing_pub.archived_at = now
-                        existing_pub.updated_at = now
+                        if hasattr(type(existing_pub), "updated_at"):
+                            existing_pub.updated_at = now
                     await session.flush()
 
                 ver.state = "published"
                 ver.published_at = now
-                if hasattr(ver, "updated_at"):
+                if hasattr(type(ver), "updated_at"):
                     ver.updated_at = now
                 await session.flush()
                 return await self._serialize_db_version(session, family, ver)
@@ -902,7 +903,8 @@ class SqlAlchemyAdminBackend:
                 else:
                     ver.state = "archived"
                     ver.archived_at = now
-                    ver.updated_at = now
+                    if hasattr(type(ver), "updated_at"):
+                        ver.updated_at = now
                 await session.flush()
                 return await self._serialize_db_version(session, family, ver)
 
@@ -1056,9 +1058,9 @@ class SqlAlchemyAdminBackend:
                     )
                 )
                 stmt = stmt.where(
-                    or_(MessageRecord.blocked_by_label_key.is_not(None), neg_clause)
+                    or_(MessageRecord.blocked_by_stage_run_id.is_not(None), neg_clause)
                     if bool(filters["negative_label"])
-                    else and_(MessageRecord.blocked_by_label_key.is_(None), ~neg_clause)
+                    else and_(MessageRecord.blocked_by_stage_run_id.is_(None), ~neg_clause)
                 )
             if filters.get("pipeline_version_id"):
                 pv_uid = _require_uuid(filters["pipeline_version_id"], "pipeline_version_id")
@@ -1066,7 +1068,7 @@ class SqlAlchemyAdminBackend:
                     exists(
                         select(AnalysisRunRecord.id).where(
                             AnalysisRunRecord.message_id == MessageRecord.id,
-                            AnalysisRunRecord.pipeline_version_id == pv_uid,
+                            AnalysisRunRecord.analysis_pipeline_version_id == pv_uid,
                         )
                     )
                 )
@@ -1113,38 +1115,13 @@ class SqlAlchemyAdminBackend:
                     )
                 )
             if filters.get("label_key"):
-                lk = str(filters["label_key"])
-                ns = str(filters.get("label_namespace") or "effective")
-                scope = filters.get("label_scope")
-                model_pred = [
-                    ModelLabelAssignmentRecord.message_id == MessageRecord.id,
-                    ModelLabelAssignmentRecord.label_key == lk,
-                    ModelLabelAssignmentRecord.activated.is_(True),
-                ]
-                manual_pred = [
-                    ManualLabelAssignmentRecord.message_id == MessageRecord.id,
-                    ManualLabelAssignmentRecord.label_key == lk,
-                    ManualLabelAssignmentRecord.operation == "set",
-                    ManualLabelAssignmentRecord.activated.is_(True),
-                ]
-                if scope in ("global", "media"):
-                    model_pred.append(ModelLabelAssignmentRecord.target_scope == scope)
-                    manual_pred.append(ManualLabelAssignmentRecord.target_scope == scope)
-                if ns == "model":
-                    stmt = stmt.where(
-                        exists(select(ModelLabelAssignmentRecord.id).where(*model_pred))
+                stmt = stmt.where(
+                    _current_label_filter(
+                        label_key=str(filters["label_key"]),
+                        namespace=str(filters.get("label_namespace") or "effective"),
+                        scope=filters.get("label_scope"),
                     )
-                elif ns == "manual":
-                    stmt = stmt.where(
-                        exists(select(ManualLabelAssignmentRecord.id).where(*manual_pred))
-                    )
-                else:
-                    stmt = stmt.where(
-                        or_(
-                            exists(select(ModelLabelAssignmentRecord.id).where(*model_pred)),
-                            exists(select(ManualLabelAssignmentRecord.id).where(*manual_pred)),
-                        )
-                    )
+                )
             if filters.get("query"):
                 stmt = stmt.where(MessageRecord.original_text.ilike(f"%{filters['query']}%"))
             if token is not None:
@@ -1258,7 +1235,10 @@ class SqlAlchemyAdminBackend:
                     await session.execute(
                         select(ModelLabelAssignmentRecord)
                         .where(ModelLabelAssignmentRecord.message_id == msg_uid)
-                        .order_by(ModelLabelAssignmentRecord.created_at.asc())
+                        .order_by(
+                            ModelLabelAssignmentRecord.created_at.asc(),
+                            ModelLabelAssignmentRecord.id.asc(),
+                        )
                     )
                 ).scalars()
             )
@@ -1267,9 +1247,23 @@ class SqlAlchemyAdminBackend:
                     await session.execute(
                         select(ManualLabelAssignmentRecord)
                         .where(ManualLabelAssignmentRecord.message_id == msg_uid)
-                        .order_by(ManualLabelAssignmentRecord.created_at.asc())
+                        .order_by(
+                            ManualLabelAssignmentRecord.created_at.asc(),
+                            ManualLabelAssignmentRecord.id.asc(),
+                        )
                     )
                 ).scalars()
+            )
+            # Match routing's active facts while retaining model_rows as audit history.
+            current_model_run = max(
+                (
+                    r
+                    for r in runs
+                    if r.run_mode in {"formal", "reanalysis"}
+                    and r.status in {"completed", "blocked_negative_gate"}
+                ),
+                key=lambda r: (r.created_at, r.id),
+                default=None,
             )
             model_facts = tuple(
                 LabelValue(
@@ -1285,6 +1279,7 @@ class SqlAlchemyAdminBackend:
                     activated=r.activated,
                 )
                 for r in model_rows
+                if current_model_run is not None and r.analysis_run_id == current_model_run.id
             )
             manual_evts = tuple(
                 ManualLabelEvent(
@@ -1579,60 +1574,31 @@ class SqlAlchemyAdminBackend:
                 if pver is None or pver.state != "published":
                     raise AdminValidationError("analysis_pipeline_version_id must be published")
                 run_id = self._id_factory()
-                session.add(
-                    AnalysisRunRecord(
-                        id=run_id,
-                        message_id=msg.id,
-                        analysis_pipeline_version_id=pipe_vid,
-                        run_mode="reanalysis",
-                        status="running",
-                        facts_snapshot={},
-                        started_at=now,
-                        created_at=now,
-                        updated_at=now,
-                    )
+                run = AnalysisRunRecord(
+                    id=run_id,
+                    message_id=msg.id,
+                    analysis_pipeline_version_id=pipe_vid,
+                    run_mode="reanalysis",
+                    status="running",
+                    facts_snapshot={},
+                    started_at=now,
+                    created_at=now,
+                    updated_at=now,
                 )
-                nodes = list(
-                    (
-                        await session.execute(
-                            select(PipelineStageNodeRecord)
-                            .where(PipelineStageNodeRecord.analysis_pipeline_version_id == pipe_vid)
-                            .order_by(PipelineStageNodeRecord.output_order.asc())
-                        )
-                    ).scalars()
+                session.add(run)
+                # No ORM relationships order these writes: persist the parent first.
+                await session.flush()
+                from .reanalysis_repository import advance_reanalysis_in_session
+
+                stage_run_ids = await advance_reanalysis_in_session(
+                    session=session, run=run, now=now
                 )
-                stage_run_ids: list[str] = []
-                for node in nodes:
-                    if not node.depends_on:
-                        sr_id = self._id_factory()
-                        session.add(
-                            StageRunRecord(
-                                id=sr_id,
-                                analysis_run_id=run_id,
-                                pipeline_stage_node_id=node.id,
-                                analysis_stage_template_version_id=(
-                                    node.analysis_stage_template_version_id
-                                ),
-                                message_id=msg.id,
-                                target_scope="global",
-                                target_kind="message",
-                                target_id=msg.id,
-                                status="pending",
-                                attempt_count=0,
-                                max_attempts=3,
-                                cache_policy="none",
-                                created_at=now,
-                                updated_at=now,
-                            )
-                        )
-                        await _upsert_wakeup(session, queue="analysis", entity_id=sr_id, now=now)
-                        stage_run_ids.append(str(sr_id))
                 return {
                     "analysis_run_id": str(run_id),
                     "message_id": message_id,
                     "analysis_pipeline_version_id": str(pipe_vid),
                     "run_mode": "reanalysis",
-                    "stage_run_ids": stage_run_ids,
+                    "stage_run_ids": list(stage_run_ids),
                     "reason": reason,
                 }
 
@@ -2602,7 +2568,6 @@ class SqlAlchemyAdminBackend:
                 negative=bool(content.get("negative", False)),
                 enabled=bool(content.get("enabled", True)),
                 created_at=now,
-                updated_at=now,
             )
             session.add(rec_ld)
             await session.flush()
@@ -2617,7 +2582,6 @@ class SqlAlchemyAdminBackend:
                 user_prompt_template=str(content.get("user_prompt_template", "")),
                 declared_variables=list(content.get("declared_variables", [])),
                 created_at=now,
-                updated_at=now,
             )
             session.add(rec_pt)
             await session.flush()
@@ -2631,7 +2595,7 @@ class SqlAlchemyAdminBackend:
                 provider_adapter=str(content.get("provider_adapter", "openai_compatible")),
                 base_url=str(content["base_url"]),
                 model_name=str(content["model_name"]),
-                api_secret_reference=UUID(str(content["api_secret_reference"])),
+                api_secret_reference=str(content["api_secret_reference"]),
                 capabilities=list(content.get("capabilities", ["text"])),
                 timeout_seconds=float(content.get("timeout_seconds", 30.0)),
                 max_concurrency=int(content.get("max_concurrency", 2)),
@@ -2640,7 +2604,6 @@ class SqlAlchemyAdminBackend:
                 structured_output_support=bool(content.get("structured_output_support", True)),
                 sampling_parameters=dict(content.get("sampling_parameters", {})),
                 created_at=now,
-                updated_at=now,
             )
             session.add(rec_ip)
             await session.flush()
@@ -2653,7 +2616,6 @@ class SqlAlchemyAdminBackend:
                 state="draft",
                 description=str(content.get("description", "")),
                 created_at=now,
-                updated_at=now,
             )
             session.add(rec_ls)
             await session.flush()
@@ -2696,7 +2658,6 @@ class SqlAlchemyAdminBackend:
                 max_batch_size=int(content.get("max_batch_size", 1)),
                 max_concurrency=int(content.get("max_concurrency", 1)),
                 created_at=now,
-                updated_at=now,
             )
             session.add(rec_st)
             await session.flush()
@@ -2709,7 +2670,6 @@ class SqlAlchemyAdminBackend:
                 state="draft",
                 description=str(content.get("description", "")),
                 created_at=now,
-                updated_at=now,
             )
             session.add(rec_ap)
             await session.flush()
@@ -2723,7 +2683,7 @@ class SqlAlchemyAdminBackend:
                             str(n["analysis_stage_template_version_id"])
                         ),
                         depends_on=list(n.get("depends_on", [])),
-                        run_if=dict(n["run_if"]) if n.get("run_if") else None,
+                        run_if=dict(n["run_if"]) if n.get("run_if") else null(),
                         parameter_overrides=dict(n.get("parameter_overrides") or {}),
                         output_order=idx,
                         created_at=now,
@@ -2822,7 +2782,132 @@ class SqlAlchemyAdminBackend:
             ver.system_prompt = str(content.get("system_prompt", ""))
             ver.user_prompt_template = str(content.get("user_prompt_template", ""))
             ver.declared_variables = list(content.get("declared_variables", []))
-        if hasattr(ver, "updated_at"):
+        elif family == "inference-profiles":
+            ver.provider_adapter = str(content.get("provider_adapter", "openai_compatible"))
+            ver.base_url = str(content["base_url"])
+            ver.model_name = str(content["model_name"])
+            ver.api_secret_reference = str(content["api_secret_reference"])
+            ver.capabilities = list(content.get("capabilities", ["text"]))
+            ver.timeout_seconds = float(content.get("timeout_seconds", 30.0))
+            ver.max_concurrency = int(content.get("max_concurrency", 2))
+            ver.max_images = int(content.get("max_images", 8))
+            ver.max_input_tokens = int(content.get("max_input_tokens", 8192))
+            ver.structured_output_support = bool(content.get("structured_output_support", True))
+            ver.sampling_parameters = dict(content.get("sampling_parameters", {}))
+        elif family == "analysis-stages":
+            vis = content.get("visual_composition_policy", "adaptive")
+            if isinstance(vis, Mapping):
+                vis = vis.get("mode", "adaptive")
+            ver.name = str(content.get("name", "stage"))
+            ver.target_scope = str(content.get("target_scope", "global"))
+            ver.execution_mode = str(content.get("execution_mode", "single_message"))
+            ver.prompt_template_version_id = UUID(str(content["prompt_template_version_id"]))
+            ver.label_set_version_id = UUID(str(content["label_set_version_id"]))
+            ver.inference_profile_version_id = UUID(str(content["inference_profile_version_id"]))
+            ver.structured_output_policy = dict(content.get("structured_output_policy", {}))
+            ver.input_policy = dict(content.get("input_policy", {"text": True}))
+            ver.visual_composition_policy = str(vis)
+            ver.cache_policy = str(content.get("cache_policy", "none"))
+            ver.timeout_seconds = float(content.get("timeout_seconds", 30.0))
+            ver.retry_policy = dict(content.get("retry_policy", {}))
+            ver.max_batch_size = int(content.get("max_batch_size", 1))
+            ver.max_concurrency = int(content.get("max_concurrency", 1))
+        elif family == "label-sets":
+            ver.description = str(content.get("description", ""))
+            await session.execute(
+                delete(LabelBindingRecord).where(LabelBindingRecord.label_set_version_id == ver.id)
+            )
+            for idx, binding in enumerate(content.get("bindings", [])):
+                session.add(
+                    LabelBindingRecord(
+                        id=self._id_factory(),
+                        label_set_version_id=ver.id,
+                        label_definition_version_id=UUID(
+                            str(binding["label_definition_version_id"])
+                        ),
+                        activation_threshold=float(binding.get("activation_threshold", 0.5)),
+                        prompt_hint=str(binding.get("prompt_hint", "")),
+                        output_order=int(binding.get("output_order", idx)),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        elif family == "analysis-pipelines":
+            ver.description = str(content.get("description", ""))
+            await session.execute(
+                delete(PipelineStageNodeRecord).where(
+                    PipelineStageNodeRecord.analysis_pipeline_version_id == ver.id
+                )
+            )
+            for idx, node in enumerate(content.get("nodes", [])):
+                session.add(
+                    PipelineStageNodeRecord(
+                        id=self._id_factory(),
+                        analysis_pipeline_version_id=ver.id,
+                        node_key=str(node.get("node_key") or node.get("node_id")),
+                        analysis_stage_template_version_id=UUID(
+                            str(node["analysis_stage_template_version_id"])
+                        ),
+                        depends_on=list(node.get("depends_on", [])),
+                        run_if=dict(node["run_if"]) if node.get("run_if") else null(),
+                        parameter_overrides=dict(node.get("parameter_overrides") or {}),
+                        output_order=idx,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        elif family == "routing-policies":
+            ver.description = str(content.get("description", ""))
+            # Delete children first; do not rely on implicit mapper ordering/cascades.
+            rule_ids = select(RoutingRuleRecord.id).where(
+                RoutingRuleRecord.routing_policy_version_id == ver.id
+            )
+            await session.execute(
+                delete(RoutingActionRecord).where(RoutingActionRecord.routing_rule_id.in_(rule_ids))
+            )
+            await session.execute(
+                delete(RoutingRuleRecord).where(
+                    RoutingRuleRecord.routing_policy_version_id == ver.id
+                )
+            )
+            for rule in content.get("rules", []):
+                rule_id = self._id_factory()
+                session.add(
+                    RoutingRuleRecord(
+                        id=rule_id,
+                        routing_policy_version_id=ver.id,
+                        priority=int(rule["priority"]),
+                        enabled=bool(rule.get("enabled", True)),
+                        condition=dict(rule["condition"]),
+                        stop_on_match=bool(rule.get("stop_on_match", False)),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await session.flush()
+                for idx, action in enumerate(rule.get("actions", [])):
+                    session.add(
+                        RoutingActionRecord(
+                            id=self._id_factory(),
+                            routing_rule_id=rule_id,
+                            destination_channel_id=UUID(str(action["destination_channel_id"])),
+                            publication_mode=str(action["publication_mode"]),
+                            rendering_template_version_id=_try_uuid(
+                                action.get("rendering_template_version_id")
+                            ),
+                            publish_identity_id=_try_uuid(action.get("publish_identity_id")),
+                            protected_content_fallback=str(
+                                action.get("protected_content_fallback", "fail")
+                            ),
+                            supplement_as_reply=bool(action.get("supplement_as_reply", True)),
+                            output_order=idx,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+        else:
+            raise AdminValidationError(f"unsupported configuration family: {family}")
+        if hasattr(type(ver), "updated_at"):
             ver.updated_at = now
         await session.flush()
 
@@ -3009,6 +3094,80 @@ _FAMILY_VERSIONS: dict[str, tuple[Any, str]] = {
 }
 
 
+def _current_label_filter(*, label_key: str, namespace: str, scope: Any) -> Any:
+    def latest(model: Any, name: str) -> Any:
+        stmt = select(
+            model.id,
+            model.message_id,
+            model.target_scope,
+            model.target_id,
+            model.label_definition_version_id,
+            model.label_key,
+            model.activated,
+            *([model.operation] if model is ManualLabelAssignmentRecord else []),
+            func.row_number()
+            .over(
+                partition_by=(
+                    model.message_id,
+                    model.target_scope,
+                    model.target_id,
+                    model.label_definition_version_id,
+                ),
+                order_by=(model.created_at.desc(), model.id.desc()),
+            )
+            .label("position"),
+        )
+        if model is ModelLabelAssignmentRecord:
+            active_run = (
+                select(AnalysisRunRecord.id)
+                .where(
+                    AnalysisRunRecord.message_id == model.message_id,
+                    AnalysisRunRecord.run_mode.in_(("formal", "reanalysis")),
+                    AnalysisRunRecord.status.in_(("completed", "blocked_negative_gate")),
+                )
+                .order_by(AnalysisRunRecord.created_at.desc(), AnalysisRunRecord.id.desc())
+                .limit(1)
+                .correlate(model)
+                .scalar_subquery()
+            )
+            stmt = stmt.where(model.analysis_run_id == active_run)
+        return stmt.subquery(name)
+
+    model = latest(ModelLabelAssignmentRecord, "current_model_labels")
+    manual = latest(ManualLabelAssignmentRecord, "current_manual_labels")
+
+    def matches(row: Any) -> list[Any]:
+        predicates = [
+            row.c.position == 1,
+            row.c.message_id == MessageRecord.id,
+            row.c.label_key == label_key,
+            row.c.activated.is_(True),
+        ]
+        if scope in ("global", "media"):
+            predicates.append(row.c.target_scope == scope)
+        return predicates
+
+    manual_active = exists(select(manual.c.id).where(*matches(manual), manual.c.operation == "set"))
+    if namespace == "manual":
+        return manual_active
+    model_predicates = matches(model)
+    if namespace != "model":
+        # A latest SET replaces the model even when false. CLEAR restores it.
+        override = exists(
+            select(manual.c.id).where(
+                manual.c.position == 1,
+                manual.c.operation == "set",
+                manual.c.message_id == model.c.message_id,
+                manual.c.target_scope == model.c.target_scope,
+                manual.c.target_id == model.c.target_id,
+                manual.c.label_definition_version_id == model.c.label_definition_version_id,
+            )
+        ).correlate(model)
+        model_predicates.append(~override)
+    model_active = exists(select(model.c.id).where(*model_predicates))
+    return model_active if namespace == "model" else or_(model_active, manual_active)
+
+
 async def _upsert_wakeup(
     session: AsyncSession,
     *,
@@ -3054,20 +3213,43 @@ async def _reset_db_step(
         sr = await session.get(StageRunRecord, uid, with_for_update=True)
         if sr is None:
             raise AdminNotFoundError("stage_run does not exist")
+        if sr.status != "failed":
+            raise AdminConflictError("only a failed stage run can be retried")
+        run = await session.get(AnalysisRunRecord, sr.analysis_run_id, with_for_update=True)
+        if run is None or run.status not in {"failed", "running", "pending"}:
+            raise AdminConflictError("analysis run cannot be retried")
+        msg = await session.get(MessageRecord, sr.message_id, with_for_update=True)
+        if msg is None:
+            raise AdminNotFoundError("message does not exist")
         prev = sr.status
         sr.status = "pending"
         sr.attempt_count = 0
         sr.lease_token = None
         sr.lease_expires_at = None
         sr.next_retry_at = None
+        sr.completed_at = None
         sr.updated_at = now
+        run.status = "running"
+        run.completed_at = None
+        run.started_at = run.started_at or now
+        run.last_error_code = None
+        run.last_error_type = None
+        run.updated_at = now
+        if run.run_mode == "formal" and msg.processing_status == "failed":
+            msg.processing_status = "processing"
+            msg.terminal_reason = None
+            msg.updated_at = now
         return prev, "analysis"
     if step_kind == "publication_intent":
         pi = await session.get(PublicationIntentRecord, uid, with_for_update=True)
         if pi is None:
             raise AdminNotFoundError("publication_intent does not exist")
+        if pi.status != "failed":
+            raise AdminConflictError("only a failed publication intent can be retried")
         prev = pi.status
         pi.status = "pending" if not pi.completed_parts else "partial"
+        # Reset only this retry cycle's budget. Publication claim allocates a
+        # separate monotonic audit attempt_number from the retained history.
         pi.attempt_count = 0
         pi.lease_token = None
         pi.lease_expires_at = None
