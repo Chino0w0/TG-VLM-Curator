@@ -94,8 +94,37 @@ def _replace_publication_identity_function(*, m6: bool) -> None:
 
 
 def upgrade() -> None:
+    _upgrade_routing_actions()
     _upgrade_publication()
     _upgrade_cleanup()
+
+
+def _upgrade_routing_actions() -> None:
+    # Frozen publication policy is selected from routing actions, not only intents.
+    # Server defaults also give existing M5 (including published) policies valid values.
+    op.add_column(
+        "routing_actions",
+        sa.Column(
+            "protected_content_fallback",
+            sa.String(length=24),
+            server_default=sa.text("'fail'"),
+            nullable=False,
+        ),
+    )
+    op.add_column(
+        "routing_actions",
+        sa.Column(
+            "supplement_as_reply",
+            sa.Boolean(),
+            server_default=sa.text("true"),
+            nullable=False,
+        ),
+    )
+    op.create_check_constraint(
+        op.f("ck_routing_actions_routing_action_protected_fallback"),
+        "routing_actions",
+        "protected_content_fallback IN ('fail', 'metadata_only', 'skip')",
+    )
 
 
 def _upgrade_publication() -> None:
@@ -216,11 +245,23 @@ def _upgrade_publication() -> None:
     # M5 could persist pending intents but had no publisher. Preserve them as valid, explicitly
     # empty frozen renderings so the new constraints can be installed without inventing Telegram
     # results or random identifiers. Administrators may reroute them to obtain a richer snapshot.
+    # M5's whole-row identity trigger also sees the new rendering columns.
+    # Alembic runs this migration in one PostgreSQL DDL transaction: exclude
+    # concurrent writers, suspend only this trigger for the backfill, then restore
+    # it immediately. Any failure rolls back both the data and trigger state; do
+    # not use autocommit or a session-wide replication-role bypass here.
+    op.execute("LOCK TABLE publication_intents IN ACCESS EXCLUSIVE MODE")
+    op.execute(
+        "ALTER TABLE publication_intents DISABLE TRIGGER trg_publication_intents_identity_immutable"
+    )
     op.execute(
         "UPDATE publication_intents "
         "SET rendered_text = '', rendered_snapshot_hash = '"
         + _LEGACY_RENDERED_HASH
         + "' WHERE publication_mode <> 'forward_only' AND rendered_text IS NULL"
+    )
+    op.execute(
+        "ALTER TABLE publication_intents ENABLE TRIGGER trg_publication_intents_identity_immutable"
     )
 
     for name, condition in (
@@ -778,6 +819,13 @@ def _upgrade_cleanup() -> None:
 def downgrade() -> None:
     _downgrade_cleanup()
     _downgrade_publication()
+    op.drop_constraint(
+        op.f("ck_routing_actions_routing_action_protected_fallback"),
+        "routing_actions",
+        type_="check",
+    )
+    op.drop_column("routing_actions", "supplement_as_reply")
+    op.drop_column("routing_actions", "protected_content_fallback")
 
 
 def _downgrade_cleanup() -> None:
