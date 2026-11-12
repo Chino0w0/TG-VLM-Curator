@@ -252,8 +252,7 @@ def _upgrade_publication() -> None:
     # not use autocommit or a session-wide replication-role bypass here.
     op.execute("LOCK TABLE publication_intents IN ACCESS EXCLUSIVE MODE")
     op.execute(
-        "ALTER TABLE publication_intents DISABLE TRIGGER "
-        "trg_publication_intents_identity_immutable"
+        "ALTER TABLE publication_intents DISABLE TRIGGER trg_publication_intents_identity_immutable"
     )
     op.execute(
         "UPDATE publication_intents "
@@ -262,8 +261,7 @@ def _upgrade_publication() -> None:
         + "' WHERE publication_mode <> 'forward_only' AND rendered_text IS NULL"
     )
     op.execute(
-        "ALTER TABLE publication_intents ENABLE TRIGGER "
-        "trg_publication_intents_identity_immutable"
+        "ALTER TABLE publication_intents ENABLE TRIGGER trg_publication_intents_identity_immutable"
     )
 
     for name, condition in (
