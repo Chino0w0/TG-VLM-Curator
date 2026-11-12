@@ -1,6 +1,11 @@
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
+import { ConfigReferences } from "../components/ConfigReferences";
+import { publishedVersion, isDirtyJson } from "../api/config";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
+  SourceChannel,
   ConfigEntity,
   ConfigFamily,
   ConfigVersion,
@@ -18,9 +23,8 @@ const ANALYSIS_FAMILIES: Array<{
     label: "Label Definitions",
     defaultContent: {
       key: "illustration",
+      display_name: "Illustration",
       scope: "global",
-      value_type: "score",
-      threshold: 0.7,
       negative: false,
       description: "High-quality illustration content",
     },
@@ -29,7 +33,7 @@ const ANALYSIS_FAMILIES: Array<{
     family: "label-sets",
     label: "Label Sets",
     defaultContent: {
-      label_definition_version_ids: [],
+      bindings: [{ label_definition_version_id: "", activation_threshold: 0.7, output_order: 0, prompt_hint: "" }],
     },
   },
   {
@@ -37,7 +41,8 @@ const ANALYSIS_FAMILIES: Array<{
     label: "Prompt Templates",
     defaultContent: {
       system_prompt: "Analyze the Telegram post and output structured JSON.",
-      user_prompt_template: "Caption: {{text}}",
+      user_prompt_template: "Caption: {{message_text}}",
+      declared_variables: ["message_text"],
     },
   },
   {
@@ -47,15 +52,17 @@ const ANALYSIS_FAMILIES: Array<{
       provider_adapter: "openai_compatible",
       base_url: "https://vlm.example.internal/v1",
       model_name: "qwen2.5-vl-72b",
-      api_key_secret_id: null,
+      api_secret_reference: "",
       timeout_seconds: 60,
-      supports_structured_outputs: true,
+      structured_output_support: true,
+      capabilities: ["text"],
     },
   },
   {
     family: "analysis-stages",
     label: "Analysis Stages",
     defaultContent: {
+      input_policy: { text: true },
       execution_mode: "single_message",
       visual_composition_policy: "adaptive",
       prompt_template_version_id: "",
@@ -67,28 +74,27 @@ const ANALYSIS_FAMILIES: Array<{
     family: "analysis-pipelines",
     label: "Analysis Pipelines",
     defaultContent: {
-      entry_nodes: ["prescreen"],
-      nodes: [],
+      nodes: [{ node_key: "prescreen", analysis_stage_template_version_id: "", depends_on: [] }],
     },
   },
   {
     family: "media-processing-profiles",
     label: "Media Profiles",
     defaultContent: {
-      max_image_edge: 1536,
-      video_sampling_mode: "hybrid",
-      max_video_frames: 6,
-      duplicate_policy: "skip",
-      phash_hamming_threshold: 6,
+      image_max_dimension: 1536,
+      webp_quality: 85,
+      video_max_frames: 6,
     },
   },
   {
     family: "source-channel-profiles",
     label: "Channel Profiles",
     defaultContent: {
-      analysis_pipeline_version_id: "",
-      media_processing_profile_version_id: "",
-      routing_policy_version_id: "",
+      analysis_pipeline_version_id: null,
+      media_processing_profile_version_id: null,
+      routing_policy_version_id: null,
+      duplicate_policy: "skip",
+      phash_distance_threshold: 6,
     },
   },
 ];
@@ -100,6 +106,8 @@ export interface AnalysisConfigWorkspaceProps {
 export function AnalysisConfigWorkspace({
   client,
 }: AnalysisConfigWorkspaceProps) {
+  const { busy, runAction } = useMutationGuard();
+  const familyRequests = useRequestGeneration();
   const [activeTab, setActiveTab] = useState<string>("label-definitions");
   const [entities, setEntities] = useState<ConfigEntity[]>([]);
   const [selectedEntityId, setSelectedEntityId] = useState<string>("");
@@ -107,6 +115,8 @@ export function AnalysisConfigWorkspace({
   const [editorJson, setEditorJson] = useState<string>("{}");
 
   const [newEntityName, setNewEntityName] = useState("");
+  const [sourceOptions, setSourceOptions] = useState<SourceChannel[]>([]);
+  useEffect(() => { let cancelled = false; void client.listSourceChannels().then(list => { if (!cancelled) setSourceOptions(list); }).catch(() => {}); return () => { cancelled = true; }; }, [client]);
   const [newEntityChannelId, setNewEntityChannelId] = useState("");
   const [newEntityJson, setNewEntityJson] = useState(
     JSON.stringify(ANALYSIS_FAMILIES[0].defaultContent, null, 2),
@@ -136,9 +146,11 @@ export function AnalysisConfigWorkspace({
       preferredEntityId?: string,
       preferredVersionId?: string,
     ) => {
+      const request = familyRequests.next();
       setErrorMsg(null);
       try {
         const list = await client.listConfigEntities(family);
+        if (!familyRequests.isCurrent(request)) return;
         setEntities(list);
         if (list.length > 0) {
           const ent =
@@ -150,18 +162,17 @@ export function AnalysisConfigWorkspace({
             (preferredVersionId
               ? ent.versions.find((v) => v.id === preferredVersionId)
               : undefined) ??
-            ent.published_version ??
+            publishedVersion(ent) ??
             ent.versions[ent.versions.length - 1];
-          if (ver) {
-            setSelectedVersionId(ver.id);
-            setEditorJson(JSON.stringify(ver.content, null, 2));
-          }
+          setSelectedVersionId(ver?.id ?? "");
+          setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
         } else {
           setSelectedEntityId("");
           setSelectedVersionId("");
           setEditorJson("{}");
         }
       } catch (err) {
+        if (!familyRequests.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error
             ? err.message
@@ -169,7 +180,7 @@ export function AnalysisConfigWorkspace({
         );
       }
     },
-    [client],
+    [client, familyRequests],
   );
 
   const loadStagesForBench = useCallback(async () => {
@@ -178,7 +189,7 @@ export function AnalysisConfigWorkspace({
       setStageEntities(stages);
       if (!benchStageVersionId && stages.length > 0) {
         const firstVer =
-          stages[0].published_version ?? stages[0].versions[0];
+          publishedVersion(stages[0]) ?? stages[0].versions[0];
         if (firstVer) {
           setBenchStageVersionId(firstVer.id);
         }
@@ -203,12 +214,13 @@ export function AnalysisConfigWorkspace({
   const selectedVersion: ConfigVersion | null =
     selectedEntity?.versions.find((v) => v.id === selectedVersionId) ?? null;
   const isDraft = selectedVersion?.state === "draft";
+  const dirty = selectedVersion ? isDirtyJson(editorJson, selectedVersion.content) : false;
 
   function handleSelectEntity(entityId: string) {
     setSelectedEntityId(entityId);
     const ent = entities.find((e) => e.id === entityId);
     const ver =
-      ent?.published_version ?? ent?.versions[ent.versions.length - 1] ?? null;
+      publishedVersion(ent) ?? ent?.versions[ent.versions.length - 1] ?? null;
     setSelectedVersionId(ver?.id ?? "");
     setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
   }
@@ -230,7 +242,7 @@ export function AnalysisConfigWorkspace({
       const parsed = JSON.parse(newEntityJson) as Record<string, unknown>;
       const payload: Record<string, unknown> = {
         name: newEntityName.trim(),
-        content: parsed,
+        initial_version: parsed,
       };
       if (
         activeFamilyMeta.family === "source-channel-profiles" &&
@@ -244,6 +256,7 @@ export function AnalysisConfigWorkspace({
       );
       setNewEntityName("");
       const draftVer = created.versions[0];
+      if (!draftVer) { await loadFamily(activeFamilyMeta.family, created.id); throw new Error("Entity created without a version. Use Create First Draft to recover."); }
       setStatusMsg(`Created ${created.name} with initial DRAFT v1.`);
       await loadFamily(activeFamilyMeta.family, created.id, draftVer?.id);
     } catch (err) {
@@ -283,6 +296,7 @@ export function AnalysisConfigWorkspace({
   }
 
   async function handlePublishVersion() {
+    if (dirty) { setErrorMsg("Save Draft before publishing unsaved changes."); return; }
     if (!activeFamilyMeta || !selectedEntity || !selectedVersion || !isDraft) {
       return;
     }
@@ -308,6 +322,16 @@ export function AnalysisConfigWorkspace({
         err instanceof Error ? err.message : "Failed to publish version.",
       );
     }
+  }
+
+  async function handleCreateFirstDraft() {
+    if (!activeFamilyMeta || !selectedEntity || selectedEntity.versions.length) return;
+    setErrorMsg(null);
+    try {
+      const created = await client.createConfigVersion(activeFamilyMeta.family, selectedEntity.id, JSON.parse(newEntityJson));
+      await loadFamily(activeFamilyMeta.family, selectedEntity.id, created.id);
+      setStatusMsg("First draft created from Initial Draft JSON.");
+    } catch (error) { setErrorMsg(error instanceof Error ? error.message : "First draft creation failed."); }
   }
 
   async function handleCloneToDraft() {
@@ -359,6 +383,7 @@ export function AnalysisConfigWorkspace({
     setErrorMsg(null);
     setStatusMsg(null);
     try {
+      setBenchResult(null);
       const res = await client.runPromptTestBench({
         stage_template_version_id: benchStageVersionId.trim(),
         message_id: benchMessageId.trim() || undefined,
@@ -367,7 +392,7 @@ export function AnalysisConfigWorkspace({
       });
       setBenchResult(res);
       setStatusMsg(
-        "Prompt Test Bench completed in side-effect-free run_mode='test'.",
+        `Prompt Test Bench returned ${res.status} in side-effect-free run_mode='test'.`,
       );
     } catch (err) {
       setErrorMsg(
@@ -435,6 +460,7 @@ export function AnalysisConfigWorkspace({
               </span>
             </p>
 
+            {isDraft ? <ConfigReferences client={client} family={activeFamilyMeta.family} json={editorJson} onChange={setEditorJson} /> : null}
             <div className="field">
               <label htmlFor="cfg-version-editor">
                 Version Content JSON{" "}
@@ -451,27 +477,28 @@ export function AnalysisConfigWorkspace({
               />
             </div>
 
+            {dirty ? <p role="status" className="hint">Unsaved changes — Save Draft before publishing.</p> : null}
             <div className="btn-row">
               <button
                 type="button"
                 className="btn btn-primary"
                 disabled={!isDraft}
-                onClick={() => void handleSaveDraft()}
+                onClick={() => void runAction(handleSaveDraft)}
               >
                 Save Draft
               </button>
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={!isDraft}
-                onClick={() => void handlePublishVersion()}
+                disabled={!isDraft || dirty || busy}
+                onClick={() => void runAction(handlePublishVersion)}
               >
                 Publish Version
               </button>
               <button
                 type="button"
                 className="btn"
-                onClick={() => void handleCloneToDraft()}
+                onClick={() => void runAction(handleCloneToDraft)}
               >
                 Clone to New Draft
               </button>
@@ -479,7 +506,7 @@ export function AnalysisConfigWorkspace({
                 <button
                   type="button"
                   className="btn btn-danger"
-                  onClick={() => void handleArchiveVersion()}
+                  onClick={() => void runAction(handleArchiveVersion)}
                 >
                   Archive Version
                 </button>
@@ -491,6 +518,7 @@ export function AnalysisConfigWorkspace({
             Create a configuration entity to begin authoring versioned drafts.
           </p>
         )}
+        {selectedEntity && !selectedEntity.versions.length ? <><p className="hint">This entity has no versions. Fill Initial Draft JSON, then recover it here.</p><button className="btn" onClick={() => void runAction(handleCreateFirstDraft)}>Create First Draft</button></> : null}
       </div>
 
       <div className="panel">
@@ -498,7 +526,7 @@ export function AnalysisConfigWorkspace({
         <form
           method="post"
           aria-labelledby="create-cfg-heading"
-          onSubmit={handleCreateEntity}
+          onSubmit={event => { event.preventDefault(); void runAction(() => handleCreateEntity(event)); }}
         >
           <div className="field">
             <label htmlFor="new-cfg-name">Entity Name *</label>
@@ -517,18 +545,14 @@ export function AnalysisConfigWorkspace({
           {activeFamilyMeta.family === "source-channel-profiles" ? (
             <div className="field">
               <label htmlFor="new-cfg-channel">Source Channel UUID</label>
-              <input
-                id="new-cfg-channel"
-                type="text"
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                value={newEntityChannelId}
-                onChange={(e) => setNewEntityChannelId(e.target.value)}
-              />
+              <select id="new-cfg-channel" required value={newEntityChannelId} onChange={e => setNewEntityChannelId(e.target.value)}>
+                <option value="">-- Select source channel --</option>
+                {sourceOptions.map(source => <option key={source.id} value={source.id}>{source.display_name}</option>)}
+              </select>
             </div>
           ) : null}
 
+          <ConfigReferences client={client} family={activeFamilyMeta.family} json={newEntityJson} onChange={setNewEntityJson} />
           <div className="field">
             <label htmlFor="new-cfg-json">Initial Draft v1 JSON *</label>
             <textarea
@@ -558,7 +582,7 @@ export function AnalysisConfigWorkspace({
         creating formal ModelLabelAssignments or PublicationIntents.
       </p>
 
-      <form method="post" onSubmit={handleRunTestBench}>
+      <form method="post" onSubmit={event => { event.preventDefault(); void runAction(() => handleRunTestBench(event)); }}>
         <div className="form-grid">
           <div className="field">
             <label htmlFor="bench-stage-ver">
@@ -680,6 +704,7 @@ export function AnalysisConfigWorkspace({
             </div>
           </div>
 
+          <details open><summary>Response, validation &amp; token diagnostics</summary><pre className="code-block">{JSON.stringify({raw_response: benchResult.raw_response, invalid_targets: benchResult.invalid_targets, missing_target_ids: benchResult.missing_target_ids, error_code: benchResult.error_code, error_type: benchResult.error_type, token_usage: benchResult.token_usage, latency_ms: benchResult.latency_ms}, null, 2)}</pre></details>
           <h3>Parsed Target Label Results</h3>
           <pre className="code-block">
             {JSON.stringify(benchResult.parsed_results, null, 2)}
@@ -691,6 +716,7 @@ export function AnalysisConfigWorkspace({
 
   return (
     <section aria-labelledby="analysis-cfg-heading">
+      <fieldset disabled={busy} style={{border: 0, padding: 0, margin: 0, minWidth: 0}}>
       <div className="workspace-header">
         <div>
           <h1 id="analysis-cfg-heading">
@@ -719,7 +745,7 @@ export function AnalysisConfigWorkspace({
       <Tabs
         ariaLabel="Analysis Configuration Sections"
         activeKey={activeTab}
-        onSelect={setActiveTab}
+        onSelect={tab => { familyRequests.invalidate(); setEntities([]); setSelectedEntityId(""); setSelectedVersionId(""); setEditorJson("{}"); setActiveTab(tab); }}
         tabs={[
           ...ANALYSIS_FAMILIES.map((item) => ({
             key: item.family,
@@ -733,6 +759,7 @@ export function AnalysisConfigWorkspace({
           },
         ]}
       />
+      </fieldset>
     </section>
   );
 }

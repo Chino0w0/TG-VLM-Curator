@@ -1,4 +1,5 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
   CleanupDryRun,
@@ -21,6 +22,23 @@ function parseCsvList(raw: string): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
+const FILTER_LABELS: Record<string, string> = {
+  archived_from: "Archived from (inclusive UTC)", archived_before: "Archived before (exclusive UTC)",
+  source_channel_ids: "Source channels", message_published_from: "Messages published from (inclusive UTC)",
+  message_published_before: "Messages published before (exclusive UTC)", model_label_keys: "Model labels",
+  manual_label_keys: "Manual labels", effective_label_keys: "Effective labels", label_scopes: "Label scopes",
+  negative_label: "Negative label", review_statuses: "Review statuses", processing_statuses: "Processing statuses",
+  duplicate_statuses: "Duplicate statuses", media_types: "Media types", blocked_from_analysis: "Blocked from analysis",
+};
+
+function CleanupScope({ snapshot, sources }: { snapshot: Record<string, unknown>; sources: SourceChannel[] }) {
+  const entries = Object.entries(snapshot).filter(([, value]) => value !== null && value !== undefined && value !== "" && (!Array.isArray(value) || value.length > 0));
+  return <><h3>Exact confirmed filter scope (UTC)</h3><dl>{entries.map(([key, value]) => {
+    const formatted = Array.isArray(value) ? value.map(item => key === "source_channel_ids" ? `${sources.find(source => source.id === item)?.display_name ?? "Source"} (${item})` : String(item)).join(", ") : String(value);
+    return <div key={key}><dt><strong>{FILTER_LABELS[key] ?? key}</strong></dt><dd style={{marginInlineStart: 0, overflowWrap: "anywhere"}}>{formatted}</dd></div>;
+  })}</dl><p className="hint">All other filter dimensions are unrestricted. Only the matched local archive blobs are queued for deletion.</p><details><summary>Canonical filter snapshot</summary><pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre></details></>;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -34,6 +52,8 @@ function formatBytes(bytes: number): string {
 export function ArchiveManagementWorkspace({
   client,
 }: ArchiveManagementWorkspaceProps) {
+  const reads = useRequestGeneration();
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [sources, setSources] = useState<SourceChannel[]>([]);
   const [dryRuns, setDryRuns] = useState<CleanupDryRun[]>([]);
   const [jobs, setJobs] = useState<CleanupJob[]>([]);
@@ -61,6 +81,11 @@ export function ArchiveManagementWorkspace({
   const [mediaTypes, setMediaTypes] = useState("");
   const [blockedFromAnalysis, setBlockedFromAnalysis] = useState("");
 
+  const previews = useRequestGeneration();
+  const previewSnapshot = useRef<string | null>(null);
+  const confirming = useRef(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [confirmLoading, setConfirmLoading] = useState(false);
   // Two-Step Safety Lock State
   const [activeDryRun, setActiveDryRun] = useState<CleanupDryRun | null>(null);
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
@@ -70,6 +95,8 @@ export function ArchiveManagementWorkspace({
 
   const loadHistory = useCallback(
     async (cursor: string | null) => {
+      const request = reads.next();
+      setHistoryLoading(true);
       setErrorMsg(null);
       try {
         const [srcList, dryList, jobPage] = await Promise.all([
@@ -77,20 +104,24 @@ export function ArchiveManagementWorkspace({
           client.listCleanupDryRuns(15),
           client.listCleanupJobs(cursor, 20),
         ]);
+        if (!reads.isCurrent(request)) return;
         setSources(srcList);
         setDryRuns(dryList);
         setJobs(jobPage.items);
         setJobNextCursor(jobPage.next_cursor);
         setJobHasMore(jobPage.has_more);
       } catch (err) {
+        if (!reads.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error
             ? err.message
             : "Failed to load archive cleanup history.",
         );
+      } finally {
+        if (reads.isCurrent(request)) setHistoryLoading(false);
       }
     },
-    [client],
+    [client, reads],
   );
 
   useEffect(() => {
@@ -98,7 +129,12 @@ export function ArchiveManagementWorkspace({
   }, [loadHistory, jobCursor]);
 
   function invalidateDryRun() {
+    previews.invalidate();
+    previewSnapshot.current = null;
     setActiveDryRun(null);
+    setPreviewLoading(false);
+    setConfirmDialogOpen(false);
+    setStatusMsg(null);
   }
 
   function buildFilterPayload(): CleanupFilterPayload {
@@ -127,30 +163,44 @@ export function ArchiveManagementWorkspace({
     event.preventDefault();
     setErrorMsg(null);
     setStatusMsg(null);
+    if (confirming.current) return;
+    const request = previews.next();
+    const filter = buildFilterPayload();
+    previewSnapshot.current = JSON.stringify(filter);
+    setActiveDryRun(null);
+    setPreviewLoading(true);
     try {
-      const created = await client.createCleanupDryRun(buildFilterPayload());
+      const created = await client.createCleanupDryRun(filter);
+      if (!previews.isCurrent(request)) return;
       setActiveDryRun(created);
       setStatusMsg(
         `Step 1 Dry-Run ${created.id.slice(0, 8)} completed: ${created.estimated_asset_count} asset(s), ${formatBytes(created.estimated_bytes)}. Step 2 Confirm is now unlocked for this exact filter hash.`,
       );
       await loadHistory(jobCursor);
     } catch (err) {
+      if (!previews.isCurrent(request)) return;
       setActiveDryRun(null);
       setErrorMsg(
         err instanceof Error ? err.message : "Cleanup Dry-Run failed.",
       );
+    } finally {
+      if (previews.isCurrent(request)) setPreviewLoading(false);
     }
   }
 
   async function handleConfirmCleanup() {
     setConfirmDialogOpen(false);
-    if (!activeDryRun) return;
+    if (!activeDryRun || confirming.current || previewSnapshot.current !== JSON.stringify(buildFilterPayload())) return;
+    confirming.current = true;
+    setConfirmLoading(true);
+    const confirmedPreview = activeDryRun;
+    invalidateDryRun();
     setErrorMsg(null);
     setStatusMsg(null);
     try {
       const job = await client.confirmCleanupJob({
-        dry_run_id: activeDryRun.id,
-        expected_filter_hash: activeDryRun.filter_hash,
+        dry_run_id: confirmedPreview.id,
+        expected_filter_hash: confirmedPreview.filter_hash,
       });
       setActiveDryRun(null);
       setStatusMsg(
@@ -159,8 +209,11 @@ export function ArchiveManagementWorkspace({
       await loadHistory(jobCursor);
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : "Failed to confirm CleanupJob.",
+        err instanceof Error ? `${err.message} Run a new preview before retrying.` : "Failed to confirm CleanupJob. Run a new preview before retrying.",
       );
+    } finally {
+      confirming.current = false;
+      setConfirmLoading(false);
     }
   }
 
@@ -392,7 +445,7 @@ export function ArchiveManagementWorkspace({
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  placeholder="completed, skipped"
+                  placeholder="processed, failed"
                   value={processingStatuses}
                   onChange={(e) => {
                     setProcessingStatuses(e.target.value);
@@ -475,13 +528,13 @@ export function ArchiveManagementWorkspace({
             </div>
 
             <div className="btn-row">
-              <button type="submit" className="btn btn-primary">
+              <button type="submit" className="btn btn-primary" disabled={previewLoading || confirmLoading}>
                 Step 1: Run Dry-Run Preview
               </button>
               <button
                 type="button"
                 className="btn btn-danger"
-                disabled={!activeDryRun}
+                disabled={!activeDryRun || previewLoading || confirmLoading}
                 onClick={() => setConfirmDialogOpen(true)}
               >
                 Step 2: Confirm Cleanup Job...
@@ -525,12 +578,12 @@ export function ArchiveManagementWorkspace({
         title="Confirm Archive Blob Cleanup"
         confirmLabel="Delete Matched Archive Blobs"
         destructive={true}
-        confirmDisabled={!activeDryRun}
+        confirmDisabled={!activeDryRun || previewLoading || confirmLoading}
         onConfirm={() => void handleConfirmCleanup()}
         onCancel={() => setConfirmDialogOpen(false)}
       >
         {activeDryRun ? (
-          <p>
+          <><CleanupScope snapshot={activeDryRun.filter_snapshot} sources={sources} /><p>
             Permanently delete{" "}
             <strong className="mono">
               {activeDryRun.estimated_asset_count}
@@ -545,7 +598,7 @@ export function ArchiveManagementWorkspace({
             </span>
             ? Assets referenced by active AnalysisRun or PublicationIntent rows
             are skipped automatically, and all PostgreSQL metadata is preserved.
-          </p>
+          </p></>
         ) : null}
       </ModalDialog>
 
@@ -589,7 +642,7 @@ export function ArchiveManagementWorkspace({
               <button
                 type="button"
                 className="btn"
-                disabled={jobCursorStack.length === 0}
+                disabled={historyLoading || jobCursorStack.length === 0}
                 onClick={() => {
                   const stack = [...jobCursorStack];
                   const prev = stack.pop() ?? null;
@@ -602,7 +655,7 @@ export function ArchiveManagementWorkspace({
               <button
                 type="button"
                 className="btn"
-                disabled={!jobHasMore || !jobNextCursor}
+                disabled={historyLoading || !jobHasMore || !jobNextCursor}
                 onClick={() => {
                   if (!jobNextCursor) return;
                   setJobCursorStack((prev) => [...prev, jobCursor]);

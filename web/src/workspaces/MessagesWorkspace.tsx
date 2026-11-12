@@ -1,3 +1,5 @@
+import { PROCESSING_STATUSES, DUPLICATE_STATUSES } from "../api/messageStates";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -38,6 +40,7 @@ export function MessagesWorkspace({
   onInspectMessage,
   onReviewMessage,
 }: MessagesWorkspaceProps) {
+  const reads = useRequestGeneration();
   const [sources, setSources] = useState<SourceChannel[]>([]);
   const [destinations, setDestinations] = useState<DestinationChannel[]>([]);
   const [draftFilters, setDraftFilters] =
@@ -68,22 +71,25 @@ export function MessagesWorkspace({
 
   const loadPage = useCallback(
     async (filters: MessageSearchFilters, cursor: string | null) => {
+      const request = reads.next();
       setLoading(true);
       setErrorMsg(null);
       try {
         const page = await client.listMessages(filters, cursor, 25);
+        if (!reads.isCurrent(request)) return;
         setItems(page.items);
         setNextCursor(page.next_cursor);
         setHasMore(page.has_more);
       } catch (err) {
+        if (!reads.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error ? err.message : "Failed to load messages.",
         );
       } finally {
-        setLoading(false);
+        if (reads.isCurrent(request)) setLoading(false);
       }
     },
-    [client],
+    [client, reads],
   );
 
   useEffect(() => {
@@ -103,12 +109,14 @@ export function MessagesWorkspace({
 
   function handleApplySearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    reads.invalidate();
     setCursorStack([]);
     setCurrentCursor(null);
     setAppliedFilters({ ...draftFilters });
   }
 
   function handleClearFilters() {
+    reads.invalidate();
     setDraftFilters(EMPTY_FILTERS);
     setCursorStack([]);
     setCurrentCursor(null);
@@ -116,13 +124,13 @@ export function MessagesWorkspace({
   }
 
   function handleNextPage() {
-    if (!nextCursor) return;
+    if (loading || !nextCursor) return;
     setCursorStack((prev) => [...prev, currentCursor]);
     setCurrentCursor(nextCursor);
   }
 
   function handlePreviousPage() {
-    if (cursorStack.length === 0) return;
+    if (loading || cursorStack.length === 0) return;
     const nextStack = [...cursorStack];
     const previousCursor = nextStack.pop() ?? null;
     setCursorStack(nextStack);
@@ -215,11 +223,7 @@ export function MessagesWorkspace({
                   }
                 >
                   <option value="">Any status</option>
-                  <option value="pending">pending</option>
-                  <option value="processing">processing</option>
-                  <option value="completed">completed</option>
-                  <option value="failed">failed</option>
-                  <option value="skipped">skipped</option>
+                  {PROCESSING_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
                 </select>
               </div>
 
@@ -250,11 +254,7 @@ export function MessagesWorkspace({
                   }
                 >
                   <option value="">Any duplicate state</option>
-                  <option value="unique">unique</option>
-                  <option value="duplicate_skipped">duplicate_skipped</option>
-                  <option value="duplicate_reclassified">
-                    duplicate_reclassified
-                  </option>
+                  {DUPLICATE_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
                 </select>
               </div>
 
@@ -481,7 +481,7 @@ export function MessagesWorkspace({
             <button
               type="button"
               className="btn"
-              disabled={cursorStack.length === 0}
+              disabled={loading || cursorStack.length === 0}
               onClick={handlePreviousPage}
             >
               Previous Page
@@ -489,7 +489,7 @@ export function MessagesWorkspace({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={!hasMore || !nextCursor}
+              disabled={loading || !hasMore || !nextCursor}
               onClick={handleNextPage}
             >
               Next Page

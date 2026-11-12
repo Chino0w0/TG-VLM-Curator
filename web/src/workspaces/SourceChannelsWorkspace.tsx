@@ -1,3 +1,5 @@
+import { RecordEditor } from "../components/RecordEditor";
+import { publishedVersion } from "../api/config";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -21,7 +23,6 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
   const [displayName, setDisplayName] = useState("");
   const [username, setUsername] = useState("");
   const [readIdentityId, setReadIdentityId] = useState("");
-  const [protectedContent, setProtectedContent] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -60,7 +61,6 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
         display_name: displayName.trim(),
         username: username.trim() || null,
         default_read_identity_id: readIdentityId || null,
-        protected_content: protectedContent,
       });
       setDisplayName("");
       setUsername("");
@@ -96,11 +96,10 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
     }
   }
 
-  const publishedVersions = profiles.flatMap((entity) =>
-    entity.published_version
-      ? [{ entityName: entity.name, version: entity.published_version }]
-      : [],
-  );
+  const publishedVersions = profiles.flatMap(entity => {
+    const version = publishedVersion(entity);
+    return version ? [{ entityName: entity.name, sourceChannelId: entity.source_channel_id, version }] : [];
+  });
 
   return (
     <section aria-labelledby="sources-heading">
@@ -182,11 +181,12 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
               <select
                 id="source-read-identity"
                 name="default_read_identity_id"
+                required
                 value={readIdentityId}
                 onChange={(e) => setReadIdentityId(e.target.value)}
               >
                 <option value="">-- Select MTProto reader --</option>
-                {identities.map((idItem) => (
+                {identities.filter(identity => identity.identity_type === "mtproto_user").map((idItem) => (
                   <option key={idItem.id} value={idItem.id}>
                     {idItem.name} ({idItem.identity_type})
                   </option>
@@ -195,18 +195,7 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
             </div>
           </div>
 
-          <div className="field-inline">
-            <input
-              id="source-protected"
-              name="protected_content"
-              type="checkbox"
-              checked={protectedContent}
-              onChange={(e) => setProtectedContent(e.target.checked)}
-            />
-            <label htmlFor="source-protected">
-              Telegram Protected Content (`noforwards` enabled on source)
-            </label>
-          </div>
+          <p className="hint">Protected content is observed from Telegram, not configured here.</p>
 
           <button type="submit" className="btn btn-primary">
             Register Source Channel
@@ -273,7 +262,7 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
                     }
                   >
                     <option value="">-- Unassigned --</option>
-                    {publishedVersions.map((pv) => (
+                    {publishedVersions.filter(pv => pv.sourceChannelId === channel.id).map((pv) => (
                       <option key={pv.version.id} value={pv.version.id}>
                         {pv.entityName} v{pv.version.version_number}
                       </option>
@@ -290,6 +279,11 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
                   {channelRanges.length} total
                 </td>
                 <td data-label="Actions">
+                  <RecordEditor label="Source" fields={[
+                    {key: "display_name", label: "Display Name", value: channel.display_name, required: true},
+                    {key: "username", label: "Username", value: channel.username},
+                    {key: "default_read_identity_id", label: "Read Identity", value: channel.default_read_identity_id, required: true, options: identities.filter(i => i.identity_type === "mtproto_user").map(i => ({value: i.id, label: `${i.name}${i.enabled ? "" : " (disabled)"}`}))},
+                  ]} onSave={async changes => { await client.updateSourceChannel(channel.id, changes); await loadAll(); }} />
                   <button
                     type="button"
                     className="btn"

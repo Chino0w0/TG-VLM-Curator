@@ -46,21 +46,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       id: "ent-lbl-1",
       family: "label-definitions",
       name: "illustration",
-      published_version: {
-        id: "ver-lbl-pub-1",
-        entity_id: "ent-lbl-1",
-        version_number: 1,
-        state: "published",
-        content: {
-          key: "illustration",
-          scope: "global",
-          value_type: "score",
-          threshold: 0.75,
-          negative: false,
-        },
-        created_at: "2026-11-12T00:00:00Z",
-        published_at: "2026-11-12T00:05:00Z",
-      },
+      published_version_id: "ver-lbl-pub-1",
       versions: [
         {
           id: "ver-lbl-pub-1",
@@ -86,17 +72,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       id: "ent-stage-1",
       family: "analysis-stages",
       name: "vlm-main-stage",
-      published_version: {
-        id: "ver-stage-pub-1",
-        entity_id: "ent-stage-1",
-        version_number: 1,
-        state: "published",
-        content: {
-          execution_mode: "single_message",
-          visual_composition_policy: "adaptive",
-        },
-        created_at: "2026-11-12T00:00:00Z",
-      },
+      published_version_id: "ver-stage-pub-1",
       versions: [
         {
           id: "ver-stage-pub-1",
@@ -155,8 +131,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       {
         id: "part-501-0",
         telegram_message_id: 501,
-        part_index: 0,
-        media_kind: "photo",
+        media: [{kind: "photo"}],
       },
     ],
     media: {
@@ -193,7 +168,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
             attempt_count: 1,
             input_manifest: {
               id: "man-1",
-              manifest_hash: "99887766554433221100",
+              input_manifest_hash: "99887766554433221100",
               content: { target_id: "msg-0001-causal" },
             },
             inference_call: {
@@ -252,22 +227,23 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
         rule_outcomes: [{ rule_id: "rule-art", matched: true }],
         stopped_at_rule_id: "rule-art",
         created_at: "2026-11-12T06:00:08Z",
-        publication_intents: [
+      },
+    ],
+    publication_intents: [
           {
             id: "pint-4001",
+            routing_evaluation_id: "reval-3001",
             destination_channel_id: "dst-curated-main",
             publish_identity_id: "id-bot-1",
-            publication_mode: "copy_publish",
+            publication_mode: "copy_with_caption",
             status: "sent",
             attempt_count: 1,
             attempts: [{ id: "att-1", attempt_number: 1, status: "sent" }],
             records: [
-              { id: "prec-1", part_kind: "primary", remote_message_id: 9201 },
+              { id: "prec-1", part: "primary", remote_message_ids: [9201] },
             ],
           },
         ],
-      },
-    ],
     audit_events: [
       {
         id: "aud-1",
@@ -655,10 +631,10 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
         facts_hash: "facts-hash-reroute-99",
         matched_rule_ids: ["rule-art", "rule-vip-gallery"],
         stopped_at_rule_id: null,
-        planned_intents: [
+        intents: [
           {
             destination_channel_id: "dst-curated-main",
-            publication_mode: "copy_publish",
+            publication_mode: "copy_with_caption",
             rendering_template_version_id: null,
           },
           {
@@ -668,8 +644,9 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
           },
         ],
         comparison: {
-          existing_destinations: ["dst-curated-main"],
-          planned_destinations: ["dst-curated-main", "dst-vip-gallery"],
+          previous_evaluation_id: "reval-3001",
+          removed_destinations: [],
+          changed_modes: {},
           added_destinations: ["dst-vip-gallery"],
         },
       });
@@ -989,7 +966,7 @@ describe("TG-VLM-Curator M9 Web Administration Console", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByText(/f0f0a5a5c3c30001/)).toBeInTheDocument();
-    expect(screen.getByText(/qwen2\.5-vl-72b/)).toBeInTheDocument();
+    expect(screen.getAllByText(/qwen2\.5-vl-72b/).length).toBeGreaterThan(0);
     expect(screen.getByText(/primary:#9201/)).toBeInTheDocument();
   });
 

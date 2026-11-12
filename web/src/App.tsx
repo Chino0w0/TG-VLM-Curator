@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AdminApiClient } from "./api/client";
 import type { AdminSessionResponse, WorkspaceKey } from "./api/types";
+import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
 import { LoginView } from "./components/LoginView";
 import { AnalysisConfigWorkspace } from "./workspaces/AnalysisConfigWorkspace";
 import { ArchiveManagementWorkspace } from "./workspaces/ArchiveManagementWorkspace";
@@ -87,11 +88,26 @@ export function App({
     };
   }, [apiClient, initialSession]);
 
+  const [signingOut, setSigningOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  useEffect(() => apiClient.onUnauthorized(() => {
+    setSession(null);
+    setSelectedMessageId(null);
+    setLogoutError(null);
+  }), [apiClient]);
+
   async function handleSignOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    setLogoutError(null);
     try {
       await apiClient.logout();
-    } finally {
       setSession(null);
+      setSelectedMessageId(null);
+    } catch (error) {
+      setLogoutError(`Sign out failed; the server session may still be active. Retry Sign Out. ${error instanceof Error ? error.message : "Network error"}`);
+    } finally {
+      setSigningOut(false);
     }
   }
 
@@ -149,6 +165,7 @@ export function App({
           <button
             type="button"
             className="btn"
+            disabled={signingOut}
             onClick={() => void handleSignOut()}
           >
             Sign Out
@@ -157,6 +174,8 @@ export function App({
       </aside>
 
       <main className="app-main">
+        {logoutError ? <div role="alert" className="alert-banner alert-error">{logoutError}</div> : null}
+        <WorkspaceErrorBoundary key={`${activeWorkspace}:${selectedMessageId ?? ""}`}>
         {activeWorkspace === "dashboard" ? (
           <DashboardWorkspace
             client={apiClient}
@@ -218,6 +237,7 @@ export function App({
         {activeWorkspace === "audit-log" ? (
           <AuditLogWorkspace client={apiClient} />
         ) : null}
+        </WorkspaceErrorBoundary>
       </main>
     </div>
   );
