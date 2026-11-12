@@ -35,6 +35,7 @@ from tgcurator.infrastructure.database import (
     SqlAlchemyPublicationRepository,
     SqlAlchemyRoutingRepository,
 )
+from tgcurator.infrastructure.database.reanalysis_repository import SqlAlchemyReanalysisRepository
 from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.infrastructure.queue import CeleryTaskDispatcher, create_celery_client
 
@@ -66,6 +67,7 @@ class SchedulerRuntime:
     pipeline_coordinator: MessagePipelineCoordinator | None = None
     backlog_repository: OperationsBacklogRepository | None = None
     telemetry: OperationsTelemetry | None = None
+    reanalysis_repository: SqlAlchemyReanalysisRepository | None = None
 
     async def run_once(
         self,
@@ -102,6 +104,8 @@ class SchedulerRuntime:
                     now=now,
                     limit=pipeline_drive_limit,
                 )
+            if self.reanalysis_repository is not None:
+                await self.reanalysis_repository.drive_active(now=now, limit=pipeline_drive_limit)
             range_schedule = await self.range_scheduler.schedule(now=now)
             wakeup_dispatch = await self.wakeup_dispatcher.dispatch_due(
                 now=now,
@@ -183,6 +187,7 @@ def create_scheduler_runtime(
         pipeline_coordinator=pipeline_coordinator,
         backlog_repository=SqlAlchemyOperationsBacklogRepository(database),
         telemetry=telemetry if telemetry is not None else OperationsMonitor(),
+        reanalysis_repository=SqlAlchemyReanalysisRepository(database),
     )
 
 

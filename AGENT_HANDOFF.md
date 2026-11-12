@@ -18,10 +18,48 @@ Remote: https://github.com/Chino0w0/TG-VLM-Curator
 
 - M0, M1, M2, M3, M4, and M5 are merged into origin/main (`78d3d3e`).
 - M6 (`module/m6-publication-lifecycle`) is open as PR #27 (`2163124`).
-- M7 (`module/m7-pipeline-orchestration`) is stacked on `module/m6-publication-lifecycle` and
-  delivers end-to-end pipeline orchestration, visual deduplication, continuous gap-free watermarks,
-  full-queue wake-up repair, and the `apps/telegram_ingestor` composition root.
-- M8 through M10 remain in tg-vlm-curator-module-implementation.md.
+- M7 (`module/m7-pipeline-orchestration`) is open as PR #28 (`0f82278`), stacked on
+  `module/m6-publication-lifecycle`.
+- M8 (`module/m8-admin-api`) is stacked on `module/m7-pipeline-orchestration` and delivers the
+  complete FastAPI administration HTTP API, Argon2id session authentication + CSRF enforcement,
+  write-only secret rotation, all 10 versioned configuration lifecycles, isolated Prompt Test Bench,
+  cursor-paginated causal message/review/reroute/cleanup endpoints, and Prometheus `/metrics`.
+- M9 and M10 remain in tg-vlm-curator-module-implementation.md.
+
+## M8 completed scope
+
+M8 exposes the complete single-administrator FastAPI control plane over the domain and application
+layers without breaking dependency boundaries:
+
+- Domain additions: `tgcurator/shared/pagination.py` (opaque `(timestamp, entity_id)` cursor codec),
+  `tgcurator/domain/telegram/capabilities.py` (`TelegramCapabilityResolver` across `mtproto_user`
+  and `bot` identities plus protected-content constraints), and `tgcurator/domain/audit/models.py`
+  (recursive credential/token/cookie redaction for `AuditEvent` snapshots).
+- Application administration layer (`tgcurator/application/admin/`): `AdminSessionService`
+  (Argon2id verification, opaque SHA-256-hashed session tokens, sliding idle expiry, HMAC-SHA256
+  CSRF tokens), `PromptTestBenchService` (`run_mode="test"` side-effect-free prompt/manifest/schema
+  and external provider execution), `config_validation.py` (domain validation across all 10
+  versioned configuration families), `metrics.py` (Prometheus 0.0.4 text exposition),
+  `AdminApplicationService`, and `InMemoryAdminBackend`.
+- PostgreSQL persistence & migration (`a8b2d4e1f305`): adds `admin_sessions`,
+  `media_processing_profiles`, and `media_processing_profile_versions` (with partial unique index on
+  published versions and immutability trigger), extends `SecretVault` with `rotate()` and
+  `list_statuses()`, and implements `SqlAlchemyAdminBackend` across Section 37 message filters,
+  causal message detail, review/reroute/reanalyze/skip/retry, archive cleanup, audit queries, and
+  metrics snapshots.
+- FastAPI routers & security (`apps/api/`): `/api/v1/*` endpoints with `HttpOnly`, `Secure` (outside
+  dev/test), `SameSite=Lax` session cookies, mandatory `X-CSRF-Token` checks on mutating routes,
+  structured error envelopes, `/metrics`, and unchanged PostgreSQL-only `/health/ready`.
+
+## M8 migration
+
+- Revision: a8b2d4e1f305
+- Down revision: f1a7c3d9e204
+- File: migrations/versions/a8b2d4e1f305_m8_admin_sessions_and_media_profiles.py
+- Chronology date: November 12, 2026
+- Adds `admin_sessions`, `media_processing_profiles`, and `media_processing_profile_versions` with
+  check constraints, partial unique published index, and published/archived immutability trigger.
+- Offline upgrade to M8 and downgrade from M8 to M7 are covered by integration tests.
 
 ## M7 completed scope
 
@@ -89,9 +127,6 @@ and publication settlement into one continuous PostgreSQL-backed lifecycle:
 
 ## Next modules
 
-- M8 (`module/m8-admin-api`): FastAPI administration endpoints, Argon2id session auth + CSRF,
-  sanitized audit events, isolated Prompt Test Bench, cursor-paginated message/causal inspection,
-  and Prometheus `/metrics`.
 - M9 (`module/m9-web-admin`): React + TypeScript + Vite single-administrator web console covering
   all 11 architectural workspaces.
 - M10 (`module/m10-deployment-and-operations`): Docker Compose 10-service topology, graceful

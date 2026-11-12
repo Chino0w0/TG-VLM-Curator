@@ -43,6 +43,27 @@ class SqlAlchemySecretVault:
                 await session.flush()
                 return secret.id
 
+    async def rotate(self, *, secret_id: UUID, plaintext: bytes) -> SecretStatus:
+        async with self._database.session() as session:
+            async with session.begin():
+                secret = await session.get(EncryptedSecret, secret_id, with_for_update=True)
+                if secret is None:
+                    raise SecretNotFoundError("secret reference does not exist")
+                payload = self._cipher.encrypt(
+                    plaintext,
+                    associated_data=secret.secret_type.encode("utf-8"),
+                )
+                secret.ciphertext = payload.ciphertext
+                secret.nonce = payload.nonce
+                secret.key_id = payload.key_id
+                await session.flush()
+                return SecretStatus(
+                    secret_id=secret.id,
+                    secret_type=secret.secret_type,
+                    key_id=secret.key_id,
+                    created_at=secret.created_at,
+                )
+
     async def resolve(
         self,
         *,
@@ -90,6 +111,26 @@ class SqlAlchemySecretVault:
                 secret_type=secret.secret_type,
                 key_id=secret.key_id,
                 created_at=secret.created_at,
+            )
+
+    async def list_statuses(self) -> tuple[SecretStatus, ...]:
+        async with self._database.session() as session:
+            rows = await session.execute(
+                select(
+                    EncryptedSecret.id,
+                    EncryptedSecret.secret_type,
+                    EncryptedSecret.key_id,
+                    EncryptedSecret.created_at,
+                ).order_by(EncryptedSecret.created_at.desc(), EncryptedSecret.id.desc())
+            )
+            return tuple(
+                SecretStatus(
+                    secret_id=row.id,
+                    secret_type=row.secret_type,
+                    key_id=row.key_id,
+                    created_at=row.created_at,
+                )
+                for row in rows.all()
             )
 
     @staticmethod

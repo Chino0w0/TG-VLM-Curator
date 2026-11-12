@@ -64,13 +64,25 @@ M6_TABLES = {
     "publish_records",
 }
 M7_TABLES = {"duplicate_matches"}
+M8_TABLES = {
+    "admin_sessions",
+    "media_processing_profiles",
+    "media_processing_profile_versions",
+}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_exactly_the_documented_m1_through_m7_tables(self) -> None:
+    def test_schema_contains_exactly_the_documented_m1_through_m8_tables(self) -> None:
         self.assertEqual(
             set(Base.metadata.tables),
-            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES | M7_TABLES,
+            M1_TABLES
+            | M2_TABLES
+            | M3_TABLES
+            | M4_TABLES
+            | M5_TABLES
+            | M6_TABLES
+            | M7_TABLES
+            | M8_TABLES,
         )
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:
@@ -557,6 +569,42 @@ class DatabaseSchemaTests(unittest.TestCase):
         )
         self.assertIn("ix_duplicate_matches_canonical", {idx.name for idx in dup.indexes})
         self.assertTrue(dup.c.created_at.type.timezone)
+
+    def test_m8_admin_sessions_and_media_profile_constraints_are_explicit(self) -> None:
+        sessions = Base.metadata.tables["admin_sessions"]
+        session_constraints = {str(c.name) for c in sessions.constraints}
+        self.assertTrue(
+            {
+                "uq_admin_sessions_token_hash",
+                "ck_admin_sessions_admin_session_token_hash_format",
+                "ck_admin_sessions_admin_session_csrf_hash_format",
+                "ck_admin_sessions_admin_session_expiry_after_creation",
+                "ck_admin_sessions_admin_session_revoked_after_creation",
+            }.issubset(session_constraints)
+        )
+        self.assertIn("ix_admin_sessions_user_expiry", {idx.name for idx in sessions.indexes})
+        for col in ("expires_at", "last_seen_at", "revoked_at", "created_at", "updated_at"):
+            self.assertTrue(sessions.c[col].type.timezone, col)
+
+        versions = Base.metadata.tables["media_processing_profile_versions"]
+        version_constraints = {str(c.name) for c in versions.constraints}
+        self.assertTrue(
+            {
+                "uq_media_profile_version_number",
+                "ck_media_processing_profile_versions_media_version_positive",
+                "ck_media_processing_profile_versions_media_version_state",
+                "ck_media_processing_profile_versions_media_version_lifecycle",
+                "ck_media_processing_profile_versions_media_content_object",
+                "ck_media_processing_profile_versions_media_content_hash_format",
+            }.issubset(version_constraints)
+        )
+        published_idx = {idx.name: idx for idx in versions.indexes}[
+            "uq_media_profile_one_published"
+        ]
+        self.assertTrue(published_idx.unique)
+        self.assertIsNotNone(published_idx.dialect_options["postgresql"]["where"])
+        for col in ("published_at", "archived_at", "created_at", "updated_at"):
+            self.assertTrue(versions.c[col].type.timezone, col)
 
 
 if __name__ == "__main__":
