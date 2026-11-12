@@ -5,14 +5,28 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 ## Current implementation status
 
-**M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
-**M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
-workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
-review and routing workflows**, **M6 - publication, archive cleanup, and operations**,
-**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**,
-**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**, and
-**M9 - React + TypeScript + Vite web administration console**
-are complete.
+M0–M9 implementations are merged. The remediation merges are M6 / #27
+`99696fa2`, M7 / #28 `28c3e6fd`, M8 / #29 `b0e955f4`, and M9 / #30 `0007be1e`.
+M10 / #31 delivers the production composition roots, visual-input preparation and
+operational verification. Code head `8fc2737` passed all GitHub CI jobs
+(python, web and deployment): PR run `43212224146`, push run `43212215720`.
+The final documentation head must pass the same checks before exact-SHA merge;
+the actual merge commit is recorded on PR #31.
+
+The local suite passed 596 tests with 2 deprecation warnings and no errors,
+failures or skips (281.56 seconds). This includes 31 native PostgreSQL/runtime
+integration cases and the independent worker OS-process restart; 17 additional
+migration tests render offline SQL. GitHub Linux/Python3.12 with SQLAlchemy2.1.8
+passed 596 tests with 1 dependency warning (127.86 seconds). Native PostgreSQL
+Chrome regression passed all 17 groups, frontend Vitest passed 24 tests, and the
+recorded npm audit reported zero vulnerabilities. The full isolated ten-service
+Docker exercise passed locally and in GitHub CI.
+
+These are real local PostgreSQL16, Redis/Celery, Docker, HTTP and browser results.
+Telegram and inference remain controlled external fixtures, not live credentials,
+real channel deliveries, provider compatibility or model-quality acceptance. Full
+finding-by-finding evidence and remaining gates are in
+[the remediation delivery report](docs/reviews/2026-11-12-remediation-status.md).
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -73,9 +87,9 @@ M4, completed on 2026-09-09, adds:
 - the dedicated `analysis` queue and UUID-only `tgcurator.analysis` wake-up task.
 
 No inference model or provider is bundled or deployed. A real external provider and its secret
-configuration are required for inference. The default runtime remains deliberately unconfigured;
-missing provider configuration records an explicit failed InferenceCall and durable StageRun
-retry or terminal-failure state instead of fabricating a successful result. API readiness checks
+configuration are required for inference. The runtime resolves published inference profiles and encrypted vault references;
+missing provider configuration records an explicit failure and durable retry or terminal-failure
+state instead of fabricating a successful result. API readiness checks
 PostgreSQL only, so provider unavailability remains a degraded business capability rather than
 making the administration API unavailable.
 
@@ -122,9 +136,10 @@ M6, completed on 2026-11-12, adds:
   snapshots, plus UUID-only `tgcurator.publication` and `tgcurator.archive_cleanup` wake-up tasks
   and Scheduler wake-up repair.
 
-Default worker runtimes remain safely unconfigured for external Telegram sessions and archive blob
-stores unless explicitly injected, returning explicit not-configured errors or durable retry/failed
-states rather than fabricating remote deliveries or deletions.
+Default worker factories resolve encrypted Telegram identities, published configuration and local
+archive storage. Missing or invalid external configuration remains an explicit error or durable
+retry/failed state, never a fabricated remote delivery. See
+[runtime configuration and acceptance boundaries](docs/operations/runtime.md).
 
 M7, completed on 2026-11-12, adds:
 
@@ -135,7 +150,7 @@ M7, completed on 2026-11-12, adds:
   publication settlement;
 - order-independent message visual fingerprints and exact unordered pHash multiset pairing across
   image and video-cover pHashes (`duplicate_matches` and `canonical_message_id`), supporting both
-  `skip` and `reclassify_with_text` (with version-matched canonical visual stage cache reuse);
+  `skip` and `reclassify_with_text` (with complete prepared-input semantic cache validation rather than unsafe donor copying);
 - gap-free monotonic continuous `processing_watermark` advancement on `RangeExecution` and
   `ProcessingRange`, plus full-queue Scheduler wake-up repair (`range_execution`, `image_archive`,
   `video_archive`, `analysis`, `publication`, and `maintenance`) and the single-instance
@@ -175,15 +190,35 @@ M9, completed on 2026-11-12, adds:
   evaluation, mandatory two-step `Archive Management` (`Dry-Run` before `Confirm`), `Operations`
   step-level retries, and sanitized `Audit Log` browsing.
 
-See tg-vlm-curator-module-implementation.md for module boundaries, the M10 roadmap, and
-acceptance criteria.
+M10, implemented with native local and GitHub CI acceptance, adds:
+
+- production `docker/backend.Dockerfile`, `docker/web.Dockerfile`, `docker/nginx.conf`,
+  `.dockerignore`, `.env.example`, and `docker-compose.yml` orchestrating the ten core services
+  (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`,
+  `worker-analysis`, `worker-publish`, `worker-maintenance`), four persistent volumes
+  (`postgres-data`, `redis-data`, `archive-data`, `temp-media`), and read-only file secret
+  `app_master_key`, with strictly zero bundled LLM/VLM services;
+- graceful `SIGTERM` daemon entrypoints (`python -m apps.scheduler`,
+  `python -m apps.telegram_ingestor`, `python -m apps.worker --role ...`), active `ffprobe`/`ffmpeg`
+  child-process termination on worker shutdown, and `tgcurator-healthcheck` (`apps/healthcheck.py`)
+  enforcing PostgreSQL-only readiness on `api`/`ingestor` and PostgreSQL + Redis readiness on
+  `scheduler`/`worker`;
+- operator backup and restore scripts (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
+  `scripts/restore-postgres.sh`) plus the `StorageConsistencyScanner` and
+  `tgcurator-check-consistency` CLI (`apps/worker/consistency_cli.py`) verifying `READY` archive
+  blobs and reporting corrupted or orphan files;
+- end-to-end closed-loop pipeline, recovery, cleanup, consistency, and Admin API security
+  verification (`tests/e2e/test_closed_loop_pipeline.py`) driven by deterministic
+  `FakeTelegramAdapter` and `FakeInferenceProvider` harnesses.
+
+See tg-vlm-curator-module-implementation.md for module boundaries and acceptance criteria.
 
 ## Dependency direction
 
     apps / workers / infrastructure --> application --> domain --> shared
 
 The domain package does not import FastAPI, SQLAlchemy, Celery, Telethon, httpx, or storage
-clients. PostgreSQL is the business source of truth; future queue messages remain
+clients. PostgreSQL is the business source of truth; queue messages remain
 reconstructable wake-ups rather than business state.
 
 ## Local development
@@ -227,18 +262,69 @@ Health endpoints:
 - GET /health/live checks the API process;
 - GET /health/ready checks PostgreSQL and returns HTTP 503 when unavailable.
 
-Run the module acceptance suite without requiring Redis, Telegram credentials, or an inference
-model:
+## Docker Compose deployment & operations
 
-    .venv\Scripts\python.exe -m ruff format --check .
-    .venv\Scripts\python.exe -m ruff check .
-    .venv\Scripts\python.exe -m pytest
-    .venv\Scripts\python.exe -m unittest discover -s tests/unit -v
-    .venv\Scripts\python.exe -m unittest discover -s tests/integration -v
-    .venv\Scripts\python.exe -m compileall -q apps tgcurator tests
-    .venv\Scripts\python.exe -m pip check
-    Set-Location web ; npm.cmd run typecheck ; npm.cmd test ; npm.cmd run build ; Set-Location ..
-    git diff --check
+Production serves HTTPS through nginx on port 443. Provide an operator-managed trusted
+certificate/full chain and matching private key in `.env`; both are mounted read-only.
+HTTP port 80 redirects to HTTPS. Production Secure cookies remain enabled. The database,
+Redis and API are internal-only; the API does not trust caller-supplied proxy headers.
 
-The Alembic integration tests render PostgreSQL upgrade and downgrade SQL offline, so the test
-suite itself does not require a running PostgreSQL server.
+Follow [HTTPS deployment and recovery](docs/operations/deployment.md) for file permissions,
+certificate renewal, staged migrations/bootstrap, explicit project selection, maintenance
+windows, backup verification and isolated recovery. Preserve the application master key
+independently in an offline secret vault. Never include it in database/media backup sets.
+
+With an explicit `COMPOSE_PROJECT_NAME` and `COMPOSE_ENV_FILE`, and all application writers
+stopped for the complete backup window:
+
+```bash
+bash scripts/backup-postgres.sh
+bash scripts/backup-media.sh
+# Restore only into an explicitly prepared, stopped recovery project with an empty archive volume:
+bash scripts/restore-postgres.sh --confirm-restore <backup.dump> --media <archive.tar.gz>
+```
+
+The scripts use the Compose PostgreSQL16 service and the named archive volume, not a host
+PostgreSQL client or a host `/var/lib` directory. Restore verifies both SHA256 checksums,
+fails on SQL errors, and requires a post-restore media consistency report. Resolve all report
+discrepancies and verify encrypted secrets with the independently recovered key before cutover.
+
+Run the isolated real-container TLS login and backup/restore exercise:
+
+```bash
+python scripts/check-deployment.py
+```
+
+It uses disposable loopback ports, temporary secrets and a local-only self-signed certificate
+trusted only by its test client. It never establishes production certificate trust or contacts
+Telegram/inference services, and cleans up only the two projects it creates. The completed
+local exercise additionally verifies all ten services starting/restarting, application SIGTERM,
+real FFprobe/frame extraction and active FFmpeg cancellation, independent-key recovery,
+wrong-key rejection, and failing/clean archive consistency scans.
+
+## Validation and CI
+
+```bash
+python -m pip install -e '.[runtime,dev]'
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest -ra
+python -m compileall -q apps tgcurator migrations tests
+python -m pip check
+cd web && npm ci && npm run typecheck && npm test && npm run build
+```
+
+The CI workflow provisions PostgreSQL16 and Redis7. Real PostgreSQL regression tests opt in
+through `TGCURATOR_TEST_POSTGRES_ADMIN_URL` (maintenance database `postgres`) or
+`TGCURATOR_TEST_SERVICES_FILE`; without either they skip. Existing offline SQL and fake-service
+tests remain useful but are not evidence of real persistence/queue correctness. Redis runtime
+tests use `TGCURATOR_TEST_REDIS_URL`. Branches without `web/package.json` skip frontend checks.
+The deployment job exercises real nginx TLS, login cookies and isolated backup/recovery.
+
+The final local result is recorded in `.git/fix-2026-11-12/main/final-full.txt` and
+`final-full.xml`; deployment evidence is `main/final-deployment.txt`. These local
+artifacts are not distributed by ordinary Git commits. Supply service credentials
+through the approved local/CI mechanism without printing or committing their contents.
+The workflow definition is not proof of a successful workflow run: verify all required
+jobs against the final PR head before merging. Live Telegram/provider and production
+TLS/restore acceptance require separately authorized environments.

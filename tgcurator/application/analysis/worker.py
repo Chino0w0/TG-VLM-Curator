@@ -40,14 +40,14 @@ class AnalysisStageRunWorker:
             loaded_snapshot = await self.repository.load_stage_snapshot(claim=claim)
             snapshot = loaded_snapshot
             targets = _analysis_inputs(snapshot)
-            prepared = self.orchestrator.prepare(
+            prepared = await self.orchestrator.prepare_async(
                 stage=snapshot.stage,
                 targets=targets,
                 source_channel_context=snapshot.source_channel_context,
                 attempt=claim.attempt_count,
             )
         except AnalysisInputError as error:
-            failure = AnalysisExecutionFailure(error.code, error.error_type, False)
+            failure = AnalysisExecutionFailure(error.code, error.error_type, error.retryable)
             await self._fail_prepare_error(
                 claim=claim,
                 loaded_snapshot=loaded_snapshot,

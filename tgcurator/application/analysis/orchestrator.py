@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from tgcurator.application.ports.analysis import (
+    InferenceImage,
     InferenceProvider,
     InferenceProviderFailure,
     InferenceRequest,
     InferenceResponse,
 )
+from tgcurator.application.ports.cleanup import ArchiveStorageResolver
 from tgcurator.domain.analysis import (
     AnalysisErrorCode,
     AnalysisStageTemplateVersion,
@@ -24,6 +27,7 @@ from tgcurator.domain.analysis import (
 from tgcurator.shared import DomainValidationError
 
 from .input_composer import AnalysisInputComposer, AnalysisInputError, AnalysisTargetInput
+from .visual_inputs import ArchiveVisualInputResolver, VisualInputLimits, compose_visual_inputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,12 +81,44 @@ class AnalysisOrchestrator:
         input_composer: AnalysisInputComposer | None = None,
         validator: StructuredOutputValidator | None = None,
         cache_key_builder: StageCacheKeyBuilder | None = None,
+        storage_resolver: ArchiveStorageResolver | None = None,
+        visual_input_limits: VisualInputLimits | None = None,
     ) -> None:
         self._provider = provider
+        self._visual_resolver = ArchiveVisualInputResolver(
+            storage_resolver=storage_resolver,
+            limits=visual_input_limits,
+        )
         self._schema_builder = schema_builder or StructuredOutputSchemaBuilder()
         self._input_composer = input_composer or AnalysisInputComposer()
         self._validator = validator or StructuredOutputValidator()
         self._cache_key_builder = cache_key_builder or StageCacheKeyBuilder()
+
+    async def prepare_async(
+        self,
+        *,
+        stage: AnalysisStageTemplateVersion,
+        targets: tuple[AnalysisTargetInput, ...],
+        source_channel_context: Mapping[str, Any] | None = None,
+        attempt: int = 1,
+    ) -> PreparedAnalysisCall:
+        visual_inputs: tuple[InferenceImage, ...] = ()
+        if stage.input_policy.media:
+            resolved = await self._visual_resolver.resolve(targets)
+            visual_inputs = await asyncio.to_thread(
+                compose_visual_inputs,
+                resolved,
+                policy=stage.visual_composition_policy,
+                max_images=stage.inference_profile.max_images,
+                limits=self._visual_resolver.limits,
+            )
+        return self.prepare(
+            stage=stage,
+            targets=targets,
+            source_channel_context=source_channel_context,
+            attempt=attempt,
+            visual_inputs=visual_inputs,
+        )
 
     def prepare(
         self,
@@ -91,6 +127,7 @@ class AnalysisOrchestrator:
         targets: tuple[AnalysisTargetInput, ...],
         source_channel_context: Mapping[str, Any] | None = None,
         attempt: int = 1,
+        visual_inputs: tuple[InferenceImage, ...] = (),
     ) -> PreparedAnalysisCall:
         schema = self._schema_builder.build(
             stage_template_version_id=stage.version_id,
@@ -104,6 +141,7 @@ class AnalysisOrchestrator:
             targets=targets,
             schema=schema,
             source_channel_context=source_channel_context,
+            visual_inputs=visual_inputs,
         )
         cache_key = self._cache_key_builder.build(
             policy=stage.cache_policy,
@@ -125,6 +163,8 @@ class AnalysisOrchestrator:
                 response_schema=schema.document,
                 timeout_seconds=min(stage.timeout_seconds, stage.inference_profile.timeout_seconds),
                 attempt=attempt,
+                visual_inputs=composed.visual_inputs,
+                media_required=stage.input_policy.media,
             ),
             cache_key=cache_key,
         )
@@ -200,7 +240,7 @@ class AnalysisOrchestrator:
         attempt: int = 1,
     ) -> AnalysisExecutionResult:
         try:
-            prepared = self.prepare(
+            prepared = await self.prepare_async(
                 stage=stage,
                 targets=targets,
                 source_channel_context=source_channel_context,
@@ -209,7 +249,7 @@ class AnalysisOrchestrator:
         except AnalysisInputError as error:
             return AnalysisExecutionResult(
                 validation=None,
-                failure=AnalysisExecutionFailure(error.code, error.error_type, False),
+                failure=AnalysisExecutionFailure(error.code, error.error_type, error.retryable),
             )
         except DomainValidationError as error:
             return AnalysisExecutionResult(
