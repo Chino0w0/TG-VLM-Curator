@@ -896,6 +896,11 @@ class SqlAlchemyAnalysisStageRunRepository:
                 )
                 if run is None:
                     return False
+                if run.run_mode == "reanalysis":
+                    from .reanalysis_repository import advance_reanalysis_in_session
+
+                    await advance_reanalysis_in_session(session=session, run=run, now=now)
+                    return True
                 stages = tuple(
                     await session.scalars(
                         select(StageRunRecord)
