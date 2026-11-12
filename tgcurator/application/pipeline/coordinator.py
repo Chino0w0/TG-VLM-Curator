@@ -32,7 +32,7 @@ from tgcurator.domain.processing import (
 )
 from tgcurator.shared import ensure_aware
 
-_ACTIVE_INTENT_STATUSES = frozenset({"pending", "leased", "partial", "retry_wait"})
+_ACTIVE_INTENT_STATUSES = frozenset({"pending", "leased", "sending", "partial", "retry_wait"})
 
 
 @dataclass(slots=True)
@@ -210,7 +210,49 @@ class MessagePipelineCoordinator:
             message.processing_status == "processed"
             and message.terminal_reason in VALID_WATERMARK_TERMINAL_REASONS
         ):
-            return
+            # An appended album component is new work even if the parent used to be
+            # terminal. Explicit administrator/negative-gate skips remain intentional.
+            if message.terminal_reason not in {
+                MessageTerminalReason.ADMIN_SKIPPED.value,
+                MessageTerminalReason.UNSUPPORTED.value,
+                MessageTerminalReason.BLOCKED_NEGATIVE_GATE.value,
+            } and (message.media.any_pending_archive or message.media.any_failed):
+                await self.repository.mark_message_processing(
+                    message_id=message.message_id, now=now
+                )
+                message = replace(
+                    message,
+                    processing_status="processing",
+                    terminal_reason=None,
+                    duplicate_status=DuplicateStatus.UNCHECKED.value,
+                    canonical_message_id=None,
+                    duplicate_distance=None,
+                )
+            else:
+                if (
+                    execution.profile.routing_policy_version_id is not None
+                    and (
+                        message.formal_routing_evaluation_id is None
+                        or any(
+                            status in _ACTIVE_INTENT_STATUSES or status == "failed"
+                            for status in message.publication_intent_statuses
+                        )
+                    )
+                    and message.terminal_reason
+                    not in {
+                        MessageTerminalReason.DUPLICATE_SKIPPED.value,
+                        MessageTerminalReason.UNSUPPORTED.value,
+                        MessageTerminalReason.ADMIN_SKIPPED.value,
+                    }
+                ):
+                    await self._route_and_settle_publication(
+                        execution=execution,
+                        message=message,
+                        terminal_reason=MessageTerminalReason(message.terminal_reason),
+                        counters=counters,
+                        now=now,
+                    )
+                return
         if message.processing_status == "failed":
             return
 
@@ -558,7 +600,8 @@ class MessagePipelineCoordinator:
         if policy_version_id is not None and message.formal_routing_evaluation_id is None:
             if self.routing_service is None:
                 return
-            request_id = f"formal:exec:{execution.execution_id}:msg:{message.message_id}"
+            # Overlapping fetch windows share one formal message/policy evaluation.
+            request_id = f"formal:policy:{policy_version_id}:msg:{message.message_id}"
             try:
                 result = await self.routing_service.evaluate(
                     RoutingRequest(
@@ -628,8 +671,17 @@ def _to_window_progress(
         }
         and message.formal_routing_evaluation_id is None
     )
+    media_unsettled = message.terminal_reason not in {
+        MessageTerminalReason.ADMIN_SKIPPED.value,
+        MessageTerminalReason.UNSUPPORTED.value,
+        MessageTerminalReason.BLOCKED_NEGATIVE_GATE.value,
+    } and (message.media.any_pending_archive or message.media.any_failed)
     has_blocking_work = (
-        message.processing_status != "processed" or has_active_intents or missing_formal_routing
+        message.processing_status != "processed"
+        or has_active_intents
+        or "failed" in message.publication_intent_statuses
+        or missing_formal_routing
+        or media_unsettled
     )
     return WindowMessageProgress(
         primary_telegram_message_id=message.primary_telegram_message_id,
