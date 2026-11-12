@@ -5,11 +5,16 @@ from datetime import datetime
 
 from pydantic import SecretStr
 
-from tgcurator.application import Settings
+from tgcurator.application import MessagePipelineCoordinator, Settings
 from tgcurator.application.ports.cleanup import ArchiveCleanupRepository
 from tgcurator.application.ports.operations import (
     OperationsBacklogRepository,
     OperationsTelemetry,
+)
+from tgcurator.application.ports.pipeline import (
+    MessagePipelineRepository,
+    PipelineProgressionReport,
+    WakeupRepairReport,
 )
 from tgcurator.application.ports.processing import LatestBoundarySource
 from tgcurator.application.ports.publishing import PublicationRepository
@@ -19,13 +24,16 @@ from tgcurator.application.processing import (
     RangeScheduleReport,
     WakeupDispatchReport,
 )
+from tgcurator.application.routing import RoutingService
 from tgcurator.infrastructure.database import (
     AsyncDatabase,
     SqlAlchemyArchiveCleanupRepository,
     SqlAlchemyDurableWakeupRepository,
+    SqlAlchemyMessagePipelineRepository,
     SqlAlchemyOperationsBacklogRepository,
     SqlAlchemyProcessingRangeScheduleRepository,
     SqlAlchemyPublicationRepository,
+    SqlAlchemyRoutingRepository,
 )
 from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.infrastructure.queue import CeleryTaskDispatcher, create_celery_client
@@ -37,6 +45,8 @@ class SchedulerCycleReport:
     wakeup_dispatch: WakeupDispatchReport
     repaired_publication_wakeups: int = 0
     repaired_cleanup_wakeups: int = 0
+    pipeline_repair: WakeupRepairReport = WakeupRepairReport()
+    pipeline_progression: PipelineProgressionReport = PipelineProgressionReport()
 
 
 @dataclass(slots=True)
@@ -52,6 +62,8 @@ class SchedulerRuntime:
     wakeup_dispatcher: DurableWakeupDispatcher
     publication_repository: PublicationRepository | None = None
     cleanup_repository: ArchiveCleanupRepository | None = None
+    pipeline_repository: MessagePipelineRepository | None = None
+    pipeline_coordinator: MessagePipelineCoordinator | None = None
     backlog_repository: OperationsBacklogRepository | None = None
     telemetry: OperationsTelemetry | None = None
 
@@ -62,8 +74,16 @@ class SchedulerRuntime:
         dispatch_limit: int = 100,
         publication_repair_limit: int = 500,
         cleanup_repair_limit: int = 500,
+        pipeline_repair_limit: int = 500,
+        pipeline_drive_limit: int = 100,
     ) -> SchedulerCycleReport:
         try:
+            pipeline_repair = WakeupRepairReport()
+            if self.pipeline_repository is not None:
+                pipeline_repair = await self.pipeline_repository.repair_wakeups(
+                    now=now,
+                    limit=pipeline_repair_limit,
+                )
             repaired_publication_wakeups = 0
             if self.publication_repository is not None:
                 repaired_publication_wakeups = await self.publication_repository.repair_wakeups(
@@ -75,6 +95,12 @@ class SchedulerRuntime:
                 repaired_cleanup_wakeups = await self.cleanup_repository.repair_wakeups(
                     now=now,
                     limit=cleanup_repair_limit,
+                )
+            pipeline_progression = PipelineProgressionReport()
+            if self.pipeline_coordinator is not None:
+                pipeline_progression = await self.pipeline_coordinator.drive_active_executions(
+                    now=now,
+                    limit=pipeline_drive_limit,
                 )
             range_schedule = await self.range_scheduler.schedule(now=now)
             wakeup_dispatch = await self.wakeup_dispatcher.dispatch_due(
@@ -111,6 +137,8 @@ class SchedulerRuntime:
             wakeup_dispatch=wakeup_dispatch,
             repaired_publication_wakeups=repaired_publication_wakeups,
             repaired_cleanup_wakeups=repaired_cleanup_wakeups,
+            pipeline_repair=pipeline_repair,
+            pipeline_progression=pipeline_progression,
         )
 
     async def close(self) -> None:
@@ -140,12 +168,19 @@ def create_scheduler_runtime(
         repository=SqlAlchemyDurableWakeupRepository(database),
         task_dispatcher=CeleryTaskDispatcher(create_celery_client(broker_url=broker_url)),
     )
+    pipeline_repository = SqlAlchemyMessagePipelineRepository(database)
+    pipeline_coordinator = MessagePipelineCoordinator(
+        repository=pipeline_repository,
+        routing_service=RoutingService(repository=SqlAlchemyRoutingRepository(database)),
+    )
     return SchedulerRuntime(
         database=database,
         range_scheduler=range_scheduler,
         wakeup_dispatcher=wakeup_dispatcher,
         publication_repository=SqlAlchemyPublicationRepository(database),
         cleanup_repository=SqlAlchemyArchiveCleanupRepository(database),
+        pipeline_repository=pipeline_repository,
+        pipeline_coordinator=pipeline_coordinator,
         backlog_repository=SqlAlchemyOperationsBacklogRepository(database),
         telemetry=telemetry if telemetry is not None else OperationsMonitor(),
     )

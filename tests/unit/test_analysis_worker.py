@@ -78,6 +78,7 @@ class FakeRepository:
         self.retry_claim_calls: list[dict[str, Any]] = []
         self.target_states: dict[str, str] = {}
         self.negative_gate_calls: list[tuple[NegativeGateAssignment, ...]] = []
+        self.negative_gate_by_run: list[tuple[str, tuple[NegativeGateAssignment, ...]]] = []
         self.complete_calls: list[str] = []
 
     async def claim(
@@ -183,9 +184,15 @@ class FakeRepository:
         now: datetime,
     ) -> bool:
         self.events.append("apply_negative_gate")
-        if analysis_run_id != self.snapshot.claim.analysis_run_id or now != NOW:
+        allowed_runs = {self.snapshot.claim.analysis_run_id} | {
+            target.analysis_run_id
+            for target in self.snapshot.targets
+            if target.analysis_run_id is not None
+        }
+        if analysis_run_id not in allowed_runs or now != NOW:
             raise AssertionError("unexpected negative gate context")
         self.negative_gate_calls.append(assignments)
+        self.negative_gate_by_run.append((analysis_run_id, assignments))
         return True
 
     async def complete_analysis_run(self, *, analysis_run_id: str, now: datetime) -> bool:
@@ -351,6 +358,57 @@ class AnalysisStageRunWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(committed.negative_gate_assignments), 1)
                 self.assertEqual(len(repository.negative_gate_calls), expected_gate_calls)
                 self.assertEqual(repository.complete_calls, ["run-1"])
+
+    async def test_multi_message_batch_groups_negative_gate_and_completes_each_distinct_run(
+        self,
+    ) -> None:
+        events: list[str] = []
+        base = _snapshot(target_ids=("message-a", "message-b"))
+        multi_run_targets = (
+            AnalysisTargetSnapshot(
+                stage_run_id="stage-a",
+                lease_token="lease-a",
+                target_id="message-a",
+                message_id="message-a",
+                target_kind="message",
+                text="text a",
+                analysis_run_id="run-1",
+            ),
+            AnalysisTargetSnapshot(
+                stage_run_id="stage-b",
+                lease_token="lease-b",
+                target_id="message-b",
+                message_id="message-b",
+                target_kind="message",
+                text="text b",
+                analysis_run_id="run-2",
+            ),
+        )
+        snapshot = AnalysisStageSnapshot(
+            claim=base.claim,
+            stage=base.stage,
+            targets=multi_run_targets,
+            source_channel_context={},
+        )
+        repository = FakeRepository(snapshot=snapshot, events=events)
+        provider = FakeProvider(
+            payload={
+                "results": [
+                    _valid_result("message-a", keep_score=0.95, block_score=0.05),
+                    _valid_result("message-b", keep_score=0.10, block_score=0.96),
+                ]
+            },
+            events=events,
+        )
+        worker = AnalysisStageRunWorker(
+            repository=repository,  # type: ignore[arg-type]
+            orchestrator=AnalysisOrchestrator(provider=provider),
+        )
+
+        self.assertTrue(await worker.process(stage_run_id="stage-a", now=NOW))
+        self.assertEqual(len(repository.negative_gate_by_run), 1)
+        self.assertEqual(repository.negative_gate_by_run[0][0], "run-2")
+        self.assertEqual(repository.complete_calls, ["run-1", "run-2"])
 
 
 def _snapshot(

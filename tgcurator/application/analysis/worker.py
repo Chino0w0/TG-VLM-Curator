@@ -35,8 +35,10 @@ class AnalysisStageRunWorker:
         if claim is None:
             return False
 
+        loaded_snapshot: AnalysisStageSnapshot | None = None
         try:
-            snapshot = await self.repository.load_stage_snapshot(claim=claim)
+            loaded_snapshot = await self.repository.load_stage_snapshot(claim=claim)
+            snapshot = loaded_snapshot
             targets = _analysis_inputs(snapshot)
             prepared = self.orchestrator.prepare(
                 stage=snapshot.stage,
@@ -45,41 +47,38 @@ class AnalysisStageRunWorker:
                 attempt=claim.attempt_count,
             )
         except AnalysisInputError as error:
-            await self._fail_claim(
+            failure = AnalysisExecutionFailure(error.code, error.error_type, False)
+            await self._fail_prepare_error(
                 claim=claim,
-                failure=AnalysisExecutionFailure(error.code, error.error_type, False),
+                loaded_snapshot=loaded_snapshot,
+                failure=failure,
                 now=now,
-            )
-            await self.repository.complete_analysis_run(
-                analysis_run_id=claim.analysis_run_id, now=now
             )
             return True
         except DomainValidationError as error:
-            await self._fail_claim(
-                claim=claim,
-                failure=AnalysisExecutionFailure(
-                    AnalysisErrorCode.INPUT_BUILD_ERROR,
-                    type(error).__name__,
-                    False,
-                ),
-                now=now,
+            failure = AnalysisExecutionFailure(
+                AnalysisErrorCode.INPUT_BUILD_ERROR,
+                type(error).__name__,
+                False,
             )
-            await self.repository.complete_analysis_run(
-                analysis_run_id=claim.analysis_run_id, now=now
+            await self._fail_prepare_error(
+                claim=claim,
+                loaded_snapshot=loaded_snapshot,
+                failure=failure,
+                now=now,
             )
             return True
         except Exception as error:
-            await self._fail_claim(
-                claim=claim,
-                failure=AnalysisExecutionFailure(
-                    AnalysisErrorCode.INTERNAL_ERROR,
-                    type(error).__name__,
-                    True,
-                ),
-                now=now,
+            failure = AnalysisExecutionFailure(
+                AnalysisErrorCode.INTERNAL_ERROR,
+                type(error).__name__,
+                True,
             )
-            await self.repository.complete_analysis_run(
-                analysis_run_id=claim.analysis_run_id, now=now
+            await self._fail_prepare_error(
+                claim=claim,
+                loaded_snapshot=loaded_snapshot,
+                failure=failure,
+                now=now,
             )
             return True
 
@@ -131,9 +130,7 @@ class AnalysisStageRunWorker:
                 now=now,
             )
             await self._fail_targets(snapshot=snapshot, failure=failure, now=now)
-            await self.repository.complete_analysis_run(
-                analysis_run_id=claim.analysis_run_id, now=now
-            )
+            await self._complete_snapshot_runs(snapshot=snapshot, now=now)
             return True
 
         assert invocation.response is not None
@@ -188,16 +185,41 @@ class AnalysisStageRunWorker:
         committed: AnalysisCommitResult,
         now: datetime,
     ) -> None:
+        run_by_message = {
+            target.message_id: (target.analysis_run_id or snapshot.claim.analysis_run_id)
+            for target in snapshot.targets
+        }
         if snapshot.claim.run_mode != "test" and committed.negative_gate_assignments:
-            await self.repository.apply_negative_gate(
-                analysis_run_id=snapshot.claim.analysis_run_id,
-                assignments=committed.negative_gate_assignments,
+            grouped: dict[str, list] = {}
+            for assignment in committed.negative_gate_assignments:
+                run_id = run_by_message.get(assignment.message_id, snapshot.claim.analysis_run_id)
+                grouped.setdefault(run_id, []).append(assignment)
+            for run_id, run_assignments in grouped.items():
+                await self.repository.apply_negative_gate(
+                    analysis_run_id=run_id,
+                    assignments=tuple(run_assignments),
+                    now=now,
+                )
+        await self._complete_snapshot_runs(snapshot=snapshot, now=now)
+
+    async def _complete_snapshot_runs(
+        self,
+        *,
+        snapshot: AnalysisStageSnapshot,
+        now: datetime,
+    ) -> None:
+        seen_runs: list[str] = []
+        for target in snapshot.targets:
+            run_id = target.analysis_run_id or snapshot.claim.analysis_run_id
+            if run_id not in seen_runs:
+                seen_runs.append(run_id)
+        if not seen_runs:
+            seen_runs.append(snapshot.claim.analysis_run_id)
+        for run_id in seen_runs:
+            await self.repository.complete_analysis_run(
+                analysis_run_id=run_id,
                 now=now,
             )
-        await self.repository.complete_analysis_run(
-            analysis_run_id=snapshot.claim.analysis_run_id,
-            now=now,
-        )
 
     async def _fail_targets(
         self,
@@ -215,6 +237,21 @@ class AnalysisStageRunWorker:
             retry_at=_retry_at(snapshot=snapshot, now=now),
             now=now,
         )
+
+    async def _fail_prepare_error(
+        self,
+        *,
+        claim: ClaimedAnalysisStageRun,
+        loaded_snapshot: AnalysisStageSnapshot | None,
+        failure: AnalysisExecutionFailure,
+        now: datetime,
+    ) -> None:
+        if loaded_snapshot is not None and len(loaded_snapshot.targets) > 1:
+            await self._fail_targets(snapshot=loaded_snapshot, failure=failure, now=now)
+            await self._complete_snapshot_runs(snapshot=loaded_snapshot, now=now)
+            return
+        await self._fail_claim(claim=claim, failure=failure, now=now)
+        await self.repository.complete_analysis_run(analysis_run_id=claim.analysis_run_id, now=now)
 
     async def _fail_claim(
         self,

@@ -25,6 +25,7 @@ from .operations_repository import (
     SqlAlchemyOperationsBacklogRepository,
     operations_backlog_statement,
 )
+from .pipeline_repository import SqlAlchemyMessagePipelineRepository
 from .processing_repository import (
     SqlAlchemyDurableWakeupRepository,
     SqlAlchemyProcessingRangeScheduleRepository,
@@ -58,6 +59,7 @@ __all__ = [
     "SqlAlchemyPublicationRepository",
     "SqlAlchemyImageArchiveMetadataRepository",
     "SqlAlchemyImageArchiveWorkRepository",
+    "SqlAlchemyMessagePipelineRepository",
     "SqlAlchemyOperationsBacklogRepository",
     "SqlAlchemyProcessingRangeScheduleRepository",
     "SqlAlchemyRangeExecutionWorkerRepository",

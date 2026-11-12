@@ -450,9 +450,22 @@ async def _load_duplicate_state(
     session: AsyncSession,
     message: MessageRecord,
 ) -> Mapping[str, Any]:
+    dup_status = getattr(message, "duplicate_status", None) or "unchecked"
+    canonical_id = getattr(message, "canonical_message_id", None)
+    dup_distance = getattr(message, "duplicate_distance", None)
+    if dup_status in {"duplicate_skipped", "duplicate_reclassify"} and canonical_id is not None:
+        return {
+            "status": "duplicate",
+            "duplicate_status": dup_status,
+            "duplicate_distance": dup_distance,
+            "canonical_message_id": str(canonical_id),
+            "matching_message_ids": [str(canonical_id)],
+            "match_count": 1,
+            "visual_fingerprint": message.visual_fingerprint,
+        }
     if message.visual_fingerprint is None:
         return {
-            "status": "unknown",
+            "status": "unique" if dup_status == "unique" else "unknown",
             "canonical_message_id": None,
             "matching_message_ids": [],
             "match_count": 0,
@@ -474,6 +487,8 @@ async def _load_duplicate_state(
         status = "duplicate"
     return {
         "status": status,
+        "duplicate_status": dup_status,
+        "duplicate_distance": dup_distance,
         "canonical_message_id": str(canonical.id),
         "matching_message_ids": other_ids,
         "match_count": len(other_ids),

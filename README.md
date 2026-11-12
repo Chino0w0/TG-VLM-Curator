@@ -8,7 +8,8 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 **M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
 **M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
 workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
-review and routing workflows**, and **M6 - publication, archive cleanup, and operations**
+review and routing workflows**, **M6 - publication, archive cleanup, and operations**, and
+**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**
 are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
@@ -123,7 +124,22 @@ Default worker runtimes remain safely unconfigured for external Telegram session
 stores unless explicitly injected, returning explicit not-configured errors or durable retry/failed
 states rather than fabricating remote deliveries or deletions.
 
-See tg-vlm-curator-module-implementation.md for module boundaries, the M7-M10 roadmap, and
+M7, completed on 2026-11-12, adds:
+
+- end-to-end `MessagePipelineCoordinator` orchestration across `RangeExecution` handoff
+  (`awaiting_pipeline`), pre-download `batch_messages` PreScreen stages, first-cause Negative Gate
+  media-download blocking (while preserving formal Routing), post-PreScreen media archive wake-ups,
+  visual deduplication, conditional DAG progression, formal `RoutingService.evaluate`, and
+  publication settlement;
+- order-independent message visual fingerprints and exact unordered pHash multiset pairing across
+  image and video-cover pHashes (`duplicate_matches` and `canonical_message_id`), supporting both
+  `skip` and `reclassify_with_text` (with version-matched canonical visual stage cache reuse);
+- gap-free monotonic continuous `processing_watermark` advancement on `RangeExecution` and
+  `ProcessingRange`, plus full-queue Scheduler wake-up repair (`range_execution`, `image_archive`,
+  `video_archive`, `analysis`, `publication`, and `maintenance`) and the single-instance
+  `apps/telegram_ingestor` composition root.
+
+See tg-vlm-curator-module-implementation.md for module boundaries, the M8-M10 roadmap, and
 acceptance criteria.
 
 ## Dependency direction
