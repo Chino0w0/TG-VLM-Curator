@@ -1907,6 +1907,14 @@ class AnalysisRunRecord(TimestampMixin, Base):
         ),
         Index("ix_analysis_runs_message_created", "message_id", "created_at"),
         Index("ix_analysis_runs_status", "status"),
+        Index(
+            "uq_analysis_runs_formal_input",
+            "message_id",
+            "analysis_pipeline_version_id",
+            text("(COALESCE(facts_snapshot->>'_pipeline_input_revision', ''))"),
+            unique=True,
+            postgresql_where=text("run_mode = 'formal'"),
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
