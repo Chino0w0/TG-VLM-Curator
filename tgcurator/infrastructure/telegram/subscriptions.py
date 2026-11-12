@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 
-from tgcurator.infrastructure.database.models import SourceChannel
+from tgcurator.infrastructure.database.models import SourceChannel, TelegramIdentity
 
 from .configured_runtime import ConfiguredTelegramClientPool, ConfiguredTelegramGateway
 
@@ -38,7 +39,11 @@ class TelegramSubscriptionManager:
             sources = tuple(
                 await session.scalars(
                     select(SourceChannel)
-                    .where(SourceChannel.enabled.is_(True))
+                    .join(
+                        TelegramIdentity,
+                        TelegramIdentity.id == SourceChannel.default_read_identity_id,
+                    )
+                    .where(SourceChannel.enabled.is_(True), TelegramIdentity.enabled.is_(True))
                     .order_by(SourceChannel.id)
                 )
             )
@@ -73,6 +78,10 @@ class TelegramSubscriptionManager:
                 connected_sources.extend(source_map.values())
             except Exception as error:
                 all_connected = False
+                old = self._subscribed.pop(identity_id, None)
+                if old is not None:
+                    self._remove_handlers(old)
+                self._sources_by_identity.pop(identity_id, None)
                 logger.warning(
                     "Telegram identity subscription unavailable",
                     extra={
@@ -82,6 +91,7 @@ class TelegramSubscriptionManager:
                 )
         for identity_id in set(self._subscribed) - set(current):
             self._remove_handlers(self._subscribed.pop(identity_id))
+            await self.pool.revoke_identity(identity_id=identity_id)
         runtime.mark_connected(connected=all_connected, now=now)
         due = (
             changed
@@ -102,12 +112,32 @@ class TelegramSubscriptionManager:
                     },
                 )
 
-    def _source_for_event(self, identity_id: str, event: Any) -> str | None:
-        return self._sources_by_identity.get(identity_id, {}).get(getattr(event, "chat_id", None))
+    async def _source_for_event(self, identity_id: str, event: Any) -> str | None:
+        source_id = self._sources_by_identity.get(identity_id, {}).get(
+            getattr(event, "chat_id", None)
+        )
+        if source_id is None:
+            return None
+        # A callback already queued before the next poll must not outlive identity
+        # disablement or source reassignment. Revalidate persisted authority here.
+        async with self.gateway.database.session() as session:
+            enabled_id = await session.scalar(
+                select(SourceChannel.id)
+                .join(
+                    TelegramIdentity, TelegramIdentity.id == SourceChannel.default_read_identity_id
+                )
+                .where(
+                    SourceChannel.id == UUID(source_id),
+                    SourceChannel.default_read_identity_id == UUID(identity_id),
+                    SourceChannel.enabled.is_(True),
+                    TelegramIdentity.enabled.is_(True),
+                )
+            )
+        return source_id if enabled_id is not None else None
 
     def _new_message_handler(self, runtime: Any, identity_id: str):
         async def handler(event: Any) -> None:
-            source_id = self._source_for_event(identity_id, event)
+            source_id = await self._source_for_event(identity_id, event)
             if source_id is None:
                 return
             try:
@@ -127,7 +157,7 @@ class TelegramSubscriptionManager:
 
     def _edit_message_handler(self, runtime: Any, identity_id: str):
         async def handler(event: Any) -> None:
-            source_id = self._source_for_event(identity_id, event)
+            source_id = await self._source_for_event(identity_id, event)
             if source_id is None:
                 return
             try:
@@ -152,7 +182,7 @@ class TelegramSubscriptionManager:
 
     def _delete_message_handler(self, runtime: Any, identity_id: str):
         async def handler(event: Any) -> None:
-            source_id = self._source_for_event(identity_id, event)
+            source_id = await self._source_for_event(identity_id, event)
             if source_id is None:
                 return
             from datetime import UTC

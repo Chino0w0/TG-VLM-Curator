@@ -114,11 +114,17 @@ class ConfiguredTelegramClientPool:
                         .where(TelegramIdentity.id == UUID(identity_id))
                     )
                 ).one_or_none()
-                if selected is None or not selected[0].enabled:
-                    raise TelegramSessionExpired("TelegramIdentityUnavailable")
-                identity, nonce = selected
-                secret_id, identity_type = identity.secret_id, identity.identity_type
-                revision = (secret_id, bytes(nonce))
+                available = selected is not None and selected[0].enabled
+                if available:
+                    identity, nonce = selected
+                    secret_id, identity_type = identity.secret_id, identity.identity_type
+                    revision = (secret_id, bytes(nonce))
+            if not available:
+                stale = self._clients.pop(identity_id, None)
+                self._versions.pop(identity_id, None)
+                if stale is not None:
+                    await stale.disconnect()
+                raise TelegramSessionExpired("TelegramIdentityUnavailable")
             cached = self._clients.get(identity_id)
             if cached is not None and self._versions.get(identity_id) == revision:
                 if cached.is_connected():
@@ -176,6 +182,13 @@ class ConfiguredTelegramClientPool:
                     identity.updated_at = datetime.now(UTC)
                     if healthy:
                         identity.last_connected_at = identity.updated_at
+
+    async def revoke_identity(self, *, identity_id: str) -> None:
+        async with self._lock:
+            client = self._clients.pop(identity_id, None)
+            self._versions.pop(identity_id, None)
+            if client is not None:
+                await client.disconnect()
 
     async def close(self) -> None:
         clients, self._clients = tuple(self._clients.values()), {}
