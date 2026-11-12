@@ -5,15 +5,28 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 ## Current implementation status
 
-**M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
-**M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
-workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
-review and routing workflows**, **M6 - publication, archive cleanup, and operations**,
-**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**,
-**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**,
-**M9 - React + TypeScript + Vite web administration console**, and
-**M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification**
-are complete.
+M0–M9 implementations are merged. The remediation merges are M6 / #27
+`99696fa2`, M7 / #28 `28c3e6fd`, M8 / #29 `b0e955f4`, and M9 / #30 `0007be1e`.
+M10 / #31 delivers the production composition roots, visual-input preparation and
+operational verification. Code head `8fc2737` passed all GitHub CI jobs
+(python, web and deployment): PR run `43212224146`, push run `43212215720`.
+The final documentation head must pass the same checks before exact-SHA merge;
+the actual merge commit is recorded on PR #31.
+
+The local suite passed 596 tests with 2 deprecation warnings and no errors,
+failures or skips (281.56 seconds). This includes 31 native PostgreSQL/runtime
+integration cases and the independent worker OS-process restart; 17 additional
+migration tests render offline SQL. GitHub Linux/Python3.12 with SQLAlchemy2.1.8
+passed 596 tests with 1 dependency warning (127.86 seconds). Native PostgreSQL
+Chrome regression passed all 17 groups, frontend Vitest passed 24 tests, and the
+recorded npm audit reported zero vulnerabilities. The full isolated ten-service
+Docker exercise passed locally and in GitHub CI.
+
+These are real local PostgreSQL16, Redis/Celery, Docker, HTTP and browser results.
+Telegram and inference remain controlled external fixtures, not live credentials,
+real channel deliveries, provider compatibility or model-quality acceptance. Full
+finding-by-finding evidence and remaining gates are in
+[the remediation delivery report](docs/reviews/2026-11-12-remediation-status.md).
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -74,9 +87,9 @@ M4, completed on 2026-09-09, adds:
 - the dedicated `analysis` queue and UUID-only `tgcurator.analysis` wake-up task.
 
 No inference model or provider is bundled or deployed. A real external provider and its secret
-configuration are required for inference. The default runtime remains deliberately unconfigured;
-missing provider configuration records an explicit failed InferenceCall and durable StageRun
-retry or terminal-failure state instead of fabricating a successful result. API readiness checks
+configuration are required for inference. The runtime resolves published inference profiles and encrypted vault references;
+missing provider configuration records an explicit failure and durable retry or terminal-failure
+state instead of fabricating a successful result. API readiness checks
 PostgreSQL only, so provider unavailability remains a degraded business capability rather than
 making the administration API unavailable.
 
@@ -123,9 +136,10 @@ M6, completed on 2026-11-12, adds:
   snapshots, plus UUID-only `tgcurator.publication` and `tgcurator.archive_cleanup` wake-up tasks
   and Scheduler wake-up repair.
 
-Default worker runtimes remain safely unconfigured for external Telegram sessions and archive blob
-stores unless explicitly injected, returning explicit not-configured errors or durable retry/failed
-states rather than fabricating remote deliveries or deletions.
+Default worker factories resolve encrypted Telegram identities, published configuration and local
+archive storage. Missing or invalid external configuration remains an explicit error or durable
+retry/failed state, never a fabricated remote delivery. See
+[runtime configuration and acceptance boundaries](docs/operations/runtime.md).
 
 M7, completed on 2026-11-12, adds:
 
@@ -136,7 +150,7 @@ M7, completed on 2026-11-12, adds:
   publication settlement;
 - order-independent message visual fingerprints and exact unordered pHash multiset pairing across
   image and video-cover pHashes (`duplicate_matches` and `canonical_message_id`), supporting both
-  `skip` and `reclassify_with_text` (with version-matched canonical visual stage cache reuse);
+  `skip` and `reclassify_with_text` (with complete prepared-input semantic cache validation rather than unsafe donor copying);
 - gap-free monotonic continuous `processing_watermark` advancement on `RangeExecution` and
   `ProcessingRange`, plus full-queue Scheduler wake-up repair (`range_execution`, `image_archive`,
   `video_archive`, `analysis`, `publication`, and `maintenance`) and the single-instance
@@ -176,7 +190,7 @@ M9, completed on 2026-11-12, adds:
   evaluation, mandatory two-step `Archive Management` (`Dry-Run` before `Confirm`), `Operations`
   step-level retries, and sanitized `Audit Log` browsing.
 
-M10, completed on 2026-11-12, adds:
+M10, implemented with native local and GitHub CI acceptance, adds:
 
 - production `docker/backend.Dockerfile`, `docker/web.Dockerfile`, `docker/nginx.conf`,
   `.dockerignore`, `.env.example`, and `docker-compose.yml` orchestrating the ten core services
@@ -204,7 +218,7 @@ See tg-vlm-curator-module-implementation.md for module boundaries and acceptance
     apps / workers / infrastructure --> application --> domain --> shared
 
 The domain package does not import FastAPI, SQLAlchemy, Celery, Telethon, httpx, or storage
-clients. PostgreSQL is the business source of truth; future queue messages remain
+clients. PostgreSQL is the business source of truth; queue messages remain
 reconstructable wake-ups rather than business state.
 
 ## Local development
@@ -283,7 +297,10 @@ python scripts/check-deployment.py
 
 It uses disposable loopback ports, temporary secrets and a local-only self-signed certificate
 trusted only by its test client. It never establishes production certificate trust or contacts
-Telegram/inference services, and cleans up only the two projects it creates.
+Telegram/inference services, and cleans up only the two projects it creates. The completed
+local exercise additionally verifies all ten services starting/restarting, application SIGTERM,
+real FFprobe/frame extraction and active FFmpeg cancellation, independent-key recovery,
+wrong-key rejection, and failing/clean archive consistency scans.
 
 ## Validation and CI
 
@@ -303,3 +320,11 @@ through `TGCURATOR_TEST_POSTGRES_ADMIN_URL` (maintenance database `postgres`) or
 tests remain useful but are not evidence of real persistence/queue correctness. Redis runtime
 tests use `TGCURATOR_TEST_REDIS_URL`. Branches without `web/package.json` skip frontend checks.
 The deployment job exercises real nginx TLS, login cookies and isolated backup/recovery.
+
+The final local result is recorded in `.git/fix-2026-11-12/main/final-full.txt` and
+`final-full.xml`; deployment evidence is `main/final-deployment.txt`. These local
+artifacts are not distributed by ordinary Git commits. Supply service credentials
+through the approved local/CI mechanism without printing or committing their contents.
+The workflow definition is not proof of a successful workflow run: verify all required
+jobs against the final PR head before merging. Live Telegram/provider and production
+TLS/restore acceptance require separately authorized environments.
