@@ -20,7 +20,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M5 | Human review and routing workflows | Complete (2026-09-09) |
 | M6 | Publication, archive cleanup, and operations | Complete (2026-11-12) |
 | M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Complete (2026-11-12) |
-| M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Pending |
+| M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Complete (2026-11-12) |
 | M9 | React + TypeScript + Vite web administration console | Pending |
 | M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Pending |
 
@@ -268,23 +268,33 @@ Alembic gates across visual deduplication, continuous watermarks, conditional DA
 batch co-leasing, pipeline coordination, and `telegram_ingestor` runtime tests without requiring a
 running PostgreSQL server, Redis broker, Telegram session, external provider, or inference model.
 
-## M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics (pending)
+## M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics (complete 2026-11-12)
 
 M8 exposes the complete FastAPI administration surface over the domain and application services:
 
-- single-administrator Argon2id session authentication (`HttpOnly`, `Secure`, `SameSite` cookies),
-  CSRF validation on state-mutating endpoints, and sanitized `AuditEvent` persistence across all
-  administrative mutations;
-- write-only encrypted secret endpoints (never echoing plaintext), Telegram identity management
-  with `TelegramCapabilityResolver`, source/destination channel endpoints, source/media profile
-  endpoints, and `ProcessingRange` lifecycle plus audited step-level retry/skip controls;
-- full `DRAFT -> PUBLISHED -> ARCHIVED` endpoints for labels, label sets, prompts, stages,
-  pipelines, inference profiles, rendering templates, and routing policies, plus isolated
-  `run_mode="test"` Prompt Test Bench execution that never mutates formal labels, watermarks, or
-  routing;
-- cursor-paginated `Messages` search, full causal-chain `Message Detail` inspection, append-only
-  manual review/labeling, explicit reanalysis, dry-run/formal rerouting, archive cleanup
-  dry-run/confirm endpoints, `/metrics` Prometheus exposition, and operations/audit query APIs.
+- single-administrator Argon2id session authentication (`HttpOnly`, `Secure`, `SameSite=Lax`
+  cookies), HMAC-SHA256 CSRF validation on state-mutating endpoints, durable `admin_sessions`
+  storage, and recursively sanitized `AuditEvent` persistence across administrative mutations;
+- write-only encrypted secret endpoints (`POST /api/v1/secrets`, `PUT /api/v1/secrets/{id}`) that
+  never echo plaintext, Telegram identity management with `TelegramCapabilityResolver`,
+  source/destination channel endpoints, `media_processing_profiles` + `source_channel_profiles`
+  endpoints, and `ProcessingRange` lifecycle (`FIXED` / `LATEST`, pause, resume) plus audited
+  message skip (with continuous `processing_watermark` settlement) and step-level retry controls;
+- full `DRAFT -> PUBLISHED -> ARCHIVED` (and `RETIRED` for source channel profiles) endpoints across
+  all ten configuration families (`label-definitions`, `label-sets`, `prompt-templates`,
+  `inference-profiles`, `analysis-stages`, `analysis-pipelines`, `media-processing-profiles`,
+  `source-channel-profiles`, `rendering-templates`, and `routing-policies`), plus isolated
+  `run_mode="test"` Prompt Test Bench execution (`POST /api/v1/analysis/test-bench`) that never
+  mutates formal labels, Negative Gate blocks, watermarks, or routing;
+- cursor-paginated `Messages` search across all Section 37 filters, full causal-chain
+  `Message Detail` inspection, append-only manual review/labeling, explicit reanalysis, dry-run
+  comparison and formal rerouting, two-step archive cleanup (`Dry-Run` -> hash-verified `Confirm`),
+  Prometheus text exposition (`GET /metrics`), and dashboard/operations/audit query APIs.
+
+Acceptance extends the formatting, lint, pytest, unittest, compileall, pip, dependency-boundary,
+schema, and offline Alembic (`a8b2d4e1f305`) gates across session/CSRF security, write-only secret
+isolation, configuration immutability, DAG/DSL validation, Prompt Test Bench side-effect isolation,
+cursor pagination, review/reroute/skip/cleanup workflows, and `/metrics` exposition.
 
 ## M9 - React + TypeScript + Vite web administration console (pending)
 

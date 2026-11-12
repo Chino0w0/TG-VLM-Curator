@@ -3014,3 +3014,114 @@ class DuplicateMatchRecord(CreatedAtMixin, Base):
     match_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     hamming_distance: Mapped[int] = mapped_column(Integer, nullable=False)
     duplicate_policy: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class AdminSessionRecord(TimestampMixin, Base):
+    """Durable single-administrator HTTP session storing only SHA-256 token digests."""
+
+    __tablename__ = "admin_sessions"
+    __table_args__ = (
+        UniqueConstraint("session_token_hash", name="uq_admin_sessions_token_hash"),
+        CheckConstraint(
+            "char_length(session_token_hash) = 64 AND session_token_hash !~ '[^0-9a-f]'",
+            name="admin_session_token_hash_format",
+        ),
+        CheckConstraint(
+            "char_length(csrf_token_hash) = 64 AND csrf_token_hash !~ '[^0-9a-f]'",
+            name="admin_session_csrf_hash_format",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="admin_session_expiry_after_creation",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= created_at",
+            name="admin_session_revoked_after_creation",
+        ),
+        Index("ix_admin_sessions_user_expiry", "admin_user_id", "expires_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    admin_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admin_users.id", name="fk_admin_sessions_user", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class MediaProcessingProfileRecord(TimestampMixin, Base):
+    """Named media normalization and frame-sampling profile root."""
+
+    __tablename__ = "media_processing_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(name)) > 0",
+            name="media_profile_name_not_blank",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+
+class MediaProcessingProfileVersionRecord(TimestampMixin, Base):
+    """Immutable DRAFT -> PUBLISHED -> ARCHIVED media processing configuration version."""
+
+    __tablename__ = "media_processing_profile_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "media_processing_profile_id",
+            "version_number",
+            name="uq_media_profile_version_number",
+        ),
+        CheckConstraint("version_number > 0", name="media_version_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'published', 'archived')",
+            name="media_version_state",
+        ),
+        CheckConstraint(
+            "(state = 'draft' AND published_at IS NULL AND archived_at IS NULL) "
+            "OR (state = 'published' AND published_at IS NOT NULL AND archived_at IS NULL) "
+            "OR (state = 'archived' AND published_at IS NOT NULL "
+            "AND archived_at IS NOT NULL AND archived_at >= published_at)",
+            name="media_version_lifecycle",
+        ),
+        CheckConstraint("jsonb_typeof(content) = 'object'", name="media_content_object"),
+        CheckConstraint(
+            "char_length(content_hash) = 64 AND content_hash !~ '[^0-9a-f]'",
+            name="media_content_hash_format",
+        ),
+        Index(
+            "uq_media_profile_one_published",
+            "media_processing_profile_id",
+            unique=True,
+            postgresql_where=text("state = 'published'"),
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    media_processing_profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "media_processing_profiles.id",
+            name="fk_media_profile_versions_profile",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="draft",
+        server_default=text("'draft'"),
+    )
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
