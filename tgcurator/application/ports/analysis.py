@@ -95,6 +95,7 @@ class AnalysisTargetSnapshot:
     media: tuple[Mapping[str, Any], ...] = ()
     previous_results: Mapping[str, Any] | None = None
     visual_identity: str | None = None
+    analysis_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
