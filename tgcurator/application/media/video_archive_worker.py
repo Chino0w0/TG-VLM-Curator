@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -18,6 +19,8 @@ from tgcurator.application.ports.contracts import ArchiveStorage
 from tgcurator.application.ports.media import (
     ClaimedVideoArchive,
     ImageNormalizationProfile,
+    MediaProfileResolutionError,
+    MediaProfileResolver,
     TelegramMediaDownloader,
     TelegramMediaDownloadRequest,
     VideoArchiveReadyMetadata,
@@ -26,6 +29,8 @@ from tgcurator.application.ports.media import (
     VideoMetadataProbe,
 )
 from tgcurator.shared import DomainValidationError, ensure_aware, ensure_positive_duration
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -43,6 +48,7 @@ class VideoArchiveWorker:
     storage_key_prefix: str = "videos"
     lease_duration: timedelta = timedelta(minutes=5)
     failure_retry_delay: timedelta = timedelta(minutes=1)
+    profile_resolver: MediaProfileResolver | None = None
 
     def __post_init__(self) -> None:
         ensure_positive_duration(self.lease_duration, field="lease_duration")
@@ -79,6 +85,37 @@ class VideoArchiveWorker:
                 retryable=False,
                 now=now,
             )
+
+        image_profile = self.image_profile
+        sampling_profile = self.sampling_profile
+        if self.profile_resolver is not None:
+            try:
+                resolution = await self.profile_resolver.resolve(
+                    source_channel_id=claim.work_item.source_channel_id,
+                    source_telegram_message_id=claim.work_item.source_telegram_message_id,
+                )
+                if resolution.image_profile is not None:
+                    image_profile = resolution.image_profile
+                    assert resolution.sampling_profile is not None
+                    sampling_profile = resolution.sampling_profile
+                else:
+                    _LOGGER.info("Media profile default fallback: %s", resolution.fallback_reason)
+            except MediaProfileResolutionError as error:
+                return await self._fail(
+                    claim=claim,
+                    error_code=error.error_code,
+                    error_type="MediaProfileResolutionError",
+                    retryable=error.retryable,
+                    now=now,
+                )
+            except Exception:
+                return await self._fail(
+                    claim=claim,
+                    error_code="MEDIA_PROFILE_RESOLUTION_FAILED",
+                    error_type="MediaProfileResolutionError",
+                    retryable=True,
+                    now=now,
+                )
 
         try:
             content = await self.media_downloader.download(
@@ -117,8 +154,8 @@ class VideoArchiveWorker:
             probe = await self.metadata_probe.probe(content=content)
             sampled = await self.sampling_service.sample(
                 content=content,
-                sampling_profile=self.sampling_profile,
-                image_profile=self.image_profile,
+                sampling_profile=sampling_profile,
+                image_profile=image_profile,
                 duration_seconds=probe.duration_seconds,
             )
             frames: list[VideoFrameReadyMetadata] = []

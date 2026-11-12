@@ -4,13 +4,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from tgcurator.application.media.videos import VideoSamplingProfile
 
 
 @dataclass(frozen=True, slots=True)
 class ImageNormalizationProfile:
-    """Frozen image-output parameters supplied by a published media profile later on."""
+    """Frozen image-output parameters supplied by a published media profile or explicit defaults."""
 
     max_side_pixels: int
     quality: int
@@ -20,6 +23,56 @@ class ImageNormalizationProfile:
             raise ValueError("max_side_pixels must be greater than zero")
         if not 1 <= self.quality <= 100:
             raise ValueError("quality must be between 1 and 100")
+
+
+@dataclass(frozen=True, slots=True)
+class MediaProfileResolution:
+    """Frozen range-owned media policy, or an explicit unconfigured/default decision."""
+
+    image_profile: ImageNormalizationProfile | None = None
+    sampling_profile: VideoSamplingProfile | None = None
+    media_profile_version_id: str | None = None
+    source_profile_version_ids: tuple[str, ...] = ()
+    execution_ids: tuple[str, ...] = ()
+    fallback_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.image_profile is None) != (self.sampling_profile is None):
+            raise ValueError("resolved media profiles must be supplied together")
+        if self.image_profile is None:
+            if self.media_profile_version_id is not None:
+                raise ValueError("an explicitly configured media version cannot fall back")
+            if self.fallback_reason not in {
+                "NO_FROZEN_RANGE_EXECUTION",
+                "MEDIA_PROFILE_UNCONFIGURED",
+            }:
+                raise ValueError("default media profiles require an explicit fallback reason")
+        elif self.fallback_reason is not None or self.media_profile_version_id is None:
+            raise ValueError("configured media profiles require a frozen version, not fallback")
+
+
+class MediaProfileResolutionError(RuntimeError):
+    """Sanitized durable archive failure; never includes profile contents or connection data."""
+
+    def __init__(self, error_code: str, *, retryable: bool = False) -> None:
+        if (
+            not error_code
+            or len(error_code) > 64
+            or any(
+                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for character in error_code
+            )
+        ):
+            raise ValueError("media profile error_code must be a bounded diagnostic code")
+        self.error_code = error_code
+        self.retryable = retryable
+        super().__init__(error_code)
+
+
+class MediaProfileResolver(Protocol):
+    async def resolve(
+        self, *, source_channel_id: str, source_telegram_message_id: int
+    ) -> MediaProfileResolution:
+        """Resolve a claimed component from immutable execution snapshots, never active profile."""
 
 
 @dataclass(frozen=True, slots=True)

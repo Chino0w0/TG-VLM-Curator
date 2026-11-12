@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
@@ -18,10 +19,14 @@ from tgcurator.application.ports.media import (
     ImageArchiveReadyMetadata,
     ImageArchiveWorkRepository,
     ImageNormalizationProfile,
+    MediaProfileResolutionError,
+    MediaProfileResolver,
     TelegramMediaDownloader,
     TelegramMediaDownloadRequest,
 )
 from tgcurator.shared import DomainValidationError, ensure_aware, ensure_positive_duration
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -36,6 +41,7 @@ class ImageArchiveWorker:
     storage_key_prefix: str = "images"
     lease_duration: timedelta = timedelta(minutes=5)
     failure_retry_delay: timedelta = timedelta(minutes=1)
+    profile_resolver: MediaProfileResolver | None = None
 
     def __post_init__(self) -> None:
         ensure_positive_duration(self.lease_duration, field="lease_duration")
@@ -72,6 +78,34 @@ class ImageArchiveWorker:
                 retryable=False,
                 now=now,
             )
+
+        profile = self.normalization_profile
+        if self.profile_resolver is not None:
+            try:
+                resolution = await self.profile_resolver.resolve(
+                    source_channel_id=claim.work_item.source_channel_id,
+                    source_telegram_message_id=claim.work_item.source_telegram_message_id,
+                )
+                if resolution.image_profile is not None:
+                    profile = resolution.image_profile
+                else:
+                    _LOGGER.info("Media profile default fallback: %s", resolution.fallback_reason)
+            except MediaProfileResolutionError as error:
+                return await self._fail(
+                    claim=claim,
+                    error_code=error.error_code,
+                    error_type="MediaProfileResolutionError",
+                    retryable=error.retryable,
+                    now=now,
+                )
+            except Exception:
+                return await self._fail(
+                    claim=claim,
+                    error_code="MEDIA_PROFILE_RESOLUTION_FAILED",
+                    error_type="MediaProfileResolutionError",
+                    retryable=True,
+                    now=now,
+                )
 
         try:
             content = await self.media_downloader.download(
@@ -111,7 +145,7 @@ class ImageArchiveWorker:
             artifact = await self.archive_service.normalize_and_archive(
                 content=content,
                 storage_key=storage_key,
-                profile=self.normalization_profile,
+                profile=profile,
             )
             archive_size_bytes = await self.archive_service.archive_storage.size(key=storage_key)
             if archive_size_bytes != len(artifact.content):
