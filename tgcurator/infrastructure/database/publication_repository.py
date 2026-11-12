@@ -4,8 +4,9 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.orm import load_only
 
 from tgcurator.application.ports.publishing import ClaimedPublicationIntent
 from tgcurator.domain.publishing import (
@@ -71,6 +72,9 @@ def publication_intent_claim_statement(*, intent_id: UUID, now: datetime):
                 ),
             ),
         )
+        # Publication consumes only these frozen message facts. Do not couple
+        # claiming to unrelated pipeline/admin columns added by later modules.
+        .options(load_only(MessageRecord.id, MessageRecord.telegram_message_ids))
         .with_for_update(of=PublicationIntentRecord, skip_locked=True)
     )
 
@@ -167,6 +171,15 @@ class SqlAlchemyPublicationRepository:
                 if intent.status == "sending":
                     await self._close_expired_attempt(session=session, intent=intent, now=now)
 
+                # The intent lock serializes allocation. Historical audit numbers
+                # never reset, unlike attempt_count (the current retry budget).
+                last_attempt_number = await session.scalar(
+                    select(func.max(PublishAttemptRecord.attempt_number)).where(
+                        PublishAttemptRecord.publication_intent_id == intent.id
+                    )
+                )
+                audit_attempt_number = (last_attempt_number or 0) + 1
+
                 mode = _publication_mode(intent.publication_mode)
                 main_random_count = (
                     1
@@ -203,7 +216,7 @@ class SqlAlchemyPublicationRepository:
                     PublishAttemptRecord(
                         id=attempt_id,
                         publication_intent_id=intent.id,
-                        attempt_number=intent.attempt_count,
+                        attempt_number=audit_attempt_number,
                         lease_token=lease_token,
                         status="sending",
                         reconciled=False,
@@ -771,6 +784,7 @@ def _claimed(
         intent_id=str(intent.id),
         attempt_id=str(attempt_id),
         lease_token=str(lease_token),
+        # This DTO ordinal drives retry budgeting, not the lifetime audit sequence.
         attempt_number=intent.attempt_count,
         max_attempts=intent.max_attempts,
         message_id=str(message.id),
