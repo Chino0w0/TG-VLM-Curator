@@ -1,3 +1,4 @@
+import { publishedVersion } from "../api/config";
 import { useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -170,7 +171,7 @@ export function DashboardWorkspace({
               <p className="stat-meta">
                 Published:{" "}
                 {
-                  inferenceProfiles.filter((item) => item.published_version !== null)
+                  inferenceProfiles.filter((item) => Boolean(publishedVersion(item)))
                     .length
                 }{" "}
                 (external HTTP VLM/LLM endpoints; never bundled in Compose)

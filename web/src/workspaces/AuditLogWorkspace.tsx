@@ -1,3 +1,4 @@
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type { AuditEventItem } from "../api/types";
@@ -8,6 +9,8 @@ export interface AuditLogWorkspaceProps {
 }
 
 export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
+  const reads = useRequestGeneration();
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [entityType, setEntityType] = useState("");
   const [entityId, setEntityId] = useState("");
   const [eventType, setEventType] = useState("");
@@ -29,6 +32,8 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
       filters: { entity_type: string; entity_id: string; event_type: string },
       activeCursor: string | null,
     ) => {
+      const request = reads.next();
+      setHistoryLoading(true);
       setErrorMsg(null);
       try {
         const page = await client.listAuditEvents({
@@ -38,16 +43,20 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
           cursor: activeCursor,
           limit: 30,
         });
+        if (!reads.isCurrent(request)) return;
         setItems(page.items);
         setNextCursor(page.next_cursor);
         setHasMore(page.has_more);
       } catch (err) {
+        if (!reads.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error ? err.message : "Failed to load audit events.",
         );
+      } finally {
+        if (reads.isCurrent(request)) setHistoryLoading(false);
       }
     },
-    [client],
+    [client, reads],
   );
 
   useEffect(() => {
@@ -56,6 +65,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
 
   function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    reads.invalidate();
     setCursorStack([]);
     setCursor(null);
     setAppliedFilters({
@@ -174,7 +184,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
             <button
               type="button"
               className="btn"
-              disabled={cursorStack.length === 0}
+              disabled={historyLoading || cursorStack.length === 0}
               onClick={() => {
                 const next = [...cursorStack];
                 const prev = next.pop() ?? null;
@@ -187,7 +197,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={!hasMore || !nextCursor}
+              disabled={historyLoading || !hasMore || !nextCursor}
               onClick={() => {
                 if (!nextCursor) return;
                 setCursorStack((prev) => [...prev, cursor]);

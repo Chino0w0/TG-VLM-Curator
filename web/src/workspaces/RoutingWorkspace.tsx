@@ -1,3 +1,8 @@
+import { RecordEditor } from "../components/RecordEditor";
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
+import { ConfigReferences } from "../components/ConfigReferences";
+import { publishedVersion, isDirtyJson } from "../api/config";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -16,10 +21,7 @@ export interface RoutingWorkspaceProps {
 
 const DEFAULT_TEMPLATE_JSON = JSON.stringify(
   {
-    header_template: "Curated from {{source_channel_name}}",
-    body_template: "{{original_text}}",
-    footer_template: "Tags: {{effective_labels}}",
-    supplement_template: "Source link: {{source_message_link}}",
+    template_text: "{{message.original_text}}",
   },
   null,
   2,
@@ -33,15 +35,12 @@ const DEFAULT_POLICY_JSON = JSON.stringify(
         priority: 100,
         stop_on_match: true,
         condition: {
-          op: "label_activated",
-          namespace: "effective",
-          scope: "global",
-          key: "illustration",
+          label: { namespace: "effective", scope: "global", key: "illustration" },
         },
         actions: [
           {
             destination_channel_id: "",
-            publication_mode: "copy_publish",
+            publication_mode: "forward_only",
             rendering_template_version_id: null,
           },
         ],
@@ -53,6 +52,8 @@ const DEFAULT_POLICY_JSON = JSON.stringify(
 );
 
 export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
+  const { busy, runAction } = useMutationGuard();
+  const familyRequests = useRequestGeneration();
   const [activeTab, setActiveTab] = useState("destination-channels");
   const [destinations, setDestinations] = useState<DestinationChannel[]>([]);
   const [identities, setIdentities] = useState<TelegramIdentity[]>([]);
@@ -104,9 +105,11 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
       preferredEntityId?: string,
       preferredVersionId?: string,
     ) => {
+      const request = familyRequests.next();
       setErrorMsg(null);
       try {
         const list = await client.listConfigEntities(family);
+        if (!familyRequests.isCurrent(request)) return;
         setEntities(list);
         if (list.length > 0) {
           const ent =
@@ -118,24 +121,23 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
             (preferredVersionId
               ? ent.versions.find((v) => v.id === preferredVersionId)
               : undefined) ??
-            ent.published_version ??
+            publishedVersion(ent) ??
             ent.versions[ent.versions.length - 1];
-          if (ver) {
-            setSelectedVersionId(ver.id);
-            setEditorJson(JSON.stringify(ver.content, null, 2));
-          }
+          setSelectedVersionId(ver?.id ?? "");
+          setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
         } else {
           setSelectedEntityId("");
           setSelectedVersionId("");
           setEditorJson("{}");
         }
       } catch (err) {
+        if (!familyRequests.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error ? err.message : "Failed to load config family.",
         );
       }
     },
-    [client],
+    [client, familyRequests],
   );
 
   const loadPoliciesForDryRun = useCallback(async () => {
@@ -216,6 +218,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
   const selectedVersion: ConfigVersion | null =
     selectedEntity?.versions.find((v) => v.id === selectedVersionId) ?? null;
   const isDraft = selectedVersion?.state === "draft";
+  const dirty = selectedVersion ? isDirtyJson(editorJson, selectedVersion.content) : false;
 
   async function handleCreateVersionedEntity(
     event: FormEvent<HTMLFormElement>,
@@ -228,9 +231,10 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
       const content = JSON.parse(newEntityJson) as Record<string, unknown>;
       const created = await client.createConfigEntity(activeConfigFamily, {
         name: newEntityName.trim(),
-        content,
+        initial_version: content,
       });
       setNewEntityName("");
+      if (!created.versions[0]) { await loadConfigFamily(activeConfigFamily, created.id); throw new Error("Entity created without a version. Use Create First Draft to recover."); }
       setStatusMsg(`Created ${created.name} (DRAFT v1).`);
       await loadConfigFamily(
         activeConfigFamily,
@@ -269,6 +273,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
   }
 
   async function handlePublish() {
+    if (dirty) { setErrorMsg("Save Draft before publishing unsaved changes."); return; }
     if (!activeConfigFamily || !selectedEntity || !selectedVersion || !isDraft) {
       return;
     }
@@ -289,6 +294,26 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Publish failed.");
     }
+  }
+
+  async function handleCreateFirstDraft() {
+    if (!activeConfigFamily || !selectedEntity || selectedEntity.versions.length) return;
+    setErrorMsg(null);
+    try {
+      const created = await client.createConfigVersion(activeConfigFamily, selectedEntity.id, JSON.parse(newEntityJson));
+      await loadConfigFamily(activeConfigFamily, selectedEntity.id, created.id);
+      setStatusMsg("First draft created from Initial Draft JSON.");
+    } catch (error) { setErrorMsg(error instanceof Error ? error.message : "First draft creation failed."); }
+  }
+
+  async function handleArchiveVersion() {
+    if (!activeConfigFamily || !selectedEntity || !selectedVersion) return;
+    setErrorMsg(null);
+    try {
+      await client.archiveConfigVersion(activeConfigFamily, selectedEntity.id, selectedVersion.id);
+      await loadConfigFamily(activeConfigFamily, selectedEntity.id, selectedVersion.id);
+      setStatusMsg("Version archived.");
+    } catch (error) { setErrorMsg(error instanceof Error ? error.message : "Archive failed."); }
   }
 
   async function handleCloneDraft() {
@@ -374,10 +399,11 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
             <label htmlFor="dest-identity">Default Publish Identity</label>
             <select
               id="dest-identity"
+              required
               value={destIdentityId}
               onChange={(e) => setDestIdentityId(e.target.value)}
             >
-              <option value="">-- Automatic / Unassigned --</option>
+              <option value="">-- Select publish identity --</option>
               {identities.map((idItem) => (
                 <option key={idItem.id} value={idItem.id}>
                   {idItem.name} ({idItem.identity_type})
@@ -389,6 +415,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
             Create Destination Channel
           </button>
         </form>
+
       </div>
 
       <div className="panel">
@@ -416,6 +443,11 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
                   : "auto"}
               </td>
               <td data-label="Action">
+                <RecordEditor label="Destination" fields={[
+                  {key: "name", label: "Display Name", value: dst.name, required: true},
+                  {key: "username", label: "Username", value: dst.username ?? null},
+                  {key: "default_publish_identity_id", label: "Publish Identity", value: dst.default_publish_identity_id, required: true, options: identities.map(i => ({value: i.id, label: `${i.name}${i.enabled ? "" : " (disabled)"}`}))},
+                ]} onSave={async changes => { await client.updateDestinationChannel(dst.id, changes); await loadDestinations(); }} />
                 <button
                   type="button"
                   className="btn"
@@ -449,7 +481,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
                 setSelectedEntityId(e.target.value);
                 const ent = entities.find((x) => x.id === e.target.value);
                 const ver =
-                  ent?.published_version ??
+                  publishedVersion(ent) ??
                   ent?.versions[ent.versions.length - 1];
                 setSelectedVersionId(ver?.id ?? "");
                 setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
@@ -496,6 +528,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
                   : `IMMUTABLE (${selectedVersion.state.toUpperCase()})`}
               </span>
             </p>
+            {isDraft && activeConfigFamily ? <ConfigReferences client={client} family={activeConfigFamily} json={editorJson} onChange={setEditorJson} /> : null}
             <div className="field">
               <label htmlFor="rt-json-editor">
                 Non-Executable JSON Specification{" "}
@@ -509,33 +542,36 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
                 onChange={(e) => setEditorJson(e.target.value)}
               />
             </div>
+            {dirty ? <p role="status" className="hint">Unsaved changes — Save Draft before publishing.</p> : null}
             <div className="btn-row">
               <button
                 type="button"
                 className="btn btn-primary"
                 disabled={!isDraft}
-                onClick={() => void handleSaveDraft()}
+                onClick={() => void runAction(handleSaveDraft)}
               >
                 Save Draft
               </button>
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={!isDraft}
-                onClick={() => void handlePublish()}
+                disabled={!isDraft || dirty || busy}
+                onClick={() => void runAction(handlePublish)}
               >
                 Publish Version
               </button>
               <button
                 type="button"
                 className="btn"
-                onClick={() => void handleCloneDraft()}
+                onClick={() => void runAction(handleCloneDraft)}
               >
                 Clone to New Draft
               </button>
+              {selectedVersion.state === "published" ? <button className="btn btn-danger" onClick={() => void runAction(handleArchiveVersion)}>Archive Version</button> : null}
             </div>
           </>
         ) : null}
+        {selectedEntity && !selectedEntity.versions.length ? <><p className="hint">This entity has no versions. Fill Initial Draft JSON, then recover it here.</p><button className="btn" onClick={() => void runAction(handleCreateFirstDraft)}>Create First Draft</button></> : null}
       </div>
 
       <div className="panel">
@@ -545,7 +581,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
             ? "Rendering Template"
             : "Routing Policy"}
         </h2>
-        <form method="post" onSubmit={handleCreateVersionedEntity}>
+        <form method="post" onSubmit={event => { event.preventDefault(); void runAction(() => handleCreateVersionedEntity(event)); }}>
           <div className="field">
             <label htmlFor="rt-new-name">Name *</label>
             <input
@@ -559,6 +595,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
               onChange={(e) => setNewEntityName(e.target.value)}
             />
           </div>
+          {activeConfigFamily ? <ConfigReferences client={client} family={activeConfigFamily} json={newEntityJson} onChange={setNewEntityJson} /> : null}
           <div className="field">
             <label htmlFor="rt-new-json">Initial Draft JSON *</label>
             <textarea
@@ -582,8 +619,8 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
       <h2>Historical Message Routing Dry-Run Evaluator</h2>
       <p className="hint">
         Test any published RoutingPolicyVersion against a historical message
-        snapshot (`native_forward`, `copy_publish`, `metadata_only`,
-        `forward_plus_supplement`) without creating PublicationIntents.
+        snapshot (`forward_only`, `copy_with_caption`, `metadata_only`,
+        `native_forward_with_supplement`) without creating PublicationIntents.
       </p>
       <form method="post" onSubmit={handleDryRunEvaluate}>
         <div className="form-grid">
@@ -637,6 +674,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
 
   return (
     <section aria-labelledby="routing-heading">
+      <fieldset disabled={busy} style={{border: 0, padding: 0, margin: 0, minWidth: 0}}>
       <div className="workspace-header">
         <div>
           <h1 id="routing-heading">Routing &amp; Destination Channels</h1>
@@ -662,7 +700,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
       <Tabs
         ariaLabel="Routing Configuration Sections"
         activeKey={activeTab}
-        onSelect={setActiveTab}
+        onSelect={tab => { familyRequests.invalidate(); setEntities([]); setSelectedEntityId(""); setSelectedVersionId(""); setEditorJson("{}"); setActiveTab(tab); }}
         tabs={[
           {
             key: "destination-channels",
@@ -686,6 +724,7 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
           },
         ]}
       />
+      </fieldset>
     </section>
   );
 }
