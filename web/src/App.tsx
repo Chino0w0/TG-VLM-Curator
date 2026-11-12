@@ -1,20 +1,69 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { AdminApiClient } from "./api/client";
 import type { AdminSessionResponse, WorkspaceKey } from "./api/types";
 import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
 import { LoginView } from "./components/LoginView";
-import { AnalysisConfigWorkspace } from "./workspaces/AnalysisConfigWorkspace";
-import { ArchiveManagementWorkspace } from "./workspaces/ArchiveManagementWorkspace";
-import { AuditLogWorkspace } from "./workspaces/AuditLogWorkspace";
-import { DashboardWorkspace } from "./workspaces/DashboardWorkspace";
-import { MessageDetailWorkspace } from "./workspaces/MessageDetailWorkspace";
-import { MessagesWorkspace } from "./workspaces/MessagesWorkspace";
-import { OperationsWorkspace } from "./workspaces/OperationsWorkspace";
-import { ProcessingRangesWorkspace } from "./workspaces/ProcessingRangesWorkspace";
-import { ReviewWorkspace } from "./workspaces/ReviewWorkspace";
-import { RoutingWorkspace } from "./workspaces/RoutingWorkspace";
-import { SourceChannelsWorkspace } from "./workspaces/SourceChannelsWorkspace";
-import { TelegramIdentitiesWorkspace } from "./workspaces/TelegramIdentitiesWorkspace";
+
+const AnalysisConfigWorkspace = lazy(() =>
+  import("./workspaces/AnalysisConfigWorkspace").then((m) => ({
+    default: m.AnalysisConfigWorkspace,
+  })),
+);
+const ArchiveManagementWorkspace = lazy(() =>
+  import("./workspaces/ArchiveManagementWorkspace").then((m) => ({
+    default: m.ArchiveManagementWorkspace,
+  })),
+);
+const AuditLogWorkspace = lazy(() =>
+  import("./workspaces/AuditLogWorkspace").then((m) => ({
+    default: m.AuditLogWorkspace,
+  })),
+);
+const DashboardWorkspace = lazy(() =>
+  import("./workspaces/DashboardWorkspace").then((m) => ({
+    default: m.DashboardWorkspace,
+  })),
+);
+const MessageDetailWorkspace = lazy(() =>
+  import("./workspaces/MessageDetailWorkspace").then((m) => ({
+    default: m.MessageDetailWorkspace,
+  })),
+);
+const MessagesWorkspace = lazy(() =>
+  import("./workspaces/MessagesWorkspace").then((m) => ({
+    default: m.MessagesWorkspace,
+  })),
+);
+const OperationsWorkspace = lazy(() =>
+  import("./workspaces/OperationsWorkspace").then((m) => ({
+    default: m.OperationsWorkspace,
+  })),
+);
+const ProcessingRangesWorkspace = lazy(() =>
+  import("./workspaces/ProcessingRangesWorkspace").then((m) => ({
+    default: m.ProcessingRangesWorkspace,
+  })),
+);
+const ReviewWorkspace = lazy(() =>
+  import("./workspaces/ReviewWorkspace").then((m) => ({
+    default: m.ReviewWorkspace,
+  })),
+);
+const RoutingWorkspace = lazy(() =>
+  import("./workspaces/RoutingWorkspace").then((m) => ({
+    default: m.RoutingWorkspace,
+  })),
+);
+const SourceChannelsWorkspace = lazy(() =>
+  import("./workspaces/SourceChannelsWorkspace").then((m) => ({
+    default: m.SourceChannelsWorkspace,
+  })),
+);
+const TelegramIdentitiesWorkspace = lazy(() =>
+  import("./workspaces/TelegramIdentitiesWorkspace").then((m) => ({
+    default: m.TelegramIdentitiesWorkspace,
+  })),
+);
 
 const NAV_ITEMS: Array<{ key: WorkspaceKey; label: string }> = [
   { key: "dashboard", label: "Dashboard" },
@@ -176,67 +225,75 @@ export function App({
       <main className="app-main">
         {logoutError ? <div role="alert" className="alert-banner alert-error">{logoutError}</div> : null}
         <WorkspaceErrorBoundary key={`${activeWorkspace}:${selectedMessageId ?? ""}`}>
-        {activeWorkspace === "dashboard" ? (
-          <DashboardWorkspace
-            client={apiClient}
-            onNavigate={setActiveWorkspace}
-          />
-        ) : null}
-        {activeWorkspace === "source-channels" ? (
-          <SourceChannelsWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "processing-ranges" ? (
-          <ProcessingRangesWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "telegram-identities" ? (
-          <TelegramIdentitiesWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "messages" ? (
-          <MessagesWorkspace
-            client={apiClient}
-            onInspectMessage={(messageId) => {
-              setSelectedMessageId(messageId);
-              setActiveWorkspace("message-detail");
-            }}
-            onReviewMessage={(messageId) => {
-              setSelectedMessageId(messageId);
-              setActiveWorkspace("review");
-            }}
-          />
-        ) : null}
-        {activeWorkspace === "message-detail" ? (
-          <MessageDetailWorkspace
-            client={apiClient}
-            selectedMessageId={selectedMessageId}
-            onSelectMessageId={setSelectedMessageId}
-            onOpenReview={(messageId) => {
-              setSelectedMessageId(messageId);
-              setActiveWorkspace("review");
-            }}
-          />
-        ) : null}
-        {activeWorkspace === "review" ? (
-          <ReviewWorkspace
-            client={apiClient}
-            selectedMessageId={selectedMessageId}
-            onSelectMessageId={setSelectedMessageId}
-          />
-        ) : null}
-        {activeWorkspace === "analysis-config" ? (
-          <AnalysisConfigWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "routing" ? (
-          <RoutingWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "archive-management" ? (
-          <ArchiveManagementWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "operations" ? (
-          <OperationsWorkspace client={apiClient} />
-        ) : null}
-        {activeWorkspace === "audit-log" ? (
-          <AuditLogWorkspace client={apiClient} />
-        ) : null}
+          <Suspense
+            fallback={
+              <p className="stat-meta" aria-live="polite">
+                Loading workspace...
+              </p>
+            }
+          >
+            {activeWorkspace === "dashboard" ? (
+              <DashboardWorkspace
+                client={apiClient}
+                onNavigate={setActiveWorkspace}
+              />
+            ) : null}
+            {activeWorkspace === "source-channels" ? (
+              <SourceChannelsWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "processing-ranges" ? (
+              <ProcessingRangesWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "telegram-identities" ? (
+              <TelegramIdentitiesWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "messages" ? (
+              <MessagesWorkspace
+                client={apiClient}
+                onInspectMessage={(messageId) => {
+                  setSelectedMessageId(messageId);
+                  setActiveWorkspace("message-detail");
+                }}
+                onReviewMessage={(messageId) => {
+                  setSelectedMessageId(messageId);
+                  setActiveWorkspace("review");
+                }}
+              />
+            ) : null}
+            {activeWorkspace === "message-detail" ? (
+              <MessageDetailWorkspace
+                client={apiClient}
+                selectedMessageId={selectedMessageId}
+                onSelectMessageId={setSelectedMessageId}
+                onOpenReview={(messageId) => {
+                  setSelectedMessageId(messageId);
+                  setActiveWorkspace("review");
+                }}
+              />
+            ) : null}
+            {activeWorkspace === "review" ? (
+              <ReviewWorkspace
+                client={apiClient}
+                selectedMessageId={selectedMessageId}
+                onSelectMessageId={setSelectedMessageId}
+              />
+            ) : null}
+            {activeWorkspace === "analysis-config" ? (
+              <AnalysisConfigWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "routing" ? (
+              <RoutingWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "archive-management" ? (
+              <ArchiveManagementWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "operations" ? (
+              <OperationsWorkspace client={apiClient} />
+            ) : null}
+            {activeWorkspace === "audit-log" ? (
+              <AuditLogWorkspace client={apiClient} />
+            ) : null}
+          </Suspense>
         </WorkspaceErrorBoundary>
       </main>
     </div>
