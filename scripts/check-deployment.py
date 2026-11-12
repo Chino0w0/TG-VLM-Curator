@@ -379,6 +379,12 @@ def tls_login(https_port: str, http_port: str, cert: Path, password: str) -> Non
         assert redirect.status_code == 308 and redirect.headers["location"].startswith("https://")
         assert redirect.headers["location"] == f"https://localhost:{https_port}/api/v1/auth/me"
         assert "cookie" not in redirect.request.headers
+        spoofed = client.get(
+            f"http://localhost:{http_port}/api/v1/auth/me",
+            headers={"Host": "evil.example"},
+        )
+        assert spoofed.status_code == 308
+        assert spoofed.headers["location"] == f"https://localhost:{https_port}/api/v1/auth/me"
         assert client.get("/metrics").status_code == 404
     # Default trust must reject this local-only self-signed certificate.
     try:

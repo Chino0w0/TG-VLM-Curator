@@ -164,6 +164,10 @@ class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
         self.assertIn("listen 443 ssl;", nginx)
         self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", nginx)
         self.assertIn("return 308 https://", nginx)
+        port_80_and_map = nginx.split("listen 443 ssl;", 1)[0]
+        self.assertNotIn("$host", port_80_and_map)
+        self.assertIn('""      localhost;', port_80_and_map)
+        self.assertIn("TGCURATOR_SERVER_NAME: ${TGCURATOR_SERVER_NAME:-localhost}", compose)
         self.assertIn("server_tokens off;", nginx)
         self.assertIn('X-Content-Type-Options "nosniff"', nginx)
         self.assertIn('X-Frame-Options "DENY"', nginx)
