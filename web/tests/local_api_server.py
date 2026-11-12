@@ -47,10 +47,10 @@ with client:
         return response.json()
 
     secret = post(
-        "/secrets", {"secret_type": "mtproto_session", "plaintext": "LOCAL-TEST-NOT-A-CREDENTIAL"}
+        "/secrets", {"secret_type": "telegram_session", "plaintext": "LOCAL-TEST-NOT-A-CREDENTIAL"}
     )
     inference_secret = post(
-        "/secrets", {"secret_type": "inference_api_key", "plaintext": "LOCAL-TEST-NOT-A-CREDENTIAL"}
+        "/secrets", {"secret_type": "api_key", "plaintext": "LOCAL-TEST-NOT-A-CREDENTIAL"}
     )
     identity = post(
         "/telegram-identities",
