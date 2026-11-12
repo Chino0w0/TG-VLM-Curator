@@ -34,6 +34,7 @@ EXPECTED_SERVICES = {
     "worker-analysis",
     "worker-publish",
     "worker-maintenance",
+    "archive-tools",
 }
 
 EXPECTED_VOLUMES = {
@@ -103,7 +104,7 @@ class _FakeIngestorRuntime:
 
 
 class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
-    def test_docker_compose_declares_exact_ten_services_four_volumes_and_no_bundled_llm(
+    def test_docker_compose_declares_services_four_volumes_and_no_bundled_llm(
         self,
     ) -> None:
         compose_path = ROOT / "docker-compose.yml"
@@ -154,6 +155,20 @@ class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
         restore_pg = (ROOT / "scripts/restore-postgres.sh").read_text(encoding="utf-8")
         self.assertIn("--confirm-restore", restore_pg)
         self.assertIn("apps.worker.consistency_cli", restore_pg)
+
+    def test_tls_and_proxy_boundary(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        nginx = (ROOT / "docker/nginx.conf").read_text(encoding="utf-8")
+        backend = (ROOT / "docker/backend.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("listen 443 ssl;", nginx)
+        self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", nginx)
+        self.assertIn("return 308 https://", nginx)
+        self.assertIn("read_only: true", compose)
+        self.assertEqual(compose.count("create_host_path: false"), 2)
+        self.assertIn("--no-proxy-headers", compose)
+        self.assertNotIn("postgresql-client", backend)
+        self.assertNotIn("proxy_add_x_forwarded_for", nginx)
+        self.assertIn("location = /metrics { return 404; }", nginx)
 
     def test_service_healthcheck_respects_section_41_probe_boundaries(self) -> None:
         async def _run() -> None:

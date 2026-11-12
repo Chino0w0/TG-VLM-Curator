@@ -250,37 +250,56 @@ Health endpoints:
 
 ## Docker Compose deployment & operations
 
-Generate a 32-byte base64 master key in `secrets/app_master_key.txt` (backed up independently in an
-offline secret vault — PostgreSQL backups cannot decrypt secrets without this key), configure `.env`
-from `.env.example`, start the stack, apply migrations, and bootstrap the sole administrator:
+Production serves HTTPS through nginx on port 443. Provide an operator-managed trusted
+certificate/full chain and matching private key in `.env`; both are mounted read-only.
+HTTP port 80 redirects to HTTPS. Production Secure cookies remain enabled. The database,
+Redis and API are internal-only; the API does not trust caller-supplied proxy headers.
 
-    Copy-Item .env.example .env
-    New-Item -ItemType Directory -Force secrets | Out-Null
-    python -c "import base64, os; open('secrets/app_master_key.txt', 'w').write(base64.b64encode(os.urandom(32)).decode())"
-    docker compose up -d --build
-    docker compose exec api alembic upgrade head
-    docker compose exec api tgcurator-bootstrap-admin --username curator
+Follow [HTTPS deployment and recovery](docs/operations/deployment.md) for file permissions,
+certificate renewal, staged migrations/bootstrap, explicit project selection, maintenance
+windows, backup verification and isolated recovery. Preserve the application master key
+independently in an offline secret vault. Never include it in database/media backup sets.
 
-Backup, restore, and post-restore archive storage consistency verification:
+With an explicit `COMPOSE_PROJECT_NAME` and `COMPOSE_ENV_FILE`, and all application writers
+stopped for the complete backup window:
 
-    bash scripts/backup-postgres.sh
-    bash scripts/backup-media.sh
-    bash scripts/restore-postgres.sh --yes-restore backups/<dump>.dump
-    docker compose exec worker-maintenance tgcurator-check-consistency --verify-sha256
+```bash
+bash scripts/backup-postgres.sh
+bash scripts/backup-media.sh
+# Restore only into an explicitly prepared, stopped recovery project with an empty archive volume:
+bash scripts/restore-postgres.sh --confirm-restore <backup.dump> --media <archive.tar.gz>
+```
 
-Run the module acceptance suite without requiring Redis, Telegram credentials, or an inference
-model:
+The scripts use the Compose PostgreSQL16 service and the named archive volume, not a host
+PostgreSQL client or a host `/var/lib` directory. Restore verifies both SHA256 checksums,
+fails on SQL errors, and requires a post-restore media consistency report. Resolve all report
+discrepancies and verify encrypted secrets with the independently recovered key before cutover.
 
-    .venv\Scripts\python.exe -m ruff format --check .
-    .venv\Scripts\python.exe -m ruff check .
-    .venv\Scripts\python.exe -m pytest
-    .venv\Scripts\python.exe -m unittest discover -s tests/unit -v
-    .venv\Scripts\python.exe -m unittest discover -s tests/integration -v
-    .venv\Scripts\python.exe -m unittest discover -s tests/e2e -v
-    .venv\Scripts\python.exe -m compileall -q apps tgcurator migrations tests
-    .venv\Scripts\python.exe -m pip check
-    Set-Location web ; npm.cmd run typecheck ; npm.cmd test ; npm.cmd run build ; Set-Location ..
-    git diff --check
+Run the isolated real-container TLS login and backup/restore exercise:
 
-The Alembic integration tests render PostgreSQL upgrade and downgrade SQL offline, so the test
-suite itself does not require a running PostgreSQL server.
+```bash
+python scripts/check-deployment.py
+```
+
+It uses disposable loopback ports, temporary secrets and a local-only self-signed certificate
+trusted only by its test client. It never establishes production certificate trust or contacts
+Telegram/inference services, and cleans up only the two projects it creates.
+
+## Validation and CI
+
+```bash
+python -m pip install -e '.[runtime,dev]'
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest -ra
+python -m compileall -q apps tgcurator migrations tests
+python -m pip check
+cd web && npm ci && npm run typecheck && npm test && npm run build
+```
+
+The CI workflow provisions PostgreSQL16 and Redis7. Real PostgreSQL regression tests opt in
+through `TGCURATOR_TEST_POSTGRES_ADMIN_URL` (maintenance database `postgres`) or
+`TGCURATOR_TEST_SERVICES_FILE`; without either they skip. Existing offline SQL and fake-service
+tests remain useful but are not evidence of real persistence/queue correctness. Redis runtime
+tests use `TGCURATOR_TEST_REDIS_URL`. Branches without `web/package.json` skip frontend checks.
+The deployment job exercises real nginx TLS, login cookies and isolated backup/recovery.

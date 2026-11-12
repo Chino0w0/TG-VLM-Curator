@@ -15,3 +15,12 @@ web/node_modules
 web/dist
 web/coverage
 tests/
+.env.*
+!.env.example
+*.pem
+*.key
+*.dump
+*.tar.gz
+*.env
+*.crt
+*.p12
