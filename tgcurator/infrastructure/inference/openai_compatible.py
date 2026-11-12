@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import re
 from collections.abc import Mapping
 from time import monotonic
 from typing import Any
@@ -43,6 +46,7 @@ class OpenAICompatibleInferenceProvider:
                 error_type="StructuredOutputNotSupported",
                 retryable=False,
             )
+        body = _request_body(request)
         try:
             secret = await self._secret_resolver.resolve(
                 secret_reference=request.profile.api_secret_reference
@@ -61,7 +65,6 @@ class OpenAICompatibleInferenceProvider:
             )
 
         endpoint = f"{request.profile.base_url}/chat/completions"
-        body = _request_body(request)
         started = monotonic()
         try:
             async with httpx.AsyncClient(
@@ -110,9 +113,9 @@ class OpenAICompatibleInferenceProvider:
                 http_status=response.status_code,
             ) from error
 
-        raw = dict(decoded) if isinstance(decoded, Mapping) else None
+        raw = _safe_response(decoded, secret=secret) if isinstance(decoded, Mapping) else None
         usage = decoded.get("usage") if isinstance(decoded, Mapping) else None
-        token_usage = dict(usage) if isinstance(usage, Mapping) else None
+        token_usage = _safe_response(usage, secret=secret) if isinstance(usage, Mapping) else None
         if response.status_code < 200 or response.status_code >= 300:
             raise InferenceProviderFailure(
                 code=AnalysisErrorCode.PROVIDER_ERROR,
@@ -132,7 +135,7 @@ class OpenAICompatibleInferenceProvider:
                 http_status=response.status_code,
             )
         try:
-            payload = _extract_structured_payload(raw)
+            payload = _extract_structured_payload(decoded)
         except InferenceProviderFailure as error:
             raise InferenceProviderFailure(
                 code=error.code,
@@ -199,36 +202,90 @@ def _request_body(request: InferenceRequest) -> dict[str, Any]:
 
 
 def _user_content(request: InferenceRequest) -> str | list[dict[str, Any]]:
-    image_urls = _image_urls(request.input_manifest.content)
-    if not image_urls:
+    images = request.visual_inputs
+    inputs = request.input_manifest.content.get("inputs", {})
+    required = request.media_required or bool(inputs.get("media_required"))
+    # Old metadata-only manifests may not carry media_required. Do not silently
+    # revive their known text-only behaviour when supplied directly to an adapter.
+    targets = inputs.get("targets", [])
+    legacy_media = any(isinstance(t, Mapping) and t.get("media") for t in targets)
+    if (required or legacy_media) and not images:
+        _visual_failure("RequiredVisualInputsMissing", AnalysisErrorCode.MEDIA_UNAVAILABLE)
+    if len(images) > request.profile.max_images:
+        _visual_failure("VisualImageBudgetExceeded")
+    expected = inputs.get("visual_inputs", [])
+    actual = [image.manifest_record(index) for index, image in enumerate(images)]
+    if actual != expected:
+        _visual_failure("VisualManifestMismatch")
+    if not images:
         return request.user_prompt
+    if "vision" not in request.profile.capabilities:
+        _visual_failure("VisionCapabilityRequired")
+    for image in images:
+        if (
+            not image.content
+            or hashlib.sha256(image.content).hexdigest() != image.sha256
+            or image.content_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}
+            or not image.sources
+            or image.width <= 0
+            or image.height <= 0
+        ):
+            _visual_failure("VisualPayloadInvalid")
     return [
         {"type": "text", "text": request.user_prompt},
-        *({"type": "image_url", "image_url": {"url": url}} for url in image_urls),
+        *(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:"
+                    + image.content_type
+                    + ";base64,"
+                    + base64.b64encode(image.content).decode("ascii"),
+                },
+            }
+            for image in images
+        ),
     ]
 
 
-def _image_urls(manifest: Mapping[str, Any]) -> tuple[str, ...]:
-    inputs = manifest.get("inputs")
-    if not isinstance(inputs, Mapping):
-        return ()
-    targets = inputs.get("targets")
-    if not isinstance(targets, list):
-        return ()
-    urls: list[str] = []
-    for target in targets:
-        if not isinstance(target, Mapping):
-            continue
-        media = target.get("media")
-        if not isinstance(media, list):
-            continue
-        for item in media:
-            if not isinstance(item, Mapping):
-                continue
-            value = item.get("provider_url") or item.get("data_url")
-            if isinstance(value, str) and value.strip():
-                urls.append(value)
-    return tuple(urls)
+def _visual_failure(
+    error_type: str,
+    code: AnalysisErrorCode = AnalysisErrorCode.INPUT_BUILD_ERROR,
+) -> None:
+    raise InferenceProviderFailure(code=code, error_type=error_type, retryable=True)
+
+
+def _safe_response(value: Any, *, secret: str, depth: int = 0) -> Any:
+    # Provider errors can echo the whole submitted request. Keep useful bounded
+    # audit metadata but never credential strings, image data URLs or huge blobs.
+    if depth > 12:
+        return "[depth-limit]"
+    if isinstance(value, Mapping):
+        return {
+            str(key): (
+                "[redacted]"
+                if any(
+                    part in str(key).lower()
+                    for part in (
+                        "authorization",
+                        "api_key",
+                        "apikey",
+                        "secret",
+                        "password",
+                        "data_url",
+                    )
+                )
+                else _safe_response(item, secret=secret, depth=depth + 1)
+            )
+            for key, item in list(value.items())[:100]
+        }
+    if isinstance(value, list):
+        return [_safe_response(item, secret=secret, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        value = value.replace(secret, "[redacted]")
+        value = re.sub(r"data:image/[^\s\"']+", "[image-redacted]", value)
+        return value if len(value) <= 8192 else value[:8192] + "[truncated]"
+    return value
 
 
 def _extract_structured_payload(raw: Mapping[str, Any]) -> Mapping[str, Any]:
