@@ -1,5 +1,6 @@
 import { RecordEditor } from "../components/RecordEditor";
 import { publishedVersion } from "../api/config";
+import { parseTelegramPeerId } from "../api/validation";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -9,12 +10,17 @@ import type {
   TelegramIdentity,
 } from "../api/types";
 import { ResponsiveTable } from "../components/ResponsiveTable";
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 
 export interface SourceChannelsWorkspaceProps {
   client: AdminApiClient;
 }
 
 export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps) {
+  const reads = useRequestGeneration();
+  const { busy, runAction } = useMutationGuard();
+  const [loading, setLoading] = useState(true);
   const [channels, setChannels] = useState<SourceChannel[]>([]);
   const [identities, setIdentities] = useState<TelegramIdentity[]>([]);
   const [profiles, setProfiles] = useState<ConfigEntity[]>([]);
@@ -27,6 +33,8 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
+    const request = reads.next();
+    setLoading(true);
     setErrorMsg(null);
     try {
       const [srcList, idList, profList, rangeList] = await Promise.all([
@@ -35,17 +43,25 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
         client.listConfigEntities("source-channel-profiles"),
         client.listProcessingRanges(),
       ]);
+      if (!reads.isCurrent(request)) return;
       setChannels(srcList);
       setIdentities(idList);
       setProfiles(profList);
       setRanges(rangeList);
-      if (!readIdentityId && idList.length > 0) {
-        setReadIdentityId(idList[0].id);
+      const defaultReaderId =
+        idList.find((item) => item.identity_type === "mtproto_user")?.id ?? "";
+      if (defaultReaderId) {
+        setReadIdentityId((prev) => prev || defaultReaderId);
       }
     } catch (err) {
+      if (!reads.isCurrent(request)) return;
       setErrorMsg(err instanceof Error ? err.message : "Failed to load source channels.");
+    } finally {
+      if (reads.isCurrent(request)) {
+        setLoading(false);
+      }
     }
-  }, [client, readIdentityId]);
+  }, [client, reads]);
 
   useEffect(() => {
     void loadAll();
@@ -55,45 +71,56 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
     event.preventDefault();
     setErrorMsg(null);
     setStatusMsg(null);
-    try {
-      await client.createSourceChannel({
-        telegram_peer_id: Number(peerId),
-        display_name: displayName.trim(),
-        username: username.trim() || null,
-        default_read_identity_id: readIdentityId || null,
-      });
-      setDisplayName("");
-      setUsername("");
-      setStatusMsg("Source channel created.");
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to create source channel.");
+    const parsedPeerId = parseTelegramPeerId(peerId);
+    if (parsedPeerId === null) {
+      setErrorMsg("Telegram Peer ID must be a non-zero integer.");
+      return;
     }
+    await runAction(async () => {
+      try {
+        await client.createSourceChannel({
+          telegram_peer_id: parsedPeerId,
+          display_name: displayName.trim(),
+          username: username.trim() || null,
+          default_read_identity_id: readIdentityId || null,
+        });
+        setDisplayName("");
+        setUsername("");
+        setStatusMsg("Source channel created.");
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to create source channel.");
+      }
+    });
   }
 
   async function handleAssignProfile(channelId: string, profileVersionId: string) {
     setErrorMsg(null);
-    try {
-      await client.updateSourceChannel(channelId, {
-        active_profile_version_id: profileVersionId || null,
-      });
-      setStatusMsg("Updated active SourceChannelProfile version.");
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to assign profile.");
-    }
+    await runAction(async () => {
+      try {
+        await client.updateSourceChannel(channelId, {
+          active_profile_version_id: profileVersionId || null,
+        });
+        setStatusMsg("Updated active SourceChannelProfile version.");
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to assign profile.");
+      }
+    });
   }
 
   async function handleToggleEnabled(channel: SourceChannel) {
     setErrorMsg(null);
-    try {
-      await client.updateSourceChannel(channel.id, {
-        enabled: !channel.enabled,
-      });
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to update channel.");
-    }
+    await runAction(async () => {
+      try {
+        await client.updateSourceChannel(channel.id, {
+          enabled: !channel.enabled,
+        });
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to update channel.");
+      }
+    });
   }
 
   const publishedVersions = profiles.flatMap(entity => {
@@ -197,7 +224,7 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
 
           <p className="hint">Protected content is observed from Telegram, not configured here.</p>
 
-          <button type="submit" className="btn btn-primary">
+          <button type="submit" className="btn btn-primary" disabled={busy}>
             Register Source Channel
           </button>
         </form>
@@ -215,6 +242,8 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
             "Ranges",
             "Actions",
           ]}
+          loading={loading}
+          emptyMessage="No source channels registered yet."
         >
           {channels.map((channel) => {
             const activeProf = publishedVersions.find(
@@ -231,13 +260,28 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
             const reader = identities.find(
               (i) => i.id === channel.default_read_identity_id,
             );
+            const seenId =
+              channel.latest_seen_message_id ?? channel.last_seen_message_id;
 
             return (
               <tr key={channel.id}>
                 <th scope="row">
-                  {channel.display_name}{" "}
-                  {channel.protected_content ? (
-                    <span className="badge badge-warn">noforwards</span>
+                  <div>
+                    {channel.display_name}{" "}
+                    <span
+                      className={
+                        channel.enabled ? "badge badge-ok" : "badge badge-warn"
+                      }
+                    >
+                      {channel.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                  {channel.username || seenId != null ? (
+                    <div className="hint">
+                      {channel.username ? `@${channel.username}` : ""}
+                      {channel.username && seenId != null ? " · " : ""}
+                      {seenId != null ? `Latest msg #${seenId}` : ""}
+                    </div>
                   ) : null}
                 </th>
                 <td data-label="Peer ID" className="mono">
@@ -256,6 +300,7 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
                   <select
                     id={`assign-prof-${channel.id}`}
                     name="active_profile_version_id"
+                    disabled={busy}
                     value={channel.active_profile_version_id ?? ""}
                     onChange={(e) =>
                       void handleAssignProfile(channel.id, e.target.value)
@@ -287,6 +332,7 @@ export function SourceChannelsWorkspace({ client }: SourceChannelsWorkspaceProps
                   <button
                     type="button"
                     className="btn"
+                    disabled={busy}
                     onClick={() => void handleToggleEnabled(channel)}
                   >
                     {channel.enabled ? "Disable" : "Enable"}

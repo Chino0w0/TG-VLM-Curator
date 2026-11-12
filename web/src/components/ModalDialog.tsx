@@ -23,16 +23,26 @@ export function ModalDialog({
 }: ModalDialogProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closingProgrammaticallyRef = useRef(false);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
     if (open && !dialog.hasAttribute("open")) {
+      closingProgrammaticallyRef.current = false;
+      dialog.returnValue = "";
       dialog.showModal();
+      const preferredFocus = destructive
+        ? cancelButtonRef.current
+        : confirmButtonRef.current;
+      preferredFocus?.focus();
     } else if (!open && dialog.hasAttribute("open")) {
+      closingProgrammaticallyRef.current = true;
       dialog.close();
     }
-  }, [open]);
+  }, [open, destructive]);
 
   return (
     <dialog
@@ -41,8 +51,13 @@ export function ModalDialog({
       onClose={() => {
         const dialog = dialogRef.current;
         if (!dialog) return;
+        const wasProgrammatic = closingProgrammaticallyRef.current;
+        closingProgrammaticallyRef.current = false;
         const action = dialog.returnValue;
         dialog.returnValue = "";
+        if (wasProgrammatic) {
+          return;
+        }
         if (action === "confirm") {
           onConfirm();
         } else {
@@ -66,6 +81,7 @@ export function ModalDialog({
         }}
       >
         <button
+          ref={cancelButtonRef}
           type="submit"
           value="cancel"
           className="btn"
@@ -74,6 +90,7 @@ export function ModalDialog({
           Cancel
         </button>
         <button
+          ref={confirmButtonRef}
           type="submit"
           value="confirm"
           className={destructive ? "btn btn-danger" : "btn btn-primary"}

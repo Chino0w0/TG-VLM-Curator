@@ -1,8 +1,10 @@
 import { RecordEditor } from "../components/RecordEditor";
+import { ModalDialog } from "../components/ModalDialog";
 import { useMutationGuard } from "../hooks/useMutationGuard";
 import { useRequestGeneration } from "../hooks/useRequestGeneration";
 import { ConfigReferences } from "../components/ConfigReferences";
 import { publishedVersion, isDirtyJson } from "../api/config";
+import { parseTelegramPeerId } from "../api/validation";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -54,6 +56,8 @@ const DEFAULT_POLICY_JSON = JSON.stringify(
 export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
   const { busy, runAction } = useMutationGuard();
   const familyRequests = useRequestGeneration();
+  const destRequests = useRequestGeneration();
+  const [destLoading, setDestLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("destination-channels");
   const [destinations, setDestinations] = useState<DestinationChannel[]>([]);
   const [identities, setIdentities] = useState<TelegramIdentity[]>([]);
@@ -80,24 +84,35 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
 
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pendingDiscardAction, setPendingDiscardAction] = useState<
+    (() => void) | null
+  >(null);
 
   const loadDestinations = useCallback(async () => {
+    const request = destRequests.next();
+    setDestLoading(true);
     setErrorMsg(null);
     try {
       const [dstList, idList] = await Promise.all([
         client.listDestinationChannels(),
         client.listIdentities(),
       ]);
+      if (!destRequests.isCurrent(request)) return;
       setDestinations(dstList);
       setIdentities(idList);
     } catch (err) {
+      if (!destRequests.isCurrent(request)) return;
       setErrorMsg(
         err instanceof Error
           ? err.message
           : "Failed to load destination channels.",
       );
+    } finally {
+      if (destRequests.isCurrent(request)) {
+        setDestLoading(false);
+      }
     }
-  }, [client]);
+  }, [client, destRequests]);
 
   const loadConfigFamily = useCallback(
     async (
@@ -172,42 +187,51 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
     event.preventDefault();
     setErrorMsg(null);
     setStatusMsg(null);
-    try {
-      await client.createDestinationChannel({
-        telegram_peer_id: Number(destPeerId),
-        name: destName.trim(),
-        username: destUsername.trim() || null,
-        default_publish_identity_id: destIdentityId || null,
-        enabled: true,
-      });
-      setDestPeerId("");
-      setDestName("");
-      setDestUsername("");
-      setStatusMsg("Destination channel created.");
-      await loadDestinations();
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : "Failed to create destination channel.",
-      );
+    const parsedPeerId = parseTelegramPeerId(destPeerId);
+    if (parsedPeerId === null) {
+      setErrorMsg("Telegram Peer ID must be a non-zero integer.");
+      return;
     }
+    await runAction(async () => {
+      try {
+        await client.createDestinationChannel({
+          telegram_peer_id: parsedPeerId,
+          name: destName.trim(),
+          username: destUsername.trim() || null,
+          default_publish_identity_id: destIdentityId || null,
+          enabled: true,
+        });
+        setDestPeerId("");
+        setDestName("");
+        setDestUsername("");
+        setStatusMsg("Destination channel created.");
+        await loadDestinations();
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : "Failed to create destination channel.",
+        );
+      }
+    });
   }
 
   async function handleToggleDestination(dst: DestinationChannel) {
     setErrorMsg(null);
-    try {
-      await client.updateDestinationChannel(dst.id, {
-        enabled: !dst.enabled,
-      });
-      await loadDestinations();
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : "Failed to update destination channel.",
-      );
-    }
+    await runAction(async () => {
+      try {
+        await client.updateDestinationChannel(dst.id, {
+          enabled: !dst.enabled,
+        });
+        await loadDestinations();
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : "Failed to update destination channel.",
+        );
+      }
+    });
   }
 
   const activeConfigFamily =
@@ -219,6 +243,14 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
     selectedEntity?.versions.find((v) => v.id === selectedVersionId) ?? null;
   const isDraft = selectedVersion?.state === "draft";
   const dirty = selectedVersion ? isDirtyJson(editorJson, selectedVersion.content) : false;
+
+  function guardDirtyNavigation(action: () => void) {
+    if (isDraft && dirty) {
+      setPendingDiscardAction(() => action);
+      return;
+    }
+    action();
+  }
 
   async function handleCreateVersionedEntity(
     event: FormEvent<HTMLFormElement>,
@@ -366,7 +398,8 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
             <label htmlFor="dest-peer-id">Telegram Peer ID *</label>
             <input
               id="dest-peer-id"
-              type="number"
+              type="text"
+              inputMode="numeric"
               required
               placeholder="-100987654321"
               value={destPeerId}
@@ -423,6 +456,8 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
         <ResponsiveTable
           caption="Configured Telegram destination channels"
           headers={["Name", "Peer ID", "Enabled", "Publish Identity", "Action"]}
+          loading={destLoading}
+          emptyMessage="No destination channels registered yet."
         >
           {destinations.map((dst) => (
             <tr key={dst.id}>
@@ -478,13 +513,19 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
               id="rt-entity-select"
               value={selectedEntityId}
               onChange={(e) => {
-                setSelectedEntityId(e.target.value);
-                const ent = entities.find((x) => x.id === e.target.value);
-                const ver =
-                  publishedVersion(ent) ??
-                  ent?.versions[ent.versions.length - 1];
-                setSelectedVersionId(ver?.id ?? "");
-                setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
+                const nextId = e.target.value;
+                if (nextId === selectedEntityId) return;
+                guardDirtyNavigation(() => {
+                  setSelectedEntityId(nextId);
+                  const ent = entities.find((x) => x.id === nextId);
+                  const ver =
+                    publishedVersion(ent) ??
+                    ent?.versions[ent.versions.length - 1];
+                  setSelectedVersionId(ver?.id ?? "");
+                  setEditorJson(
+                    ver ? JSON.stringify(ver.content, null, 2) : "{}",
+                  );
+                });
               }}
             >
               {entities.map((ent) => (
@@ -500,13 +541,17 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
               id="rt-ver-select"
               value={selectedVersionId}
               onChange={(e) => {
-                setSelectedVersionId(e.target.value);
-                const ver = selectedEntity?.versions.find(
-                  (v) => v.id === e.target.value,
-                );
-                if (ver) {
-                  setEditorJson(JSON.stringify(ver.content, null, 2));
-                }
+                const nextVerId = e.target.value;
+                if (nextVerId === selectedVersionId) return;
+                guardDirtyNavigation(() => {
+                  setSelectedVersionId(nextVerId);
+                  const ver = selectedEntity?.versions.find(
+                    (v) => v.id === nextVerId,
+                  );
+                  if (ver) {
+                    setEditorJson(JSON.stringify(ver.content, null, 2));
+                  }
+                });
               }}
             >
               {(selectedEntity?.versions ?? []).map((ver) => (
@@ -700,7 +745,17 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
       <Tabs
         ariaLabel="Routing Configuration Sections"
         activeKey={activeTab}
-        onSelect={tab => { familyRequests.invalidate(); setEntities([]); setSelectedEntityId(""); setSelectedVersionId(""); setEditorJson("{}"); setActiveTab(tab); }}
+        onSelect={(tab) => {
+          if (tab === activeTab) return;
+          guardDirtyNavigation(() => {
+            familyRequests.invalidate();
+            setEntities([]);
+            setSelectedEntityId("");
+            setSelectedVersionId("");
+            setEditorJson("{}");
+            setActiveTab(tab);
+          });
+        }}
         tabs={[
           {
             key: "destination-channels",
@@ -724,6 +779,23 @@ export function RoutingWorkspace({ client }: RoutingWorkspaceProps) {
           },
         ]}
       />
+      <ModalDialog
+        open={pendingDiscardAction !== null}
+        title="Discard Unsaved Draft Changes?"
+        confirmLabel="Discard Unsaved Changes"
+        destructive={true}
+        onConfirm={() => {
+          const action = pendingDiscardAction;
+          setPendingDiscardAction(null);
+          action?.();
+        }}
+        onCancel={() => setPendingDiscardAction(null)}
+      >
+        <p>
+          You have unsaved edits in the current DRAFT JSON specification.
+          Discard your unsaved changes?
+        </p>
+      </ModalDialog>
       </fieldset>
     </section>
   );

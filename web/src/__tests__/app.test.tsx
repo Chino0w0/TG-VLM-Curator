@@ -35,7 +35,6 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       secret_id: "sec-11112222-3333",
       secret_type: "telethon_session",
       key_id: "master-v1",
-      rotation_version: 1,
       configured: true,
       created_at: "2026-11-12T00:00:00Z",
     },
@@ -97,8 +96,8 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       published_at: "2026-11-12T06:00:00Z",
       original_text: "Stunning anime landscape artwork",
       media_count: 1,
-      processing_status: "completed",
-      terminal_reason: "routed",
+      processing_status: "processed",
+      terminal_reason: "completed",
       duplicate_status: "unique",
       review_status: "unreviewed",
       blocked_from_analysis: false,
@@ -113,8 +112,8 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       published_at: "2026-11-12T05:00:00Z",
       original_text: "Sponsored promo post",
       media_count: 0,
-      processing_status: "completed",
-      terminal_reason: "blocked_by_negative_gate",
+      processing_status: "processed",
+      terminal_reason: "negative_gate_blocked",
       duplicate_status: "unique",
       review_status: "unreviewed",
       blocked_from_analysis: true,
@@ -154,8 +153,8 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
       {
         id: "arun-7777",
         analysis_pipeline_version_id: "ver-pipe-1",
-        run_mode: "production",
-        status: "succeeded",
+        run_mode: "formal",
+        status: "completed",
         created_at: "2026-11-12T06:00:05Z",
         stage_runs: [
           {
@@ -164,7 +163,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
             node_key: "vlm_classify",
             target_id: "msg-0001-causal",
             status: "succeeded",
-            result_origin: "fresh_inference",
+            result_origin: "inference",
             attempt_count: 1,
             input_manifest: {
               id: "man-1",
@@ -180,6 +179,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
               latency_ms: 412,
               structured_output_schema_hash: "schema-hash-1234",
               token_usage: { prompt_tokens: 320, completion_tokens: 48 },
+              raw_response: { results: [] },
             },
           },
         ],
@@ -240,7 +240,12 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
             attempt_count: 1,
             attempts: [{ id: "att-1", attempt_number: 1, status: "sent" }],
             records: [
-              { id: "prec-1", part: "primary", remote_message_ids: [9201] },
+              {
+                id: "prec-1",
+                part: "main",
+                operation: "copy_publish",
+                remote_message_ids: [9201],
+              },
             ],
           },
         ],
@@ -425,7 +430,6 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
           secret_id: "sec-new-99998888",
           secret_type: String(body?.secret_type ?? "bot_token"),
           key_id: "master-v1",
-          rotation_version: 1,
           configured: true,
           created_at: "2026-11-12T06:10:00Z",
         };
@@ -470,9 +474,11 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
             display_name: "Illustration Feed",
             username: "illust_feed",
             enabled: true,
-            protected_content: false,
             default_read_identity_id: "id-user-1",
             active_profile_version_id: "ver-prof-1",
+            last_activity_at: "2026-11-12T06:00:00Z",
+            latest_seen_message_id: 501,
+            last_seen_message_id: 501,
           },
         ],
       });
@@ -633,14 +639,18 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
         stopped_at_rule_id: null,
         intents: [
           {
+            intent_id: "pint-4001",
             destination_channel_id: "dst-curated-main",
+            publish_identity_id: "id-bot-1",
             publication_mode: "copy_with_caption",
-            rendering_template_version_id: null,
+            rendered_text: "Stunning anime landscape artwork",
           },
           {
+            intent_id: "pint-4002",
             destination_channel_id: "dst-vip-gallery",
-            publication_mode: "forward_plus_supplement",
-            rendering_template_version_id: "ver-tpl-1",
+            publish_identity_id: "id-user-1",
+            publication_mode: "native_forward_with_supplement",
+            rendered_text: "Curated artwork",
           },
         ],
         comparison: {
@@ -743,23 +753,34 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
             blockers: [],
           },
         },
-        queues: { analysis: 0, media: 0, publish: 1, maintenance: 0 },
+        queues: {
+          publication_pending: 0,
+          publication_partial: 0,
+          publication_retry_due: 1,
+          cleanup_pending: 0,
+          cleanup_retry_due: 0,
+          durable_wakeups_due: 0,
+        },
         failed_count: 1,
       });
     }
 
     if (parsed.pathname === "/api/v1/operations/failed-items") {
+      const requestedStepKind = parsed.searchParams.get("step_kind");
+      const allFailed = [
+        {
+          step_kind: "stage_run",
+          target_id: "srun-failed-4040",
+          message_id: "msg-0001-causal",
+          status: "failed",
+          error_code: "provider_timeout",
+          attempt_count: 2,
+        },
+      ];
       return json(200, {
-        items: [
-          {
-            step_kind: "stage_run",
-            target_id: "srun-failed-4040",
-            message_id: "msg-0001-causal",
-            status: "failed",
-            error_code: "provider_timeout",
-            attempt_count: 2,
-          },
-        ],
+        items: requestedStepKind
+          ? allFailed.filter((item) => item.step_kind === requestedStepKind)
+          : allFailed,
       });
     }
 
@@ -965,9 +986,9 @@ describe("TG-VLM-Curator M9 Web Administration Console", () => {
         name: /Message Detail & Causal Chain Inspector/i,
       }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/f0f0a5a5c3c30001/)).toBeInTheDocument();
+    expect(await screen.findByText(/f0f0a5a5c3c30001/)).toBeInTheDocument();
     expect(screen.getAllByText(/qwen2\.5-vl-72b/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/primary:#9201/)).toBeInTheDocument();
+    expect(screen.getByText(/main:#9201/)).toBeInTheDocument();
   });
 
   it("records append-only manual label overrides without overwriting Model labels and previews Dry-Run Re-route", async () => {

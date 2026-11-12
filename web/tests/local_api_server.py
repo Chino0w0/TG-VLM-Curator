@@ -158,6 +158,7 @@ with client:
     stage = SimpleNamespace(
         id=uid(4001),
         analysis_stage_template_version_id=uid(4002),
+        node_key="diagnostics",
         target_scope="global",
         target_kind="message",
         target_id=uid(1),
@@ -178,16 +179,20 @@ with client:
         provider_adapter="openai_compatible",
         model_name="fixture-model",
         status="completed",
+        http_status=200,
         structured_output_schema_hash="b" * 64,
         token_usage={"input_tokens": 123, "output_tokens": 7},
+        raw_response={"fixture": "seeded-external-response"},
         latency_ms=25,
         error_code=None,
+        error_type=None,
     )
     run = SimpleNamespace(
         id=uid(4005),
         analysis_pipeline_version_id=uid(4006),
         run_mode="formal",
         status="completed",
+        created_at=now,
         started_at=now,
         completed_at=now,
     )
@@ -212,6 +217,7 @@ with client:
         status="sent",
         attempt_count=1,
         last_error_code=None,
+        next_retry_at=None,
     )
     record = SimpleNamespace(
         id=uid(5004),
