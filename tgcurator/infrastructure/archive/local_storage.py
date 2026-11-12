@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import stat
 import tempfile
 from pathlib import Path, PurePosixPath
+
+from tgcurator.domain.archive import ObservedStorageFile
 
 
 class ArchiveStorageKeyError(ValueError):
@@ -45,6 +48,50 @@ class LocalArchiveStorage:
 
     async def size(self, *, key: str) -> int:
         return await asyncio.to_thread(self._size_sync, key)
+
+    async def list_observed_files(
+        self,
+        *,
+        compute_sha256: bool = False,
+    ) -> tuple[ObservedStorageFile, ...]:
+        return await asyncio.to_thread(self._list_observed_files_sync, compute_sha256)
+
+    def _list_observed_files_sync(
+        self,
+        compute_sha256: bool,
+    ) -> tuple[ObservedStorageFile, ...]:
+        if not self._root.exists():
+            return ()
+        items: list[ObservedStorageFile] = []
+        for dirpath, _dirnames, filenames in os.walk(self._root):
+            base_dir = Path(dirpath)
+            for name in filenames:
+                if name.startswith(".tgcurator-archive-") and name.endswith(".tmp"):
+                    continue
+                candidate = base_dir / name
+                try:
+                    st = os.lstat(candidate)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                rel = candidate.relative_to(self._root).as_posix()
+                digest: str | None = None
+                if compute_sha256:
+                    hasher = hashlib.sha256()
+                    with candidate.open("rb") as handle:
+                        while chunk := handle.read(65536):
+                            hasher.update(chunk)
+                    digest = hasher.hexdigest()
+                items.append(
+                    ObservedStorageFile(
+                        storage_key=rel,
+                        size_bytes=st.st_size,
+                        sha256=digest,
+                    )
+                )
+        items.sort(key=lambda item: item.storage_key)
+        return tuple(items)
 
     def _put_sync(self, key: str, content: bytes) -> int:
         target = self._target_for(key)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from tgcurator.application.ports.analysis import InferenceImage
 from tgcurator.domain.analysis import (
     AnalysisErrorCode,
     AnalysisStageTemplateVersion,
@@ -18,10 +21,13 @@ from tgcurator.shared import DomainValidationError
 
 
 class AnalysisInputError(RuntimeError):
-    def __init__(self, *, code: AnalysisErrorCode, error_type: str) -> None:
+    def __init__(
+        self, *, code: AnalysisErrorCode, error_type: str, retryable: bool = False
+    ) -> None:
         super().__init__(error_type)
         self.code = code
         self.error_type = error_type
+        self.retryable = retryable
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,10 +63,11 @@ class ComposedAnalysisInput:
     rendered_prompt: RenderedPrompt
     input_manifest: InputManifest
     cache_scope_identity: str | None
+    visual_inputs: tuple[InferenceImage, ...] = ()
 
 
 class AnalysisInputComposer:
-    MANIFEST_VERSION = 1
+    MANIFEST_VERSION = 2
 
     def compose(
         self,
@@ -69,10 +76,13 @@ class AnalysisInputComposer:
         targets: tuple[AnalysisTargetInput, ...],
         schema: StructuredOutputSchema,
         source_channel_context: Mapping[str, Any] | None = None,
+        visual_inputs: tuple[InferenceImage, ...] = (),
     ) -> ComposedAnalysisInput:
         if not isinstance(stage, AnalysisStageTemplateVersion):
             raise DomainValidationError("stage must be an AnalysisStageTemplateVersion")
         _validate_targets(stage=stage, targets=targets)
+        _validate_visual_inputs(stage=stage, targets=targets, visual_inputs=visual_inputs)
+        visual_manifest = [image.manifest_record(i) for i, image in enumerate(visual_inputs)]
         context = dict(source_channel_context or {})
         prompt_values: dict[str, Any] = {}
         if "label_definitions" in stage.prompt.declared_variables:
@@ -90,7 +100,18 @@ class AnalysisInputComposer:
 
         try:
             rendered = stage.prompt.render(prompt_values)
+            if visual_manifest:
+                rendered = RenderedPrompt(
+                    system_prompt=rendered.system_prompt,
+                    user_prompt=rendered.user_prompt
+                    + "\nVisual input map (image indices are zero-based; "
+                    "region is [left, top, right, bottom] in sent-image pixels):\n"
+                    + json.dumps(visual_manifest, ensure_ascii=False, sort_keys=True),
+                )
             manifest_inputs = _manifest_inputs(stage=stage, targets=targets, context=context)
+            manifest_inputs["media_required"] = stage.input_policy.media
+            manifest_inputs["visual_policy"] = stage.visual_composition_policy.value
+            manifest_inputs["visual_inputs"] = visual_manifest
             manifest_inputs["rendered_prompt"] = {
                 "system": rendered.system_prompt,
                 "user": rendered.user_prompt,
@@ -115,6 +136,7 @@ class AnalysisInputComposer:
             rendered_prompt=rendered,
             input_manifest=manifest,
             cache_scope_identity=_cache_scope_identity(stage.cache_policy, targets),
+            visual_inputs=visual_inputs,
         )
 
 
@@ -160,7 +182,7 @@ def _asset_manifest(targets: tuple[AnalysisTargetInput, ...]) -> list[dict[str, 
             "target_id": target.target_id,
             "message_id": target.message_id,
             "asset_id": target.asset_id,
-            "media": [dict(item) for item in target.media],
+            "media": [_safe_media(item) for item in target.media],
         }
         for target in targets
     ]
@@ -184,7 +206,7 @@ def _manifest_inputs(
         if stage.input_policy.telegram_metadata:
             item["telegram_metadata"] = dict(target.telegram_metadata or {})
         if stage.input_policy.media:
-            item["media"] = [dict(value) for value in target.media]
+            item["media"] = [_safe_media(value) for value in target.media]
         if stage.input_policy.previous_results:
             item["previous_results"] = dict(target.previous_results or {})
         items.append(item)
@@ -216,3 +238,99 @@ def _cache_scope_identity(
             )
         identities = [str(target.asset_id) for target in targets]
     return identities[0] if len(identities) == 1 else canonical_hash(identities)
+
+
+def _safe_media(item: Mapping[str, Any]) -> dict[str, Any]:
+    # Archive coordinates and URLs are not model input. In particular signed URLs,
+    # arbitrary metadata, credentials and base64 must never enter the audit prompt.
+    fields = {
+        "kind",
+        "asset_id",
+        "width",
+        "height",
+        "source_width",
+        "source_height",
+        "archive_sha256",
+        "source_sha256",
+        "content_type",
+        "source_content_type",
+        "frame_role",
+        "frame_index",
+        "timestamp_seconds",
+        "duration_seconds",
+    }
+    result = {
+        key: value
+        for key, value in item.items()
+        if key in fields
+        and (
+            value is None
+            or isinstance(value, (int, float, bool))
+            or (
+                isinstance(value, str)
+                and len(value) <= 256
+                and not value.startswith(("data:", "http:", "https:"))
+            )
+        )
+    }
+    frames = item.get("frames")
+    if isinstance(frames, (list, tuple)):
+        result["frames"] = [_safe_media(frame) for frame in frames if isinstance(frame, Mapping)]
+    return result
+
+
+def _validate_visual_inputs(
+    *,
+    stage: AnalysisStageTemplateVersion,
+    targets: tuple[AnalysisTargetInput, ...],
+    visual_inputs: tuple[InferenceImage, ...],
+) -> None:
+    if not stage.input_policy.media:
+        if visual_inputs:
+            raise AnalysisInputError(
+                code=AnalysisErrorCode.INPUT_BUILD_ERROR, error_type="UnexpectedVisualInputs"
+            )
+        return
+    if not visual_inputs:
+        raise AnalysisInputError(
+            code=AnalysisErrorCode.MEDIA_UNAVAILABLE,
+            error_type="UnresolvedVisualInputs",
+            retryable=True,
+        )
+    if len(visual_inputs) > stage.inference_profile.max_images:
+        raise AnalysisInputError(
+            code=AnalysisErrorCode.INPUT_BUILD_ERROR,
+            error_type="VisualImageBudgetExceeded",
+            retryable=True,
+        )
+    represented = {source.get("target_id") for image in visual_inputs for source in image.sources}
+    if represented != {target.target_id for target in targets}:
+        raise AnalysisInputError(
+            code=AnalysisErrorCode.MEDIA_UNAVAILABLE,
+            error_type="VisualTargetMappingIncomplete",
+            retryable=True,
+        )
+
+    from .visual_inputs import _sources
+
+    expected_sources = _sources(targets)
+    actual_sources = [source for image in visual_inputs for source in image.sources]
+    if len(expected_sources) != len(actual_sources) or any(
+        source.get("source_index") != index
+        or any(source.get(key) != value for key, value in identity.items())
+        for index, ((identity, _), source) in enumerate(
+            zip(expected_sources, actual_sources, strict=True)
+        )
+    ):
+        raise AnalysisInputError(
+            code=AnalysisErrorCode.MEDIA_UNAVAILABLE,
+            error_type="VisualSourceMappingIncomplete",
+            retryable=True,
+        )
+    for image in visual_inputs:
+        if not image.content or hashlib.sha256(image.content).hexdigest() != image.sha256:
+            raise AnalysisInputError(
+                code=AnalysisErrorCode.INPUT_BUILD_ERROR,
+                error_type="VisualPayloadInvalid",
+                retryable=True,
+            )

@@ -54,6 +54,7 @@ class TelegramIngestorRuntime:
     database_ready: bool = True
     last_event_at: datetime | None = None
     last_reconciled_at: datetime | None = None
+    subscriptions: Any | None = None
 
     def mark_connected(self, *, connected: bool, now: datetime) -> None:
         ensure_aware(now, field="now")
@@ -156,8 +157,13 @@ class TelegramIngestorRuntime:
         self.last_event_at = deleted_at
         return changed
 
+    async def poll_updates(self, *, now: datetime) -> None:
+        ensure_aware(now, field="now")
+        if self.subscriptions is not None:
+            await self.subscriptions.poll(runtime=self, now=now)
+
     def health_snapshot(self) -> IngestorHealthSnapshot:
-        healthy = self.database_ready and (self.reconciliation is None or self.connected)
+        healthy = self.database_ready and self.connected
         return IngestorHealthSnapshot(
             status="ok" if healthy else "degraded",
             connected=self.connected,
@@ -172,7 +178,11 @@ class TelegramIngestorRuntime:
         try:
             return await self.realtime_ingestion.flush_all()
         finally:
-            await self.database.dispose()
+            try:
+                if self.subscriptions is not None:
+                    await self.subscriptions.close()
+            finally:
+                await self.database.dispose()
 
 
 def create_telegram_ingestor_runtime(
@@ -186,6 +196,22 @@ def create_telegram_ingestor_runtime(
     if database_url is None or not database_url.strip():
         raise RuntimeError("TGCURATOR_DATABASE_URL is required")
     database = AsyncDatabase(database_url)
+    subscriptions = None
+    if telegram_gateway is None:
+        from apps.runtime_dependencies import configured_secret_vault
+        from tgcurator.infrastructure.telegram.configured_runtime import (
+            ConfiguredTelegramClientPool,
+            ConfiguredTelegramGateway,
+        )
+        from tgcurator.infrastructure.telegram.subscriptions import TelegramSubscriptionManager
+
+        vault = configured_secret_vault(settings=settings, database=database)
+        if vault is not None:
+            pool = ConfiguredTelegramClientPool(
+                database=database, vault=vault, settings=settings, receive_updates=True
+            )
+            telegram_gateway = ConfiguredTelegramGateway(database=database, client_pool=pool)
+            subscriptions = TelegramSubscriptionManager(gateway=telegram_gateway, pool=pool)
     ingest_service = MessageIngestService(
         repository=SqlAlchemyTelegramMessageIngestRepository(
             database,
@@ -218,4 +244,5 @@ def create_telegram_ingestor_runtime(
         realtime_ingestion=realtime,
         source_lifecycle=lifecycle,
         reconciliation=reconciliation,
+        subscriptions=subscriptions,
     )

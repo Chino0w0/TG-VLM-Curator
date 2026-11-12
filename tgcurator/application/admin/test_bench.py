@@ -10,6 +10,7 @@ from tgcurator.application.analysis import (
     AnalysisTargetInput,
 )
 from tgcurator.application.ports.analysis import InferenceProvider
+from tgcurator.application.ports.cleanup import ArchiveStorageResolver
 from tgcurator.domain.analysis import AnalysisStageTemplateVersion
 from tgcurator.shared import DomainValidationError
 
@@ -42,8 +43,15 @@ class PromptTestBenchResult:
 class PromptTestBenchService:
     """Execute `run_mode='test'` prompt/schema/provider trials with zero formal side effects."""
 
-    def __init__(self, *, provider: InferenceProvider | None = None) -> None:
-        self._orchestrator = AnalysisOrchestrator(provider=provider)
+    def __init__(
+        self,
+        *,
+        provider: InferenceProvider | None = None,
+        storage_resolver: ArchiveStorageResolver | None = None,
+    ) -> None:
+        self._orchestrator = AnalysisOrchestrator(
+            provider=provider, storage_resolver=storage_resolver
+        )
 
     async def run(
         self,
@@ -56,7 +64,7 @@ class PromptTestBenchService:
         if not targets:
             raise AdminValidationError("Prompt Test Bench requires at least one target input")
         try:
-            prepared = self._orchestrator.prepare(
+            prepared = await self._orchestrator.prepare_async(
                 stage=stage,
                 targets=targets,
                 source_channel_context=source_channel_context,

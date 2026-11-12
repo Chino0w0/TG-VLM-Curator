@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -16,6 +16,30 @@ from tgcurator.domain.analysis import (
 
 
 @dataclass(frozen=True, slots=True)
+class InferenceImage:
+    # Ephemeral request bytes, deliberately separate from persisted InputManifest.
+    content: bytes = field(repr=False)
+    content_type: str
+    sha256: str
+    width: int
+    height: int
+    sources: tuple[Mapping[str, Any], ...]
+    composition: str = "raw"
+
+    def manifest_record(self, index: int) -> dict[str, Any]:
+        return {
+            "index": index,
+            "sha256": self.sha256,
+            "content_type": self.content_type,
+            "size_bytes": len(self.content),
+            "width": self.width,
+            "height": self.height,
+            "composition": self.composition,
+            "sources": [dict(source) for source in self.sources],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class InferenceRequest:
     profile: InferenceProfileVersion
     system_prompt: str
@@ -24,6 +48,8 @@ class InferenceRequest:
     response_schema: Mapping[str, Any]
     timeout_seconds: float
     attempt: int = 1
+    visual_inputs: tuple[InferenceImage, ...] = field(default=(), repr=False)
+    media_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)

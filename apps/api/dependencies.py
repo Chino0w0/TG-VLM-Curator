@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import Request
 
+from apps.runtime_dependencies import configured_archive_storage
 from tgcurator.application.admin import (
     SESSION_COOKIE_NAME,
     AdminApplicationService,
@@ -61,7 +62,9 @@ def build_default_admin_service(*, settings: Settings, database: object) -> Admi
         provider = OpenAICompatibleInferenceProvider(
             secret_resolver=_VaultInferenceSecretResolver(secrets_vault)
         )
-        test_bench = PromptTestBenchService(provider=provider)
+        test_bench = PromptTestBenchService(
+            provider=provider, storage_resolver=configured_archive_storage(settings)
+        )
     else:
         backend = InMemoryAdminBackend()
         secrets_vault = InMemorySecretVault(key_id=settings.app_master_key_id)

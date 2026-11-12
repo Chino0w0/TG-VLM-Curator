@@ -4,8 +4,9 @@ Status date: 2026-11-12
 
 Source specification: `tg-vlm-curator-architecture.md`.
 
-This document defines repository-sized implementation modules. Each completed module is
-validated locally and delivered as one branch, one commit, and one pull request. A module
+This document defines repository-sized implementation modules. Each module is
+validated at its documented boundary and delivered through a module pull request; remediation
+may add focused commits and integration merges before final acceptance. A module
 may contain multiple cooperating packages when they are required by its acceptance criteria.
 
 ## Status
@@ -18,11 +19,43 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M3 | Telegram ingestion and media archive workflows | Complete |
 | M4 | Versioned analysis engine and provider adapters | Complete (2026-09-09) |
 | M5 | Human review and routing workflows | Complete (2026-09-09) |
-| M6 | Publication, archive cleanup, and operations | Complete (2026-11-12) |
-| M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Complete (2026-11-12) |
-| M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Complete (2026-11-12) |
-| M9 | React + TypeScript + Vite web administration console | Pending |
-| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Pending |
+| M6 | Publication, archive cleanup, and operations | Merged #27 `99696fa2`; local remediation verified |
+| M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Merged #28 `28c3e6fd`; local remediation verified |
+| M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Merged #29 `b0e955f4`; native PostgreSQL verified |
+| M9 | React + TypeScript + Vite web administration console | Merged #30 `0007be1e`; native browser verified |
+| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Implemented; native local and GitHub CI gates passed at `8fc2737` (delivery PR #31) |
+
+## Delivery acceptance snapshot
+
+Frozen at 2026-11-12 11:53 UTC. Final local pytest: 596 passed, 2 warnings,
+JUnit tests596/errors0/failures0/skipped0 (281.558 seconds). Native cases comprise
+M6=6, M7=6, M8=8, media_profile=6, runtime_closed_loop=3, telegram_revocation=1,
+and worker_process_restart=1, totaling31; offline_sql=17 is a separate category.
+The 17-group native PostgreSQL Chrome run, 24 Vitest tests, typecheck/build,
+recorded npm audit with zero vulnerabilities, Ruff282-file check, pip check and
+compileall passed. Complete local Docker deployment exited0.
+
+The Docker exercise verifies ten-service startup/restart, actual FFprobe/frame
+extraction and active FFmpeg cancellation, TLS Secure-cookie login, application
+SIGTERM, PG16/media/independent-key restore, wrong-key handling, deliberate orphan
+failure and clean consistency scans, and cleanup of only its own two projects/volumes.
+The standalone OS-process test kills a worker after an external fixture effect but
+before response/PublishRecord commit, then recovers after a 4-second lease with a
+new worker PID: five records match five unique fixture effects, preserving history.
+
+Code head `8fc2737` passed all GitHub python/web/deployment jobs in PR run
+`43212224146` and push run `43212215720`; Linux/Python3.12/SQLAlchemy2.1.8
+passed 596 tests with 1 warning in127.86 seconds. PR #31 targets main; the final
+documentation head must pass all checks before exact-SHA merge. Its actual merge commit
+is recorded on the remote PR, independently of this documented code-gate snapshot.
+
+PostgreSQL16, Redis/Celery, SQLAlchemy, local HTTP, browser and Docker are real local
+boundaries. External Telegram/provider are controlled fixtures: live account permissions,
+channel delivery, provider compatibility/model quality and production TLS remain separate
+acceptance. Base module tests described below retain their offline/unit scope; final delivery
+also requires the real-service gates above. The 33 historical findings and precise evidence
+mapping are in `docs/reviews/2026-11-12-remediation-status.md`; operating contracts are in
+`docs/operations/runtime.md` and `docs/operations/deployment.md`.
 
 ## Dependency rule
 
@@ -111,8 +144,8 @@ LATEST windows never freeze from a synthetic boundary.
 Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline
 Alembic checks. Repository and runtime tests cover atomic freezing, stale-snapshot rejection,
 partial unique execution protection, wake-up repair, lease expiry, retries, terminal failures,
-and monotonic completion. No running PostgreSQL, Redis, Telegram session, or inference model is
-required for the acceptance suite.
+and monotonic completion. These fast unit/offline checks need no external service. Final
+acceptance additionally runs the native PostgreSQL/Redis gates in the delivery snapshot.
 
 ## M3 - Telegram ingestion and archive workflows (complete)
 
@@ -126,8 +159,9 @@ Durable wake-ups contain only asset UUIDs, and unconfigured media runtimes never
 completion.
 
 Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline
-Alembic checks. Repository, worker, adapter, normalization, lifecycle, storage, and sampling tests
-require no running PostgreSQL, Redis, Telegram session, FFmpeg installation, or inference model.
+Alembic checks. Fast repository/worker/adapter tests substitute external boundaries. Final
+acceptance also uses native PostgreSQL/Redis and real FFprobe/FFmpeg in the isolated Docker
+exercise; controlled Telegram/provider fixtures remain distinct from live external acceptance.
 
 ## M4 - Analysis engine (complete 2026-09-09)
 
@@ -144,15 +178,14 @@ repository, and UUID-only Celery `analysis` wake-up. Provider I/O occurs outside
 transactions, retries are bounded, and provider/error audit data is sanitized before persistence.
 
 No inference model or provider is bundled or deployed. A real external provider configuration and
-secret are required. The default worker runtime intentionally has no provider; each attempted call
-still persists its pending InferenceCall before invocation, then records
-`InferenceProviderNotConfigured` and moves affected StageRuns into explicit durable retry or
-terminal-failure state. Successful inference is never fabricated.
+secret are required. The default worker runtime resolves published InferenceProfile and encrypted vault
+configuration. It persists pending InferenceCall before invocation and records explicit
+not-configured/failure information with durable retry or terminal-failure state when necessary. Successful inference is never fabricated.
 
 Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline Alembic
-checks. Domain, orchestrator, worker, repository, provider-adapter, schema, migration, Celery, and
-runtime tests require no running PostgreSQL, Redis, Telegram session, external provider, or
-inference model.
+checks. Fast domain/orchestrator/provider-adapter checks remain fixture-based. Final runtime
+acceptance requires migrations-created PostgreSQL and real Redis/Celery, including actual HTTP
+requests and archive pixels; external Telegram/provider remain explicitly controlled fixtures.
 
 ## M5 - Human review and routing (complete 2026-09-09)
 
@@ -188,8 +221,9 @@ creates durable pending PublicationIntent records only. Publication leases and a
 FloodWait handling, Telegram calls, partial recovery, and reconciliation remain M6.
 
 Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, and offline Alembic
-checks. Domain, service, repository, schema, and migration tests require no running PostgreSQL,
-Redis, Telegram session, external inference provider, or inference model.
+checks. Domain/service and offline migration checks run without external services. Native
+PostgreSQL review/routing, browser and runtime acceptance are separate required gates; offline
+checks alone do not establish transaction, schema or external delivery correctness.
 
 ## M6 - Publication and operations (complete 2026-11-12)
 
@@ -235,7 +269,7 @@ commit, an intent committed before broker enqueue, Redis and wake-up loss, dupli
 expired publication and cleanup leases, worker/scheduler restart, partial publication recovery,
 FloodWait scheduling, and cleanup usage races plus post-delete crash replay. No running
 PostgreSQL, Redis, Telegram session, external inference provider, or inference model is required
-by the local acceptance suite.
+by that deterministic unit/fake-service subset; final delivery also requires the native gates above.
 
 ## M7 - End-to-end pipeline orchestration, visual deduplication, and continuous watermarks (complete 2026-11-12)
 
@@ -249,7 +283,8 @@ routing, and publication settlement into one continuous, crash-recoverable messa
 - automatic image/video archive wake-up generation for unblocked messages, followed by
   order-independent visual fingerprint and unordered pHash multiset pairing (`duplicate_matches`
   and `canonical_message_id`) supporting `skip` and `reclassify_with_text` duplicate policies,
-  with version-matched canonical visual stage cache reuse when `reclassify_with_text` runs;
+  with normal worker semantic-cache checks over the current prepared input when
+  `reclassify_with_text` runs; unproven canonical donor copies are disabled;
 - topological conditional DAG progression across `depends_on` and `run_if` predicates, creating
   downstream `StageRun` rows and UUID-only `analysis` wake-ups until the `AnalysisRun` reaches a
   terminal state, then triggering formal `RoutingService.evaluate` and waiting for produced
@@ -327,17 +362,61 @@ Acceptance extends the backend gates with strict TypeScript typechecking (`npm r
 Vitest + Testing Library component/workflow verification (`npm test`), and production Vite bundle
 compilation (`npm run build`).
 
-## M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification (pending)
+## M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification (native local and GitHub CI acceptance passed)
 
 M10 delivers the production container topology, operational maintenance utilities, and closed-loop
 system verification without bundling any inference model service:
 
-- backend and web `Dockerfile` builds plus `docker-compose.yml` orchestrating `postgres`, `redis`,
-  `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`, `worker-analysis`,
-  `worker-publish`, and `worker-maintenance` across dedicated persistent volumes;
-- graceful `SIGTERM` handling across all daemons and subprocesses, service-appropriate readiness
-  probes, backup/restore scripts (`backup-postgres`, `backup-media`, `restore-postgres`), and a
-  maintenance storage-consistency scanner verifying `READY` archive blobs and reporting orphan
-  files;
-- end-to-end closed-loop integration and API security invariant suites driven by deterministic
-  `FakeTelegramAdapter` and `FakeInferenceProvider` harnesses.
+- multi-stage `docker/backend.Dockerfile` (non-root Python 3.12 + FFmpeg runtime), `docker/web.Dockerfile`
+  (Node 22 Vite build + Nginx static SPA serving with `/api/`, `/health/`, and `/metrics` reverse
+  proxying via `docker/nginx.conf`), `.dockerignore`, `.env.example`, and `docker-compose.yml`
+  orchestrating the exact ten core services (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`,
+  `scheduler`, `worker-media`, `worker-analysis`, `worker-publish`, `worker-maintenance`), four
+  persistent volumes (`postgres-data`, `redis-data`, `archive-data`, `temp-media`), and read-only
+  file secret `app_master_key`;
+- graceful `SIGTERM` handling across `apps/scheduler/__main__.py`,
+  `apps/telegram_ingestor/__main__.py` (bounded media-group flush + `shutdown()`),
+  `apps/worker/__main__.py` (`--role media|analysis|publish|maintenance|all` plus Celery
+  `worker_shutting_down` hook terminating active `ffprobe`/`ffmpeg` child processes in
+  `FFmpegVideoFrameExtractor`), and service-appropriate readiness probes in `apps/healthcheck.py`
+  (`tgcurator-healthcheck`: PostgreSQL-only for `api`/`ingestor`, PostgreSQL + Redis for
+  `scheduler`/`worker`);
+- operator backup and restore scripts (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
+  `scripts/restore-postgres.sh`) with UTC timestamp + SHA-256 manifests and independent
+  `APP_MASTER_KEY` reminders, plus the framework-independent `StorageConsistencyScanner`
+  (`tgcurator/domain/archive/consistency.py`, `tgcurator/application/maintenance/consistency.py`,
+  `tgcurator/infrastructure/database/consistency_repository.py`, and `apps/worker/consistency_cli.py`
+  / `tgcurator-check-consistency`) auditing `READY` database blobs against local archive files;
+- end-to-end closed-loop integration, resilience, and API security invariant verification in
+  `tests/e2e/test_closed_loop_pipeline.py` driven by deterministic `FakeTelegramAdapter` and
+  `FakeInferenceProvider` harnesses alongside unit tests in `tests/unit/test_consistency_scanner.py`
+  and `tests/unit/test_deployment_topology.py`.
+
+M10 acceptance includes migrations-created PostgreSQL16, actual Redis/Celery and production
+composition roots in `tests/integration/test_runtime_closed_loop.py`, independent process
+recovery in `test_worker_process_restart.py`, and live local container verification in
+`scripts/check-deployment.py`. The in-memory E2E harness remains a deterministic domain/fault
+regression suite and is not substituted for these native boundaries. The final local pytest,
+static/frontend, deployment and successful GitHub code-gate results are recorded above;
+final documentation changes remain subject to the same exact-head merge gate. No claim is made that every optional unittest invocation was
+separately rerun or that external Telegram/provider production acceptance is complete.
+
+## Remediation contracts retained by the implementation
+
+M6 migration backfill preserves trigger protection and rollback; cleanup inserts parent jobs
+before items; publication recovery shares protected-content fallback. Manual retry preserves
+historical attempts and separates cumulative attempt numbering from the resettable budget.
+M7 binds formal runs to component revisions, protects first-run concurrency, uses acyclic
+canonical ordering, and settles overlapping executions without duplicate publication.
+
+M8 draft writes update children atomically; current effective labels resolve latest SET/CLEAR;
+reanalysis advances its full independent DAG without mutating old formal runs or auto-publishing.
+M9 uses current real DTOs, first-version/reference selectors, request generations for stale
+responses, dirty-publish locks, scope-bound cleanup confirmations and accurate session state.
+
+Visual preparation reads verified archived pixels and selected video frames outside database
+transactions. Manifest v2 records actual order/hashes/target-frame-region mappings; raw,
+contact_sheet and adaptive enforce real budgets and fail closed rather than truncate evidence.
+Frozen media profile versions affect image dimensions/quality/video frame count; missing explicit
+versions and conflicting executions fail visibly. Old READY media and historical visual results
+are not automatically rewritten: any production rearchive/reanalysis needs an explicit plan.
