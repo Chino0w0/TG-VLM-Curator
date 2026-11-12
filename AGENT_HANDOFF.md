@@ -1,6 +1,6 @@
 # Agent Handoff - TG-VLM-Curator
 
-Updated: September 10, 2026 (Asia/Shanghai)
+Updated: November 12, 2026 (Asia/Shanghai)
 Workspace: E:\Project\TG-VLM-Curator
 Remote: https://github.com/Chino0w0/TG-VLM-Curator
 
@@ -15,108 +15,148 @@ Remote: https://github.com/Chino0w0/TG-VLM-Curator
 
 ## Current delivery
 
-- M0, M1, M2, M3, and M4 are merged into origin/main.
-- M4 was merged through English pull request #25 at merge commit b27d0b5; its implementation
-  commit remains 9bc76d4.
-- M5 human review/routing is the current delivery on branch module/m5-human-review-routing, based
-  directly on the M4 merge commit.
-- M5 implementation, migration, tests, documentation, and final local validation are complete on
-  the branch and are delivered as exactly one implementation commit and one English pull request.
-- M6 publication/operations remains pending.
+- M0, M1, M2, M3, M4, and M5 are merged into origin/main.
+- M5 was merged through English pull request #26 at merge commit 78d3d3e; its implementation
+  commit remains f215e8f.
+- M6 publication, archive cleanup, and operations is the current delivery on branch
+  module/m6-publication-lifecycle, based directly on the M5 merge commit (78d3d3e).
+- M6 implementation, migration, stateful failure-injection suite, documentation, and final local
+  validation are complete on the branch and are delivered as exactly one implementation commit and
+  one English pull request.
+- M7 through M10 are documented as the post-M6 roadmap in tg-vlm-curator-module-implementation.md.
 
-## M5 completed scope
+## M6 completed scope
 
-M5 implements append-only human review, deterministic routing, and the durable handoff to future
-publication execution:
+M6 implements leased Telegram publication execution, manual two-step archive cleanup, and
+runtime/backlog observability while preserving PostgreSQL as the sole source of business truth:
 
-- Append-only manual label events with `set` and `clear` operations for GLOBAL message targets
-  and MEDIA image/video targets; model assignments and AnalysisRuns are never mutated.
-- Independent model, manual, and effective label namespaces. The latest manual event by
-  `(created_at, event_id)` wins; set overrides a matching model value, while clear removes the
-  override and falls back to model state.
-- Explicit append-only message review transitions across `unreviewed`, `in_review`,
-  `reviewed`, and `needs_attention`. `review_status` is workflow/filter state and an
-  available fact, not an implicit routing gate.
-- Immutable published/archived routing-policy and rendering-template versions with draft-only
-  routing rules and actions.
-- A constrained non-executable routing DSL supporting ordinary facts, model/manual/effective
-  GLOBAL and MEDIA labels, activation and score predicates, `any_media`/`none_media`, stable
-  `(-priority, rule_id)` order, `stop_on_match`, and conservative unknown propagation.
-- Canonical facts snapshots and SHA-256 hashes derived from one PostgreSQL routing snapshot.
-- Write-free dry runs, duplicate formal request-ID reuse, and explicit rerouting through new
-  request IDs without deleting earlier evaluations or intents.
-- Atomic formal persistence of one immutable RoutingEvaluation and zero-to-many pending
-  PublicationIntents with immutable identity fields and stable business idempotency keys.
+- Restricted dictionary-path template interpolation (`RestrictedTemplateRenderer`) with no loops,
+  attribute traversal, or arbitrary code execution, producing canonical rendered-context snapshots
+  and SHA-256 hashes frozen atomically alongside `PublicationIntent` rows and UUID-only
+  `publication` wake-ups during formal `RoutingService.evaluate` runs.
+- Leased `PublicationIntent` execution (`SKIP LOCKED`), auditable `PublishAttempt` records,
+  deterministic 63-bit MTProto `random_id` persistence plus in-flight step tracking before external
+  Telegram calls, incremental `PublishRecord` commits (`partial` recovery for
+  `native_forward_with_supplement`), clean `release()` transitions to `partial` or `pending`, and
+  remote reconciliation of unresolved in-flight steps prior to retries.
+- All four publication modes (`native_forward_with_supplement`, `copy_with_caption`,
+  `forward_only`, `metadata_only`) via `TelegramPublisher` and `TelethonPublisher`, translating
+  FloodWait, permission, expired-session, protected-content, and unavailable-media failures into
+  typed application errors, persisting exact non-blocking `next_retry_at` timestamps on FloodWait,
+  and honoring explicit `fail`, `metadata_only`, or `skip` protected-content fallbacks.
+- Manual two-step archive cleanup (`Dry-Run` -> SHA-256 hash-verified `Confirm` -> leased
+  `maintenance` worker) across 15 composable filter criteria, recording sanitized `AuditEvent`
+  snapshots in the same transaction as dry-run creation and job confirmation, row-locking `READY`
+  media assets (also mirrored in `SqlAlchemyAnalysisRepository` when staging media inputs),
+  revalidating active `StageRun` and `PublicationIntent` usage, deleting only archive blobs outside
+  transactions, and marking asset metadata `deleted` while preserving messages, hashes, visual
+  fingerprints, labels, routing, and publication history.
+- Framework-neutral `OperationsTelemetry` and `OperationsBacklogRepository` ports implemented by
+  `OperationsMonitor` and `SqlAlchemyOperationsBacklogRepository`, wired into `PublicationWorker`,
+  `SchedulerRuntime`, and `WorkerRuntime` for publication counters, FloodWait metrics, PostgreSQL
+  backlog snapshots, and scheduler/worker liveness and readiness reporting.
+- UUID-only Celery tasks (`tgcurator.publication` on `publication` and
+  `tgcurator.archive_cleanup` on `maintenance`) plus `SchedulerRuntime` wake-up repair for
+  unfinished or lease-expired publication intents and cleanup jobs.
+- Nine-scenario stateful failure-injection suite (`tests/unit/test_m6_failure_injection.py`)
+  verifying post-send pre-commit reconciliation, pre-enqueue crash recovery, Redis + wake-up loss,
+  duplicate broker delivery, expired lease takeover, worker/scheduler restarts, partial supplement
+  retry, FloodWait scheduling, and concurrent cleanup usage races plus post-delete crash replay.
 
-## M5 execution boundary
+## M6 execution boundary
 
-Routing loads business state from PostgreSQL and produces deterministic decisions. It calls no LLM,
-external inference provider, Telegram client, Celery dispatcher, or publishing worker. Dry runs
-write nothing. Formal runs write only their routing evaluation and pending publication intents.
+Default worker runtimes never fabricate Telegram deliveries or archive blob deletions when no live
+Telethon session store or archive storage backend is configured; unconfigured publication/cleanup
+attempts transition through explicit error codes and durable retry/terminal states. API readiness
+continues to check PostgreSQL only.
 
-Publication leases, attempts, retries, FloodWait handling, Telegram delivery, partial recovery, and
-reconciliation belong to M6 and must not be pulled into M5.
+End-to-end automatic progression across ingestion -> PreScreen -> media archive -> visual
+deduplication -> analysis DAG -> routing -> continuous watermark advancement belongs to M7.
 
-## M5 migration
+## M6 migration
 
-- Revision: d7b3f9a1e6c2
-- Down revision: c4a9e7d2f5b1
-- File: migrations/versions/d7b3f9a1e6c2_m5_human_review_routing.py
-- Chronology date: September 9, 2026
-- Adds `messages.review_status` and ten tables for manual labels, review events, routing policies
-  and versions, rules, rendering templates and versions, actions, evaluations, and publication
-  intents.
-- Adds JSONB snapshots, lifecycle/hash/identity constraints, short explicit foreign-key names,
-  published-version and pending-intent partial indexes, and PostgreSQL append-only/immutability/
-  draft-only triggers.
-- Offline upgrade to M5 and downgrade from M5 to M4 are covered by integration tests, including
-  dependency-safe trigger, function, index, and table removal ordering.
+- Revision: e6d4a8b2c951
+- Down revision: d7b3f9a1e6c2
+- File: migrations/versions/e6d4a8b2c951_m6_publication_cleanup_operations.py
+- Chronology date: September 16, 2026
+- Extends `publication_intents` with rendered snapshots, deterministic `random_id` arrays,
+  incremental `completed_parts`, in-flight step columns, leases, and retry metadata; extends
+  `image_assets`, `video_assets`, and `video_frames` with `deleting`/`deleted` archive lifecycle
+  and cleanup audit columns; adds `publish_attempts`, `publish_records`,
+  `archive_cleanup_dry_runs`, `archive_cleanup_jobs`, and `archive_cleanup_items`.
+- Updates immutability triggers so `publication_intents` identity fields remain immutable while
+  execution lease/status columns progress safely, enforces append-only `publish_records` and
+  `archive_cleanup_dry_runs`, and adds partial indexes for claimable/repairable publication and
+  cleanup work.
+- Offline upgrade to M6 and downgrade from M6 to M5 are covered by integration tests.
 
 ## Important implementation locations
 
-- tgcurator/domain/review/
-- tgcurator/domain/routing/
-- tgcurator/domain/publishing/idempotency.py
-- tgcurator/application/review/
-- tgcurator/application/routing/
-- tgcurator/application/ports/review.py
-- tgcurator/application/ports/routing.py
-- tgcurator/infrastructure/database/review_repository.py
+- tgcurator/domain/publishing/lifecycle.py
+- tgcurator/application/routing/rendering.py
+- tgcurator/application/routing/service.py
+- tgcurator/application/ports/publishing.py
+- tgcurator/application/ports/cleanup.py
+- tgcurator/application/ports/operations.py
+- tgcurator/application/publishing/worker.py
+- tgcurator/application/cleanup/service.py
+- tgcurator/application/cleanup/worker.py
+- tgcurator/infrastructure/database/publication_repository.py
+- tgcurator/infrastructure/database/cleanup_repository.py
+- tgcurator/infrastructure/database/operations_repository.py
 - tgcurator/infrastructure/database/routing_repository.py
+- tgcurator/infrastructure/database/analysis_repository.py
 - tgcurator/infrastructure/database/models.py
-- migrations/versions/d7b3f9a1e6c2_m5_human_review_routing.py
-- tests/unit/test_review.py
-- tests/unit/test_review_service.py
-- tests/unit/test_review_repository.py
-- tests/unit/test_routing.py
-- tests/unit/test_routing_service.py
-- tests/unit/test_routing_repository.py
+- tgcurator/infrastructure/telegram/telethon_publisher.py
+- tgcurator/infrastructure/observability/operations.py
+- tgcurator/infrastructure/queue/celery_dispatcher.py
+- apps/scheduler/runtime.py
+- apps/worker/runtime.py
+- apps/worker/celery_app.py
+- migrations/versions/e6d4a8b2c951_m6_publication_cleanup_operations.py
 - tests/unit/test_publishing.py
-- tests/unit/test_database_schema.py
+- tests/unit/test_routing_rendering.py
+- tests/unit/test_publication_worker.py
+- tests/unit/test_publication_repository.py
+- tests/unit/test_telethon_publisher.py
+- tests/unit/test_cleanup_contracts.py
+- tests/unit/test_cleanup_worker.py
+- tests/unit/test_cleanup_repository.py
+- tests/unit/test_operations_observability.py
+- tests/unit/test_m6_failure_injection.py
 - tests/integration/test_alembic_offline_sql.py
 
-## Final M5 validation
+## Final M6 validation
 
-The M5 working tree passes the required local gates without a running PostgreSQL server, Redis
-broker, Telegram identity/session, external inference provider, inference model, or publication
-worker:
+The M6 working tree passes all required local gates without a running PostgreSQL server, Redis
+broker, Telegram identity/session, external inference provider, inference model, or external
+archive object store:
 
-- Focused M5 domain, service, repository, publishing, schema, and migration suite: 65 passed.
-- Ruff formatting check: 175 files already formatted.
+- Ruff formatting check: 200 files already formatted.
 - Ruff lint: all checks passed.
-- Full pytest suite: 286 passed with two dependency deprecation warnings.
-- Unit unittest discovery suite: 275 passed.
-- Integration unittest discovery suite: 11 passed.
+- Full pytest suite: 383 passed with two dependency deprecation warnings.
+- Unit unittest discovery suite: 370 passed.
+- Integration unittest discovery suite: 13 passed.
 - compileall for apps, tgcurator, and tests.
 - pip check: no broken requirements.
-- Offline PostgreSQL Alembic upgrade through M5 and M5-to-M4 downgrade rendering.
-- git diff --check and final working-tree audit.
+- Offline PostgreSQL Alembic upgrade through M6 (`e6d4a8b2c951`) and M6-to-M5 downgrade rendering.
+- git diff --check and LF line-ending verification across all modified and untracked files.
 
 The two pytest warnings are existing FastAPI/Starlette compatibility deprecations for the httpx
 TestClient import path and the AnyIO BlockingPortal alias; they do not fail the suite.
 
 ## Next modules
 
-- M6 remains pending: publication leases and attempts, FloodWait retry, partial recovery,
-  reconciliation, metrics, service health, archive cleanup dry-runs, and failure injection.
-- Keep future work on separate module branches and separate pull requests.
+- M7 (`module/m7-pipeline-orchestration`): end-to-end message pipeline orchestration, visual
+  deduplication, continuous gap-free watermarks, full-queue wake-up repair, and
+  `apps/telegram_ingestor` daemon runtime.
+- M8 (`module/m8-admin-api`): FastAPI administration endpoints, Argon2id session auth + CSRF,
+  sanitized audit events, isolated Prompt Test Bench, cursor-paginated message/causal inspection,
+  and Prometheus `/metrics`.
+- M9 (`module/m9-web-admin`): React + TypeScript + Vite single-administrator web console covering
+  all 11 architectural workspaces.
+- M10 (`module/m10-deployment-and-operations`): Docker Compose 10-service topology, graceful
+  daemon lifecycles, backup/restore scripts, storage consistency scanner, and closed-loop E2E
+  verification.
+- Keep future work on separate module branches, single module commits, and separate English pull
+  requests.

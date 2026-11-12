@@ -7,8 +7,9 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 **M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
 **M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
-workflows**, **M4 - versioned analysis engine and provider adapters**, and **M5 - human
-review and routing workflows** are complete.
+workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
+review and routing workflows**, and **M6 - publication, archive cleanup, and operations**
+are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
@@ -92,11 +93,38 @@ M5, completed on 2026-09-09, adds:
 - atomic persistence of each formal routing evaluation with zero-to-many durable
   `PublicationIntent(status="pending")` records and stable publication identity fields.
 
-Routing performs no LLM/provider inference, Telegram calls, Celery dispatch, or publication worker
-work. M5 stops at durable pending intents; publication leases, attempts, retries, FloodWait
-handling, Telegram delivery, and reconciliation remain M6.
+Routing performs no LLM/provider inference or Telegram calls. Dry runs perform zero database writes;
+formal runs persist the immutable routing evaluation, rendered template snapshots, pending
+publication intents, and reconstructable UUID-only `publication` wake-ups in a single PostgreSQL
+transaction.
 
-See tg-vlm-curator-module-implementation.md for module boundaries and acceptance criteria.
+M6, completed on 2026-11-12, adds:
+
+- restricted dictionary-path template interpolation (no loops, attribute access, or arbitrary code
+  execution) with canonical rendered-context snapshots and SHA-256 hashes frozen during routing;
+- leased PostgreSQL `PublicationIntent` execution (`SKIP LOCKED`), auditable `PublishAttempt`
+  history, deterministic 63-bit MTProto `random_id` persistence before external sends, incremental
+  `PublishRecord` commits (`partial` recovery for `native_forward_with_supplement`), and remote
+  reconciliation of unresolved in-flight steps before retries;
+- all four publication modes (`native_forward_with_supplement`, `copy_with_caption`,
+  `forward_only`, `metadata_only`), Telethon error translation, non-blocking `FloodWait`
+  `next_retry_at` scheduling, and explicit `fail` / `metadata_only` / `skip` protected-content
+  fallbacks;
+- two-step manual archive cleanup (`Dry-Run` -> hash-verified `Confirm` -> leased `maintenance`
+  worker) across 15 composable filter criteria, atomic `AuditEvent` logging, row-locked active
+  Analysis/Publication usage revalidation, and blob-only deletion that preserves messages, hashes,
+  visual fingerprints, labels, routing, and publication history;
+- a framework-neutral `OperationsTelemetry` port, PostgreSQL backlog observation, thread-safe
+  in-process publication/FloodWait/backlog metrics, and scheduler/worker liveness and readiness
+  snapshots, plus UUID-only `tgcurator.publication` and `tgcurator.archive_cleanup` wake-up tasks
+  and Scheduler wake-up repair.
+
+Default worker runtimes remain safely unconfigured for external Telegram sessions and archive blob
+stores unless explicitly injected, returning explicit not-configured errors or durable retry/failed
+states rather than fabricating remote deliveries or deletions.
+
+See tg-vlm-curator-module-implementation.md for module boundaries, the M7-M10 roadmap, and
+acceptance criteria.
 
 ## Dependency direction
 

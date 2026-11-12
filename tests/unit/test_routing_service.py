@@ -103,7 +103,13 @@ def snapshot(*, matches: bool = True) -> RoutingSnapshot:
     )
     return RoutingSnapshot(
         message_id=MESSAGE_ID,
-        message={"id": MESSAGE_ID, "blocked_from_analysis": False},
+        message={
+            "id": MESSAGE_ID,
+            "blocked_from_analysis": False,
+            "original_text": "hello",
+            "primary_telegram_message_id": 10,
+            "media_count": 0,
+        },
         source_channel={"id": "source-1", "username": "source"},
         duplicate_state={"status": "unique"},
         media=(),
@@ -114,6 +120,9 @@ def snapshot(*, matches: bool = True) -> RoutingSnapshot:
         destination_publish_identity_ids={
             DESTINATION_A_ID: DEFAULT_IDENTITY_ID,
             DESTINATION_B_ID: DEFAULT_IDENTITY_ID,
+        },
+        rendering_template_texts={
+            TEMPLATE_VERSION_ID: "{{ message.original_text }} — {{ telegram_source_link }}"
         },
     )
 
@@ -153,6 +162,14 @@ class RoutingServiceTests(unittest.IsolatedAsyncioTestCase):
             TEMPLATE_VERSION_ID,
         )
         self.assertEqual(result.intents[1].publish_identity_id, EXPLICIT_IDENTITY_ID)
+        self.assertEqual(
+            result.intents[0].rendered_text,
+            "hello — https://t.me/source/10",
+        )
+        self.assertEqual(result.intents[0].rendered_context["media_count"], 0)
+        self.assertEqual(len(result.intents[0].rendered_snapshot_hash or ""), 64)
+        self.assertIsNone(result.intents[1].rendered_text)
+        self.assertEqual(result.intents[1].rendered_context, {})
         self.assertEqual(result.facts_snapshot["review_status"], "unreviewed")
         self.assertEqual(result.facts_snapshot["message"]["review_status"], "unreviewed")
 

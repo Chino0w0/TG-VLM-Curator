@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from tgcurator.domain.publishing import PublicationMode
+from tgcurator.domain.publishing import ProtectedContentFallback, PublicationMode
 from tgcurator.domain.routing.dsl import evaluate_condition, validate_condition
 from tgcurator.shared import DomainValidationError
 
@@ -17,6 +17,8 @@ class PublicationAction:
     rendering_template_version_id: str | None = None
     publish_identity_id: str | None = None
     routing_rule_id: str | None = None
+    protected_content_fallback: str = ProtectedContentFallback.FAIL.value
+    supplement_as_reply: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.action_id, str) or not self.action_id.strip():
@@ -37,6 +39,12 @@ class PublicationAction:
         ):
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise DomainValidationError(f"{field} must not be blank")
+        try:
+            ProtectedContentFallback(self.protected_content_fallback)
+        except (TypeError, ValueError) as exc:
+            raise DomainValidationError("protected_content_fallback is not supported") from exc
+        if not isinstance(self.supplement_as_reply, bool):
+            raise DomainValidationError("supplement_as_reply must be a boolean")
         if mode is PublicationMode.FORWARD_ONLY:
             if self.rendering_template_version_id is not None:
                 raise DomainValidationError(

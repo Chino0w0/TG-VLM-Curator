@@ -742,6 +742,121 @@ class MessagePartRecord(TimestampMixin, Base):
     )
 
 
+class ArchiveCleanupDryRunRecord(CreatedAtMixin, Base):
+    __tablename__ = "archive_cleanup_dry_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(filter_snapshot) = 'object'",
+            name="cleanup_dry_run_filter_object",
+        ),
+        CheckConstraint(
+            "char_length(filter_hash) = 64 AND filter_hash !~ '[^0-9a-f]'",
+            name="cleanup_dry_run_hash_format",
+        ),
+        CheckConstraint(
+            "estimated_asset_count >= 0 AND estimated_message_count >= 0 AND estimated_bytes >= 0",
+            name="cleanup_dry_run_estimates",
+        ),
+        Index("ix_cleanup_dry_runs_actor_created", "actor_admin_user_id", "created_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    actor_admin_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    filter_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    filter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    estimated_asset_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    estimated_message_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    estimated_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ArchiveCleanupJobRecord(TimestampMixin, Base):
+    __tablename__ = "archive_cleanup_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'retry_wait', 'completed', 'failed', 'cancelled')",
+            name="cleanup_job_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(filter_snapshot) = 'object'",
+            name="cleanup_job_filter_object",
+        ),
+        CheckConstraint(
+            "char_length(filter_hash) = 64 AND filter_hash !~ '[^0-9a-f]'",
+            name="cleanup_job_hash_format",
+        ),
+        CheckConstraint(
+            "estimated_asset_count >= 0 AND estimated_message_count >= 0 "
+            "AND estimated_bytes >= 0 AND item_count >= 0",
+            name="cleanup_job_estimates_nonnegative",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0 AND attempt_count <= max_attempts AND max_attempts > 0",
+            name="cleanup_job_attempts",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND lease_token IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL AND attempt_count > 0) OR "
+            "(status <> 'running' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="cleanup_job_lease",
+        ),
+        CheckConstraint(
+            "(status = 'retry_wait' AND next_retry_at IS NOT NULL) OR "
+            "(status <> 'retry_wait' AND next_retry_at IS NULL)",
+            name="cleanup_job_retry_schedule",
+        ),
+        CheckConstraint(
+            "status NOT IN ('retry_wait', 'failed') OR "
+            "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL "
+            "AND last_failure_at IS NOT NULL)",
+            name="cleanup_job_failure_metadata",
+        ),
+        CheckConstraint(
+            "(status IN ('completed', 'failed', 'cancelled') AND completed_at IS NOT NULL) OR "
+            "(status NOT IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL)",
+            name="cleanup_job_completion",
+        ),
+        Index("ix_cleanup_jobs_status_lease", "status", "lease_expires_at"),
+        Index("ix_cleanup_jobs_retry_due", "status", "next_retry_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    dry_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("archive_cleanup_dry_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    confirmed_by_admin_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    filter_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    filter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    estimated_asset_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    estimated_message_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    estimated_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    item_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default=text("5")
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ImageAssetRecord(TimestampMixin, Base):
     """One source image with bounded durable archive attempts and immutable READY facts."""
 
@@ -750,7 +865,7 @@ class ImageAssetRecord(TimestampMixin, Base):
         UniqueConstraint("message_id", "source_asset_id", name="uq_image_asset_message_source"),
         CheckConstraint(
             "archive_state IN ('pending', 'processing', 'retry_wait', 'ready', "
-            "'deleted', 'failed')",
+            "'deleting', 'deleted', 'failed')",
             name="image_asset_archive_state",
         ),
         CheckConstraint(
@@ -791,6 +906,15 @@ class ImageAssetRecord(TimestampMixin, Base):
         CheckConstraint(
             "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
             name="image_asset_deleted_timestamp",
+        ),
+        CheckConstraint(
+            "archive_state NOT IN ('deleting', 'deleted') OR "
+            "(cleanup_job_id IS NOT NULL AND previous_archive_size IS NOT NULL)",
+            name="image_asset_cleanup_audit",
+        ),
+        CheckConstraint(
+            "previous_archive_size IS NULL OR previous_archive_size > 0",
+            name="image_asset_previous_size_positive",
         ),
         CheckConstraint("width IS NULL OR width > 0", name="image_asset_width_positive"),
         CheckConstraint("height IS NULL OR height > 0", name="image_asset_height_positive"),
@@ -846,6 +970,10 @@ class ImageAssetRecord(TimestampMixin, Base):
     archive_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    cleanup_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("archive_cleanup_jobs.id", ondelete="RESTRICT"), nullable=True
+    )
+    previous_archive_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class VideoAssetRecord(TimestampMixin, Base):
@@ -856,7 +984,7 @@ class VideoAssetRecord(TimestampMixin, Base):
         UniqueConstraint("message_id", "source_asset_id", name="uq_video_asset_message_source"),
         CheckConstraint(
             "archive_state IN ('pending', 'processing', 'retry_wait', 'ready', "
-            "'deleted', 'failed')",
+            "'deleting', 'deleted', 'failed')",
             name="video_asset_archive_state",
         ),
         CheckConstraint(
@@ -894,6 +1022,15 @@ class VideoAssetRecord(TimestampMixin, Base):
         CheckConstraint(
             "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
             name="video_asset_deleted_timestamp",
+        ),
+        CheckConstraint(
+            "archive_state NOT IN ('deleting', 'deleted') OR "
+            "(cleanup_job_id IS NOT NULL AND previous_archive_size IS NOT NULL)",
+            name="video_asset_cleanup_audit",
+        ),
+        CheckConstraint(
+            "previous_archive_size IS NULL OR previous_archive_size >= 0",
+            name="video_asset_previous_size_nonnegative",
         ),
         CheckConstraint(
             "duration_seconds IS NULL OR duration_seconds > 0",
@@ -948,6 +1085,10 @@ class VideoAssetRecord(TimestampMixin, Base):
     archive_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    cleanup_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("archive_cleanup_jobs.id", ondelete="RESTRICT"), nullable=True
+    )
+    previous_archive_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class VideoFrameRecord(TimestampMixin, Base):
@@ -972,6 +1113,23 @@ class VideoFrameRecord(TimestampMixin, Base):
         CheckConstraint("width > 0", name="video_frame_width_positive"),
         CheckConstraint("height > 0", name="video_frame_height_positive"),
         CheckConstraint("archive_size_bytes > 0", name="video_frame_archive_size_positive"),
+        CheckConstraint(
+            "archive_state IN ('ready', 'deleting', 'deleted')",
+            name="video_frame_archive_state",
+        ),
+        CheckConstraint(
+            "archive_state <> 'deleted' OR archive_deleted_at IS NOT NULL",
+            name="video_frame_deleted_timestamp",
+        ),
+        CheckConstraint(
+            "archive_state = 'ready' OR "
+            "(cleanup_job_id IS NOT NULL AND previous_archive_size IS NOT NULL)",
+            name="video_frame_cleanup_audit",
+        ),
+        CheckConstraint(
+            "previous_archive_size IS NULL OR previous_archive_size > 0",
+            name="video_frame_previous_size_positive",
+        ),
         Index("ix_video_frames_video", "video_asset_id", "frame_role", "frame_index"),
     )
 
@@ -991,6 +1149,96 @@ class VideoFrameRecord(TimestampMixin, Base):
     archive_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     perceptual_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     archive_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    archive_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="ready", server_default=text("'ready'")
+    )
+    archive_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cleanup_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("archive_cleanup_jobs.id", ondelete="RESTRICT"), nullable=True
+    )
+    previous_archive_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class ArchiveCleanupItemRecord(TimestampMixin, Base):
+    __tablename__ = "archive_cleanup_items"
+    __table_args__ = (
+        UniqueConstraint("cleanup_job_id", "image_asset_id", name="uq_cleanup_item_job_image"),
+        UniqueConstraint("cleanup_job_id", "video_asset_id", name="uq_cleanup_item_job_video"),
+        CheckConstraint(
+            "asset_kind IN ('image', 'video')",
+            name="cleanup_item_asset_kind",
+        ),
+        CheckConstraint(
+            "(asset_kind = 'image' AND image_asset_id IS NOT NULL "
+            "AND video_asset_id IS NULL) OR "
+            "(asset_kind = 'video' AND video_asset_id IS NOT NULL "
+            "AND image_asset_id IS NULL)",
+            name="cleanup_item_asset_identity",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'deleting', 'deleted', 'skipped_in_use', 'failed')",
+            name="cleanup_item_status",
+        ),
+        CheckConstraint(
+            "(status = 'deleting' AND deletion_token IS NOT NULL) OR "
+            "(status <> 'deleting' AND deletion_token IS NULL)",
+            name="cleanup_item_deletion_token",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(blob_snapshot) = 'array'",
+            name="cleanup_item_blob_array",
+        ),
+        CheckConstraint(
+            "previous_archive_size >= 0",
+            name="cleanup_item_previous_size_nonnegative",
+        ),
+        CheckConstraint(
+            "(status = 'deleted' AND deleted_at IS NOT NULL) OR "
+            "(status <> 'deleted' AND deleted_at IS NULL)",
+            name="cleanup_item_deleted_timestamp",
+        ),
+        CheckConstraint(
+            "(status = 'skipped_in_use' AND skipped_at IS NOT NULL) OR "
+            "(status <> 'skipped_in_use' AND skipped_at IS NULL)",
+            name="cleanup_item_skipped_timestamp",
+        ),
+        CheckConstraint(
+            "status <> 'failed' OR (last_error_code IS NOT NULL "
+            "AND last_error_type IS NOT NULL AND last_failure_at IS NOT NULL)",
+            name="cleanup_item_failure_metadata",
+        ),
+        Index("ix_cleanup_items_job_status", "cleanup_job_id", "status", "created_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    cleanup_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("archive_cleanup_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    asset_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    image_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("image_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    video_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("video_assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    deletion_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    blob_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    previous_archive_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    skipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class LabelDefinitionRecord(TimestampMixin, Base):
@@ -2295,6 +2543,10 @@ class RoutingActionRecord(TimestampMixin, Base):
             name="routing_action_rendering_template",
         ),
         CheckConstraint(
+            "protected_content_fallback IN ('fail', 'metadata_only', 'skip')",
+            name="routing_action_protected_fallback",
+        ),
+        CheckConstraint(
             "output_order >= 0",
             name="routing_action_output_order_nonnegative",
         ),
@@ -2319,6 +2571,12 @@ class RoutingActionRecord(TimestampMixin, Base):
     )
     publish_identity_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("telegram_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    protected_content_fallback: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="fail", server_default=text("'fail'")
+    )
+    supplement_as_reply: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
     )
     output_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -2385,6 +2643,10 @@ class PublicationIntentRecord(TimestampMixin, Base):
             name="publication_intent_mode",
         ),
         CheckConstraint(
+            "protected_content_fallback IN ('fail', 'metadata_only', 'skip')",
+            name="publication_intent_protected_fallback",
+        ),
+        CheckConstraint(
             "(publication_mode = 'forward_only' AND rendering_template_version_id IS NULL) OR "
             "(publication_mode <> 'forward_only' AND rendering_template_version_id IS NOT NULL)",
             name="publication_intent_rendering_template",
@@ -2397,13 +2659,91 @@ class PublicationIntentRecord(TimestampMixin, Base):
             "char_length(business_idempotency_key) > 0",
             name="publication_intent_key_not_blank",
         ),
+        CheckConstraint(
+            "attempt_count >= 0 AND attempt_count <= max_attempts AND max_attempts > 0",
+            name="publication_intent_attempts",
+        ),
+        CheckConstraint(
+            "(status = 'sending' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND attempt_count > 0) OR (status <> 'sending' AND lease_token IS NULL "
+            "AND lease_expires_at IS NULL)",
+            name="publication_intent_lease",
+        ),
+        CheckConstraint(
+            "(status = 'retry_wait' AND next_retry_at IS NOT NULL) OR "
+            "(status <> 'retry_wait' AND next_retry_at IS NULL)",
+            name="publication_intent_retry_schedule",
+        ),
+        CheckConstraint(
+            "status NOT IN ('retry_wait', 'failed') OR (last_error_code IS NOT NULL "
+            "AND last_error_type IS NOT NULL AND last_failure_at IS NOT NULL)",
+            name="publication_intent_failure_metadata",
+        ),
+        CheckConstraint(
+            "(in_flight_part IS NULL AND in_flight_operation IS NULL "
+            "AND in_flight_started_at IS NULL) OR (in_flight_part IN ('main', 'supplement') "
+            "AND in_flight_operation IN ('native_forward', 'copy_with_caption', 'send_text') "
+            "AND in_flight_started_at IS NOT NULL)",
+            name="publication_intent_in_flight",
+        ),
+        CheckConstraint(
+            "completed_parts <@ ARRAY['main', 'supplement']::varchar[]",
+            name="publication_intent_completed_parts",
+        ),
+        CheckConstraint(
+            "cardinality(main_random_ids) = 0 OR 0 < ALL(main_random_ids)",
+            name="publication_intent_main_random_ids",
+        ),
+        CheckConstraint(
+            "status = 'pending' OR cardinality(main_random_ids) > 0",
+            name="publication_intent_random_ids_claimed",
+        ),
+        CheckConstraint(
+            "supplement_random_id IS NULL OR supplement_random_id > 0",
+            name="publication_intent_supplement_random_id",
+        ),
+        CheckConstraint(
+            "cardinality(main_remote_message_ids) = 0 OR 0 < ALL(main_remote_message_ids)",
+            name="publication_intent_remote_message_ids",
+        ),
+        CheckConstraint(
+            "(publication_mode = 'native_forward_with_supplement' "
+            "AND (status = 'pending' OR supplement_random_id IS NOT NULL)) OR "
+            "(publication_mode <> 'native_forward_with_supplement' "
+            "AND supplement_random_id IS NULL)",
+            name="publication_intent_supplement_mode",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(rendered_context) = 'object'",
+            name="publication_intent_rendered_context",
+        ),
+        CheckConstraint(
+            "rendered_snapshot_hash IS NULL OR "
+            "(char_length(rendered_snapshot_hash) = 64 "
+            "AND rendered_snapshot_hash !~ '[^0-9a-f]')",
+            name="publication_intent_rendered_hash",
+        ),
+        CheckConstraint(
+            "(publication_mode = 'forward_only' AND rendered_text IS NULL "
+            "AND rendered_snapshot_hash IS NULL) OR "
+            "(publication_mode <> 'forward_only' AND rendered_text IS NOT NULL "
+            "AND rendered_snapshot_hash IS NOT NULL)",
+            name="publication_intent_rendered_snapshot",
+        ),
+        CheckConstraint(
+            "(status IN ('sent', 'failed', 'cancelled') AND completed_at IS NOT NULL) OR "
+            "(status NOT IN ('sent', 'failed', 'cancelled') AND completed_at IS NULL)",
+            name="publication_intent_completion",
+        ),
         Index("ix_publication_intents_message", "message_id", "created_at"),
         Index(
             "ix_publication_intents_pending",
             "status",
             "created_at",
-            postgresql_where=text("status = 'pending'"),
+            postgresql_where=text("status IN ('pending', 'partial')"),
         ),
+        Index("ix_publication_intents_status_lease", "status", "lease_expires_at"),
+        Index("ix_publication_intents_retry_due", "status", "next_retry_at"),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -2445,6 +2785,12 @@ class PublicationIntentRecord(TimestampMixin, Base):
         ForeignKey("telegram_identities.id", ondelete="RESTRICT"), nullable=False
     )
     publication_mode: Mapped[str] = mapped_column(String(48), nullable=False)
+    protected_content_fallback: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="fail", server_default=text("'fail'")
+    )
+    supplement_as_reply: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     rendering_template_version_id: Mapped[UUID | None] = mapped_column(
         ForeignKey(
             "rendering_template_versions.id",
@@ -2453,7 +2799,122 @@ class PublicationIntentRecord(TimestampMixin, Base):
         ),
         nullable=True,
     )
+    rendered_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    rendered_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     business_idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default="pending", server_default=text("'pending'")
     )
+    main_random_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger), nullable=False, default=list, server_default=text("'{}'::bigint[]")
+    )
+    supplement_random_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    completed_parts: Mapped[list[str]] = mapped_column(
+        ARRAY(String(16)), nullable=False, default=list, server_default=text("'{}'::varchar[]")
+    )
+    main_remote_message_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger), nullable=False, default=list, server_default=text("'{}'::bigint[]")
+    )
+    in_flight_part: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    in_flight_operation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    in_flight_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default=text("5")
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PublishAttemptRecord(TimestampMixin, Base):
+    __tablename__ = "publish_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "publication_intent_id", "attempt_number", name="uq_publish_attempt_number"
+        ),
+        UniqueConstraint("lease_token", name="uq_publish_attempt_lease_token"),
+        CheckConstraint("attempt_number > 0", name="publish_attempt_number_positive"),
+        CheckConstraint(
+            "status IN ('sending', 'sent', 'retry_wait', 'failed', 'cancelled')",
+            name="publish_attempt_status",
+        ),
+        CheckConstraint(
+            "status <> 'retry_wait' OR next_retry_at IS NOT NULL",
+            name="publish_attempt_retry_schedule",
+        ),
+        Index("ix_publish_attempts_intent", "publication_intent_id", "attempt_number"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    publication_intent_id: Mapped[UUID] = mapped_column(
+        ForeignKey("publication_intents.id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_token: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reconciled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PublishRecord(CreatedAtMixin, Base):
+    __tablename__ = "publish_records"
+    __table_args__ = (
+        UniqueConstraint("publication_intent_id", "part", name="uq_publish_record_intent_part"),
+        CheckConstraint("part IN ('main', 'supplement')", name="publish_record_part"),
+        CheckConstraint(
+            "operation IN ('native_forward', 'copy_with_caption', 'send_text')",
+            name="publish_record_operation",
+        ),
+        CheckConstraint(
+            "cardinality(remote_message_ids) > 0 AND 0 < ALL(remote_message_ids)",
+            name="publish_record_remote_ids",
+        ),
+        CheckConstraint(
+            "cardinality(random_ids) > 0 AND 0 < ALL(random_ids)",
+            name="publish_record_random_ids",
+        ),
+        Index("ix_publish_records_intent", "publication_intent_id", "sent_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    publication_intent_id: Mapped[UUID] = mapped_column(
+        ForeignKey("publication_intents.id", ondelete="RESTRICT"), nullable=False
+    )
+    publish_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("publish_attempts.id", ondelete="RESTRICT"), nullable=False
+    )
+    part: Mapped[str] = mapped_column(String(16), nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    remote_message_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger), nullable=False)
+    random_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger), nullable=False)
+    rendered_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reconciled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

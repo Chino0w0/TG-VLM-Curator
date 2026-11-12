@@ -26,6 +26,7 @@ from tgcurator.infrastructure.database.analysis_repository import (
     _copy_assignment,
     _exact_cache_source,
     analysis_stage_run_claim_statement,
+    analysis_target_asset_lock_statement,
     sanitize_error_code,
     sanitize_error_type,
     sanitize_identifier,
@@ -178,6 +179,62 @@ class AnalysisRepositoryClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stage_runs.status = 'running'", sql)
         self.assertIn("stage_runs.lease_expires_at <=", sql)
         self.assertIn("FOR UPDATE SKIP LOCKED", sql)
+
+    def test_media_target_lock_requires_ready_asset_and_uses_for_update(self) -> None:
+        image_sql = compiled_sql(
+            analysis_target_asset_lock_statement(target_kind="image_asset", asset_id=uuid4())
+        )
+        video_sql = compiled_sql(
+            analysis_target_asset_lock_statement(target_kind="video_asset", asset_id=uuid4())
+        )
+
+        self.assertIn("image_assets.archive_state = 'ready'", image_sql)
+        self.assertIn("video_assets.archive_state = 'ready'", video_sql)
+        self.assertIn("FOR UPDATE", image_sql)
+        self.assertIn("FOR UPDATE", video_sql)
+
+    async def test_media_claim_locks_ready_asset_before_starting(self) -> None:
+        row = stage_run()
+        row.target_scope = "media"
+        row.target_kind = "image_asset"
+        row.target_id = uuid4()
+        row.image_asset_id = row.target_id
+        run = analysis_run(row)
+        asset = SimpleNamespace(id=row.target_id, archive_state="ready")
+        session = FakeSession(scalar_results=[row, run, asset])
+        repository = SqlAlchemyAnalysisStageRunRepository(FakeDatabase(session))  # type: ignore[arg-type]
+
+        claim = await repository.claim(
+            stage_run_id=str(row.id),
+            now=NOW,
+            lease_duration=timedelta(minutes=5),
+        )
+
+        self.assertIsNotNone(claim)
+        self.assertEqual(len(session.scalar_statements), 3)
+        self.assertIn(
+            "image_assets.archive_state = 'ready'", compiled_sql(session.scalar_statements[2])
+        )
+
+    async def test_non_ready_media_target_is_not_claimed(self) -> None:
+        row = stage_run()
+        row.target_scope = "media"
+        row.target_kind = "video_asset"
+        row.target_id = uuid4()
+        row.video_asset_id = row.target_id
+        run = analysis_run(row)
+        session = FakeSession(scalar_results=[row, run, None])
+        repository = SqlAlchemyAnalysisStageRunRepository(FakeDatabase(session))  # type: ignore[arg-type]
+
+        claim = await repository.claim(
+            stage_run_id=str(row.id),
+            now=NOW,
+            lease_duration=timedelta(minutes=5),
+        )
+
+        self.assertIsNone(claim)
+        self.assertEqual(row.status, "pending")
+        self.assertEqual(row.attempt_count, 0)
 
     async def test_pending_claim_creates_lease_and_duplicate_or_ineligible_claim_is_ignored(
         self,

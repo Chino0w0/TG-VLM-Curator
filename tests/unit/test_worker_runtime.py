@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from apps.worker.runtime import WorkerRuntime
 from tgcurator.application.ports.processing import ClaimedRangeExecution
+from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.shared import DomainValidationError
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -67,6 +68,26 @@ class FakeAnalysisStageRunWorker:
 
     async def process(self, *, stage_run_id: str, now: datetime) -> bool:
         self.requests.append((stage_run_id, now))
+        return self._result
+
+
+class FakePublicationWorker:
+    def __init__(self, *, result: bool = True) -> None:
+        self._result = result
+        self.requests: list[tuple[str, datetime]] = []
+
+    async def process(self, *, intent_id: str, now: datetime) -> bool:
+        self.requests.append((intent_id, now))
+        return self._result
+
+
+class FakeCleanupWorker:
+    def __init__(self, *, result: bool = True) -> None:
+        self._result = result
+        self.requests: list[tuple[str, datetime]] = []
+
+    async def process(self, *, job_id: str, now: datetime) -> bool:
+        self.requests.append((job_id, now))
         return self._result
 
 
@@ -244,6 +265,111 @@ class WorkerRuntimeTests(unittest.TestCase):
             asyncio.run(runtime.handle_analysis_stage_run(stage_run_id="not-a-uuid", now=NOW))
 
         self.assertEqual(analysis_worker.requests, [])
+
+    def test_processes_normalized_publication_uuid_with_an_injected_worker(self) -> None:
+        publication_worker = FakePublicationWorker(result=True)
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            publication_worker=publication_worker,  # type: ignore[arg-type]
+        )
+        intent_id = str(uuid4()).upper()
+
+        processed = asyncio.run(runtime.handle_publication(intent_id=intent_id, now=NOW))
+
+        self.assertTrue(processed)
+        self.assertEqual(publication_worker.requests, [(intent_id.lower(), NOW)])
+
+    def test_unconfigured_publication_runtime_never_fakes_completion(self) -> None:
+        runtime = WorkerRuntime(
+            database=FakeDatabase(), range_execution_worker=FakeRangeExecutionWorker(claim=None)
+        )
+
+        processed = asyncio.run(runtime.handle_publication(intent_id=str(uuid4()), now=NOW))
+
+        self.assertFalse(processed)
+
+    def test_rejects_non_uuid_publication_payload_before_worker_call(self) -> None:
+        publication_worker = FakePublicationWorker()
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            publication_worker=publication_worker,  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(DomainValidationError):
+            asyncio.run(runtime.handle_publication(intent_id="not-a-uuid", now=NOW))
+
+        self.assertEqual(publication_worker.requests, [])
+
+    def test_processes_normalized_cleanup_uuid_with_an_injected_worker(self) -> None:
+        cleanup_worker = FakeCleanupWorker(result=True)
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            cleanup_worker=cleanup_worker,  # type: ignore[arg-type]
+        )
+        job_id = str(uuid4()).upper()
+
+        processed = asyncio.run(runtime.handle_archive_cleanup(job_id=job_id, now=NOW))
+
+        self.assertTrue(processed)
+        self.assertEqual(cleanup_worker.requests, [(job_id.lower(), NOW)])
+
+    def test_unconfigured_cleanup_runtime_never_fakes_completion(self) -> None:
+        runtime = WorkerRuntime(
+            database=FakeDatabase(), range_execution_worker=FakeRangeExecutionWorker(claim=None)
+        )
+
+        processed = asyncio.run(runtime.handle_archive_cleanup(job_id=str(uuid4()), now=NOW))
+
+        self.assertFalse(processed)
+
+    def test_rejects_non_uuid_cleanup_payload_before_worker_call(self) -> None:
+        cleanup_worker = FakeCleanupWorker()
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            cleanup_worker=cleanup_worker,  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(DomainValidationError):
+            asyncio.run(runtime.handle_archive_cleanup(job_id="not-a-uuid", now=NOW))
+
+        self.assertEqual(cleanup_worker.requests, [])
+
+    def test_records_worker_heartbeat_on_valid_task_and_marks_db_unready_on_failure(self) -> None:
+        monitor = OperationsMonitor()
+        publication_worker = FakePublicationWorker(result=True)
+        runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            publication_worker=publication_worker,  # type: ignore[arg-type]
+            telemetry=monitor,
+        )
+
+        asyncio.run(runtime.handle_publication(intent_id=str(uuid4()), now=NOW))
+        healthy = monitor.worker_health(now=NOW)
+        self.assertTrue(healthy.alive)
+        self.assertTrue(healthy.ready)
+
+        class FailingCleanupWorker:
+            async def process(self, *, job_id: str, now: datetime) -> bool:
+                raise RuntimeError("db lost")
+
+        failing_runtime = WorkerRuntime(
+            database=FakeDatabase(),
+            range_execution_worker=FakeRangeExecutionWorker(claim=None),
+            cleanup_worker=FailingCleanupWorker(),  # type: ignore[arg-type]
+            telemetry=monitor,
+        )
+        later = datetime(2026, 9, 4, 12, 1, tzinfo=UTC)
+        with self.assertRaisesRegex(RuntimeError, "db lost"):
+            asyncio.run(failing_runtime.handle_archive_cleanup(job_id=str(uuid4()), now=later))
+        degraded = monitor.worker_health(now=later)
+        self.assertTrue(degraded.alive)
+        self.assertFalse(degraded.ready)
+        self.assertIn("database_unavailable", degraded.blockers)
 
 
 def _claim() -> ClaimedRangeExecution:
