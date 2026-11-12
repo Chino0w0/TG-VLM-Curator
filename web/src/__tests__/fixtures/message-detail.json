@@ -1,0 +1,154 @@
+{
+  "message": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "source_channel_id": "7d0e8deb-3c53-407f-b1cb-4ecdf51360e3",
+    "primary_telegram_message_id": 1,
+    "published_at": "2026-11-12T01:00:01+00:00",
+    "original_text": "Test message 01",
+    "media_count": 2,
+    "processing_status": "processed",
+    "terminal_reason": "completed",
+    "duplicate_status": "unique",
+    "review_status": "unreviewed",
+    "blocked_from_analysis": false
+  },
+  "parts": [],
+  "media": {
+    "images": [
+      {
+        "id": "00000000-0000-0000-0000-0000000003e9",
+        "message_id": "00000000-0000-0000-0000-000000000001",
+        "archive_state": "ready",
+        "archive_size_bytes": 2048,
+        "storage_key": "test/00000000-0000-0000-0000-0000000003e9.webp",
+        "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "perceptual_hash": "1111111111111111",
+        "width": 1024,
+        "height": 768,
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "archived_at": "2026-11-01T00:00:00+00:00"
+      }
+    ],
+    "videos": [
+      {
+        "id": "00000000-0000-0000-0000-0000000007d1",
+        "message_id": "00000000-0000-0000-0000-000000000001",
+        "archive_state": "ready",
+        "source_cover_phash": "2222222222222222",
+        "duration_seconds": 10,
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "frames": []
+      }
+    ]
+  },
+  "duplicate_match": null,
+  "analysis_runs": [
+    {
+      "id": "00000000-0000-0000-0000-000000000fa5",
+      "analysis_pipeline_version_id": "00000000-0000-0000-0000-000000000fa6",
+      "run_mode": "formal",
+      "status": "completed",
+      "started_at": "2026-11-12T10:00:00+00:00",
+      "completed_at": "2026-11-12T10:00:00+00:00",
+      "stage_runs": [
+        {
+          "id": "00000000-0000-0000-0000-000000000fa1",
+          "analysis_stage_template_version_id": "00000000-0000-0000-0000-000000000fa2",
+          "target_scope": "global",
+          "target_kind": "message",
+          "target_id": "00000000-0000-0000-0000-000000000001",
+          "status": "completed",
+          "attempt_count": 1,
+          "result_origin": "provider",
+          "reused_from_stage_run_id": null,
+          "last_error_code": null,
+          "last_error_type": null,
+          "input_manifest": {
+            "id": "00000000-0000-0000-0000-000000000fa3",
+            "input_manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "content": {
+              "message_text": "Test message 01",
+              "targets": [
+                {
+                  "target_id": "00000000-0000-0000-0000-000000000001"
+                }
+              ]
+            }
+          },
+          "inference_call": {
+            "id": "00000000-0000-0000-0000-000000000fa4",
+            "provider_adapter": "openai_compatible",
+            "model_name": "fixture-model",
+            "status": "completed",
+            "structured_output_schema_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "token_usage": {
+              "input_tokens": 123,
+              "output_tokens": 7
+            },
+            "latency_ms": 25,
+            "error_code": null
+          }
+        }
+      ]
+    }
+  ],
+  "labels": {
+    "model": [],
+    "manual_events": [],
+    "namespaces": {
+      "model": {
+        "global": {},
+        "media": {}
+      },
+      "manual": {
+        "global": {},
+        "media": {}
+      },
+      "effective": {
+        "global": {},
+        "media": {}
+      }
+    }
+  },
+  "review_events": [],
+  "routing_evaluations": [
+    {
+      "id": "00000000-0000-0000-0000-000000001389",
+      "routing_request_id": "fixture-request",
+      "routing_policy_version_id": "00000000-0000-0000-0000-00000000138a",
+      "facts_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "facts_snapshot": {},
+      "rule_outcomes": [],
+      "stopped_at_rule_id": null,
+      "created_at": "2026-11-12T10:00:00+00:00"
+    }
+  ],
+  "publication_intents": [
+    {
+      "id": "00000000-0000-0000-0000-00000000138b",
+      "routing_evaluation_id": "00000000-0000-0000-0000-000000001389",
+      "destination_channel_id": "e4807dfd-5bf6-4885-8435-e53837a6e0ac",
+      "publish_identity_id": "7c0a2878-3661-497c-9a79-073c58ab7e38",
+      "publication_mode": "forward_only",
+      "protected_content_fallback": "fail",
+      "rendered_text": null,
+      "status": "sent",
+      "attempt_count": 1,
+      "last_error_code": null,
+      "attempts": [],
+      "records": [
+        {
+          "id": "00000000-0000-0000-0000-00000000138c",
+          "part": "primary",
+          "operation": "forward",
+          "remote_message_ids": [
+            9001,
+            9002
+          ],
+          "sent_at": "2026-11-12T10:00:00+00:00"
+        }
+      ]
+    }
+  ],
+  "audit_events": []
+}

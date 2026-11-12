@@ -18,3 +18,7 @@ redis-data/
 temp-media/
 *.session
 *.session-journal
+web/node_modules/
+web/dist/
+web/coverage/
+*.tsbuildinfo
