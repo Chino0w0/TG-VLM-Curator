@@ -151,12 +151,17 @@ class ConcurrencyBoundedInferenceProvider(OpenAICompatibleInferenceProvider):
             await parent_close()
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundedPreparedAnalysisCall(PreparedAnalysisCall):
+    stage_key: str | None = None
+    stage_limit: int | None = None
+
+
 class ConcurrencyBoundedAnalysisOrchestrator(AnalysisOrchestrator):
     """Enforces stage-level `max_concurrency` around live provider invocations."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._stage_limits_by_request: dict[int, tuple[str, int]] = {}
         self._stage_semaphores: dict[tuple[int, str, int], asyncio.Semaphore] = {}
 
     def prepare(
@@ -183,16 +188,20 @@ class ConcurrencyBoundedAnalysisOrchestrator(AnalysisOrchestrator):
                 or getattr(stage, "version_id", None)
                 or id(stage)
             )
-            if len(self._stage_limits_by_request) > 4096:
-                self._stage_limits_by_request.clear()
-            self._stage_limits_by_request[id(prepared.request)] = (stage_key, stage_limit)
+            return _BoundedPreparedAnalysisCall(
+                schema=prepared.schema,
+                request=prepared.request,
+                cache_key=prepared.cache_key,
+                stage_key=stage_key,
+                stage_limit=stage_limit,
+            )
         return prepared
 
     async def invoke(self, prepared: PreparedAnalysisCall) -> AnalysisInvocationResult:
-        limit_info = self._stage_limits_by_request.pop(id(prepared.request), None)
-        if limit_info is None:
+        stage_key = getattr(prepared, "stage_key", None)
+        stage_limit = getattr(prepared, "stage_limit", None)
+        if not isinstance(stage_key, str) or not isinstance(stage_limit, int) or stage_limit <= 0:
             return await super().invoke(prepared)
-        stage_key, stage_limit = limit_info
         loop_id = id(asyncio.get_running_loop())
         sem_key = (loop_id, stage_key, stage_limit)
         semaphore = self._stage_semaphores.get(sem_key)
@@ -203,7 +212,6 @@ class ConcurrencyBoundedAnalysisOrchestrator(AnalysisOrchestrator):
             return await super().invoke(prepared)
 
     async def aclose(self) -> None:
-        self._stage_limits_by_request.clear()
         self._stage_semaphores.clear()
         provider_close = getattr(self._provider, "aclose", None)
         if callable(provider_close):

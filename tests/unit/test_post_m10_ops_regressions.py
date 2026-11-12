@@ -708,6 +708,59 @@ class PostM10OpsRegressionsTests(unittest.IsolatedAsyncioTestCase):
         ]
         await asyncio.gather(*(orchestrator.invoke(c) for c in calls))
         self.assertEqual(stage_peak, 1)
+        self.assertFalse(hasattr(orchestrator, "_stage_limits_by_request"))
+
+        # prepare() without invoke() (semantic cache hit + GC) carries metadata on prepared call
+        # and never leaks or throttles subsequent wider-concurrency stage calls via reused id().
+        for idx in range(32):
+            cached_call = orchestrator.prepare(
+                stage=stage,
+                targets=(
+                    AnalysisTargetInput(
+                        target_id=f"cached-{idx}",
+                        message_id=f"cached-{idx}",
+                        text="cached",
+                    ),
+                ),
+            )
+            del cached_call
+        gc.collect()
+
+        wide_stage = AnalysisStageTemplateVersion(
+            version_id=str(uuid4()),
+            stage_template_id=str(uuid4()),
+            version_number=1,
+            name="wide_gate",
+            target_scope=LabelScope.GLOBAL,
+            execution_mode=ExecutionMode.SINGLE_MESSAGE,
+            prompt=stage.prompt,
+            label_set=stage.label_set,
+            structured_output_policy=StructuredOutputPolicy(),
+            input_policy=StageInputPolicy(text=True, media=False),
+            visual_composition_policy=VisualCompositionPolicy.RAW,
+            inference_profile=profile,
+            cache_policy=CachePolicy.NONE,
+            timeout_seconds=10.0,
+            retry_policy=StageRetryPolicy(),
+            max_concurrency=4,
+            status=VersionStatus.PUBLISHED,
+        )
+        stage_peak = 0
+        wide_calls = [
+            orchestrator.prepare(
+                stage=wide_stage,
+                targets=(
+                    AnalysisTargetInput(
+                        target_id=f"wide-{idx}",
+                        message_id=f"wide-{idx}",
+                        text="hi",
+                    ),
+                ),
+            )
+            for idx in range(4)
+        ]
+        await asyncio.gather(*(orchestrator.invoke(c) for c in wide_calls))
+        self.assertEqual(stage_peak, 4)
         await orchestrator.aclose()
 
 
