@@ -1,0 +1,30 @@
+{
+  "evaluation_id": "a6bffbdf-6ba3-4b23-ab2f-4b9b155d133e",
+  "routing_request_id": "reroute:4f90899d-466a-47f5-81c7-49cb8c69eb26",
+  "message_id": "00000000-0000-0000-0000-000000000001",
+  "routing_policy_version_id": "086f344a-043d-47d4-89d2-6b610ae34aac",
+  "dry_run": true,
+  "persisted": false,
+  "facts_hash": "84d0e3c4295ca301fe78a0f54abb727e3fe1bdde729356e60b011769df481cb8",
+  "stopped_at_rule_id": "rule-curated-forward",
+  "matched_rule_ids": [
+    "rule-curated-forward"
+  ],
+  "intents": [
+    {
+      "intent_id": "d65a1145-c03d-48f8-af10-642acbd07e61",
+      "destination_channel_id": "dfc51e0d-2443-4aa3-a8a1-578f09464052",
+      "publish_identity_id": "2db0c651-da21-4ef8-8233-cbe7aa37b10f",
+      "publication_mode": "copy_with_caption",
+      "rendered_text": "Test message 01"
+    }
+  ],
+  "comparison": {
+    "previous_evaluation_id": null,
+    "added_destinations": [
+      "dfc51e0d-2443-4aa3-a8a1-578f09464052"
+    ],
+    "removed_destinations": [],
+    "changed_modes": {}
+  }
+}

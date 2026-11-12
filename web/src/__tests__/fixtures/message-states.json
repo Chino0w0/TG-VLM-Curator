@@ -1,0 +1,14 @@
+{
+  "processing": [
+    "ingested",
+    "processing",
+    "processed",
+    "failed"
+  ],
+  "duplicate": [
+    "unchecked",
+    "unique",
+    "duplicate_skipped",
+    "duplicate_reclassify"
+  ]
+}
