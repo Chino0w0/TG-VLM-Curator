@@ -8,19 +8,25 @@ from celery import Celery
 from kombu import Queue
 
 from tgcurator.application.analysis import ANALYSIS_QUEUE
+from tgcurator.application.cleanup import CLEANUP_QUEUE
 from tgcurator.application.media import IMAGE_ARCHIVE_QUEUE, VIDEO_ARCHIVE_QUEUE
 from tgcurator.application.processing.scheduler import RANGE_EXECUTION_QUEUE
+from tgcurator.application.publishing import PUBLICATION_QUEUE
 from tgcurator.shared import DomainValidationError
 
 RANGE_EXECUTION_TASK_NAME = "tgcurator.range_execution"
 IMAGE_ARCHIVE_TASK_NAME = "tgcurator.image_archive"
 VIDEO_ARCHIVE_TASK_NAME = "tgcurator.video_archive"
 ANALYSIS_TASK_NAME = "tgcurator.analysis"
+PUBLICATION_TASK_NAME = "tgcurator.publication"
+CLEANUP_TASK_NAME = "tgcurator.archive_cleanup"
 _TASK_NAME_BY_QUEUE = {
     RANGE_EXECUTION_QUEUE: RANGE_EXECUTION_TASK_NAME,
     IMAGE_ARCHIVE_QUEUE: IMAGE_ARCHIVE_TASK_NAME,
     VIDEO_ARCHIVE_QUEUE: VIDEO_ARCHIVE_TASK_NAME,
     ANALYSIS_QUEUE: ANALYSIS_TASK_NAME,
+    PUBLICATION_QUEUE: PUBLICATION_TASK_NAME,
+    CLEANUP_QUEUE: CLEANUP_TASK_NAME,
 }
 
 
@@ -52,6 +58,8 @@ def create_celery_client(*, broker_url: str, application_name: str = "tgcurator"
             Queue(IMAGE_ARCHIVE_QUEUE),
             Queue(VIDEO_ARCHIVE_QUEUE),
             Queue(ANALYSIS_QUEUE),
+            Queue(PUBLICATION_QUEUE),
+            Queue(CLEANUP_QUEUE),
         ),
         task_ignore_result=True,
         task_serializer="json",

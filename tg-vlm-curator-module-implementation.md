@@ -1,6 +1,6 @@
 # TG-VLM-Curator module implementation plan
 
-Status date: 2026-09-09
+Status date: 2026-11-12
 
 Source specification: `tg-vlm-curator-architecture.md`.
 
@@ -18,7 +18,11 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M3 | Telegram ingestion and media archive workflows | Complete |
 | M4 | Versioned analysis engine and provider adapters | Complete (2026-09-09) |
 | M5 | Human review and routing workflows | Complete (2026-09-09) |
-| M6 | Publication and operations | Pending |
+| M6 | Publication, archive cleanup, and operations | Complete (2026-11-12) |
+| M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Pending |
+| M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Pending |
+| M9 | React + TypeScript + Vite web administration console | Pending |
+| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Pending |
 
 ## Dependency rule
 
@@ -187,7 +191,117 @@ Acceptance uses the M0/M1 formatting, lint, pytest, unittest, compileall, pip, a
 checks. Domain, service, repository, schema, and migration tests require no running PostgreSQL,
 Redis, Telegram session, external inference provider, or inference model.
 
-## M6 - Publication and operations
+## M6 - Publication and operations (complete 2026-11-12)
 
-M6 will add publication leases/attempts, FloodWait retry, partial recovery, reconciliation,
-metrics, service health, archive cleanup dry-runs, and failure-injection coverage.
+M6 closes the backend publication, archive-cleanup, and runtime-operations lifecycle while
+preserving strict domain/application boundaries. A publish worker claims one PostgreSQL
+PublicationIntent through a short compare-by-token lease, freezes the source/destination/template
+facts needed for the attempt, and persists stable 63-bit MTProto `random_id` values plus in-flight
+step state before any Telegram request. Every claim creates an auditable PublishAttempt;
+successful remote message IDs are recorded incrementally in durable PublishRecords so
+`native_forward_with_supplement` retries only a missing forward or supplement, and an explicit
+lease release transitions unfinished multi-part intents cleanly to `partial` or `pending`.
+
+All four publication modes are implemented through a framework-neutral Telegram publisher port:
+`native_forward_with_supplement`, `copy_with_caption`, `forward_only`, and `metadata_only`. The
+Telethon adapter translates FloodWait, permission, expired-session, protected-content, and
+unavailable-media failures into typed application exceptions. FloodWait and ordinary transient
+failures persist an exact or bounded `next_retry_at`; workers never sleep through platform waits.
+Protected content uses the routing action's explicit `fail`, `metadata_only`, or `skip` fallback
+rather than bypassing Telegram restrictions.
+
+The publisher treats PostgreSQL as business truth and Celery as a reconstructable wake-up only.
+Formal routing inserts rendered template snapshots and a UUID-only `publication` wake-up in the
+same transaction as each intent. Scheduler repair rediscovers pending intents, due retries,
+`partial` work, and expired leases after broker loss or process restart. Reconciliation examines
+unresolved in-flight sends at the remote boundary before a retry, allowing a Telegram success
+followed by a failed database commit to be recovered without resending the completed part.
+
+Operations add a framework-neutral `OperationsTelemetry` port, PostgreSQL backlog observation,
+thread-safe in-process publication/FloodWait/backlog metrics, and explicit worker/scheduler
+liveness and readiness snapshots wired into `PublicationWorker`, `SchedulerRuntime`, and
+`WorkerRuntime`. Archive cleanup is a durable maintenance workflow: a dry run stores a canonical
+15-dimension filter snapshot, SHA-256 filter hash, estimated asset/message/byte totals, and an
+atomic `AuditEvent`; confirmation revalidates the filter hash, records a confirmation
+`AuditEvent`, and creates a leased cleanup job with a UUID-only `maintenance` wake-up; execution
+locks ready assets and revalidates active Analysis/Publication usage before deleting only archive
+blobs outside transactions and marking asset metadata `deleted` with deletion audit fields.
+Messages, hashes, visual fingerprints, Analysis, labels, routing, and publication history remain
+intact.
+
+Acceptance extends the earlier formatting, lint, pytest, unittest, compileall, pip, schema, and
+offline Alembic gates. Stateful failure-injection tests cover a send succeeding before the result
+commit, an intent committed before broker enqueue, Redis and wake-up loss, duplicate consumption,
+expired publication and cleanup leases, worker/scheduler restart, partial publication recovery,
+FloodWait scheduling, and cleanup usage races plus post-delete crash replay. No running
+PostgreSQL, Redis, Telegram session, external inference provider, or inference model is required
+by the local acceptance suite.
+
+## M7 - End-to-end pipeline orchestration, visual deduplication, and continuous watermarks (pending)
+
+M7 connects ingestion, archive normalization, versioned analysis, visual deduplication, and formal
+routing into one continuous, crash-recoverable message lifecycle:
+
+- pre-download `batch_messages` text PreScreen stages and first-cause Negative Gate blocking
+  before media downloads are scheduled;
+- automatic image/video archive wake-up generation for unblocked messages, followed by
+  message-level visual fingerprint persistence (`duplicate_matches` and `canonical_message_id`)
+  supporting `skip` and `reclassify_with_text` duplicate policies;
+- topological conditional DAG progression across `depends_on` and `run_if` predicates, creating
+  downstream `StageRun` rows and UUID-only `analysis` wake-ups until the `AnalysisRun` reaches a
+  terminal state, then triggering formal `RoutingService.evaluate`;
+- gap-free monotonic `processing_watermark` advancement on `RangeExecution` and `ProcessingRange`
+  only across contiguous prefix messages that have reached valid terminal lifecycle states
+  (completed, Negative Gate blocked, skipped by duplicate policy, no eligible stages, or audited
+  administrator skip);
+- scheduler wake-up repair coverage for unfinished/expired media-archive and analysis stage work,
+  plus the long-running `apps/telegram_ingestor` composition root for realtime updates, bounded
+  media-group flushing, reconnect reconciliation, and graceful cursor persistence.
+
+## M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics (pending)
+
+M8 exposes the complete FastAPI administration surface over the domain and application services:
+
+- single-administrator Argon2id session authentication (`HttpOnly`, `Secure`, `SameSite` cookies),
+  CSRF validation on state-mutating endpoints, and sanitized `AuditEvent` persistence across all
+  administrative mutations;
+- write-only encrypted secret endpoints (never echoing plaintext), Telegram identity management
+  with `TelegramCapabilityResolver`, source/destination channel endpoints, source/media profile
+  endpoints, and `ProcessingRange` lifecycle plus audited step-level retry/skip controls;
+- full `DRAFT -> PUBLISHED -> ARCHIVED` endpoints for labels, label sets, prompts, stages,
+  pipelines, inference profiles, rendering templates, and routing policies, plus isolated
+  `run_mode="test"` Prompt Test Bench execution that never mutates formal labels, watermarks, or
+  routing;
+- cursor-paginated `Messages` search, full causal-chain `Message Detail` inspection, append-only
+  manual review/labeling, explicit reanalysis, dry-run/formal rerouting, archive cleanup
+  dry-run/confirm endpoints, `/metrics` Prometheus exposition, and operations/audit query APIs.
+
+## M9 - React + TypeScript + Vite web administration console (pending)
+
+M9 implements the single-administrator React + TypeScript + Vite SPA under `web/` covering all
+eleven architectural workspaces:
+
+- `Dashboard`, `Source Channels`, `Processing Ranges`, and `Telegram Identities`;
+- cursor-paginated `Messages` browser, full causal `Message Detail` view (raw Telegram snapshot
+  through media archive, `AnalysisRun`/`StageRun`/`InferenceCall`, `ModelLabelAssignment`, manual
+  events, `RoutingEvaluation`, `PublicationIntent`, `PublishRecord`, and `AuditEvent`), and
+  `Review` queue workflows;
+- `Analysis Configuration` with interactive `Prompt Test Bench`, `Routing` rule/template authoring
+  with dry-run comparison, two-step `Archive Management` (`Dry-Run` before `Confirm`), plus
+  `Operations` and `Audit Log` views, backed by strict TypeScript typechecking, component tests,
+  and production build checks.
+
+## M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification (pending)
+
+M10 delivers the production container topology, operational maintenance utilities, and closed-loop
+system verification without bundling any inference model service:
+
+- backend and web `Dockerfile` builds plus `docker-compose.yml` orchestrating `postgres`, `redis`,
+  `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`, `worker-analysis`,
+  `worker-publish`, and `worker-maintenance` across dedicated persistent volumes;
+- graceful `SIGTERM` handling across all daemons and subprocesses, service-appropriate readiness
+  probes, backup/restore scripts (`backup-postgres`, `backup-media`, `restore-postgres`), and a
+  maintenance storage-consistency scanner verifying `READY` archive blobs and reporting orphan
+  files;
+- end-to-end closed-loop integration and API security invariant suites driven by deterministic
+  `FakeTelegramAdapter` and `FakeInferenceProvider` harnesses.

@@ -56,13 +56,20 @@ M5_TABLES = {
     "routing_evaluations",
     "publication_intents",
 }
+M6_TABLES = {
+    "archive_cleanup_dry_runs",
+    "archive_cleanup_items",
+    "archive_cleanup_jobs",
+    "publish_attempts",
+    "publish_records",
+}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_exactly_the_documented_m1_through_m5_tables(self) -> None:
+    def test_schema_contains_exactly_the_documented_m1_through_m6_tables(self) -> None:
         self.assertEqual(
             set(Base.metadata.tables),
-            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES,
+            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES,
         )
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:

@@ -12,10 +12,12 @@ from tgcurator.application.ports.routing import (
     PublicationIntentDraft,
     RoutingEvaluationDraft,
 )
+from tgcurator.domain.publishing import rendered_snapshot_hash
 from tgcurator.domain.routing import PublicationAction, RoutingDecision, RuleOutcome
 from tgcurator.infrastructure.database.models import (
     AnalysisRunRecord,
     DestinationChannel,
+    DurableWakeupRecord,
     ManualLabelAssignmentRecord,
     MessageRecord,
     ModelLabelAssignmentRecord,
@@ -150,6 +152,8 @@ def action() -> PublicationAction:
         publication_mode="metadata_only",
         rendering_template_version_id=str(TEMPLATE_VERSION_ID),
         publish_identity_id=str(IDENTITY_ID),
+        protected_content_fallback="metadata_only",
+        supplement_as_reply=False,
         routing_rule_id=str(RULE_ID),
     )
 
@@ -189,6 +193,14 @@ def intent_draft() -> PublicationIntentDraft:
         publish_identity_id=str(IDENTITY_ID),
         publication_mode="metadata_only",
         rendering_template_version_id=str(TEMPLATE_VERSION_ID),
+        protected_content_fallback="metadata_only",
+        supplement_as_reply=False,
+        rendered_text="hello",
+        rendered_context={"message": {"id": str(MESSAGE_ID)}},
+        rendered_snapshot_hash=rendered_snapshot_hash(
+            text="hello",
+            context={"message": {"id": str(MESSAGE_ID)}},
+        ),
         business_idempotency_key="publication:v2:" + "c" * 64,
     )
 
@@ -225,6 +237,11 @@ def intent_record() -> PublicationIntentRecord:
         publish_identity_id=IDENTITY_ID,
         publication_mode=draft.publication_mode,
         rendering_template_version_id=TEMPLATE_VERSION_ID,
+        protected_content_fallback=draft.protected_content_fallback,
+        supplement_as_reply=draft.supplement_as_reply,
+        rendered_text=draft.rendered_text,
+        rendered_context=dict(draft.rendered_context),
+        rendered_snapshot_hash=draft.rendered_snapshot_hash,
         business_idempotency_key=draft.business_idempotency_key,
         status="pending",
     )
@@ -238,6 +255,8 @@ def action_record() -> RoutingActionRecord:
         publication_mode="metadata_only",
         rendering_template_version_id=TEMPLATE_VERSION_ID,
         publish_identity_id=IDENTITY_ID,
+        protected_content_fallback="metadata_only",
+        supplement_as_reply=False,
         output_order=0,
     )
 
@@ -406,6 +425,10 @@ class RoutingRepositoryTests(unittest.IsolatedAsyncioTestCase):
             snapshot.policy.rules[0].actions[0].rendering_template_version_id,
             str(TEMPLATE_VERSION_ID),
         )
+        self.assertEqual(
+            snapshot.rendering_template_texts[str(TEMPLATE_VERSION_ID)],
+            "{{ message.original_text }}",
+        )
         analysis_sql = compiled_sql(session.scalar_statements[1], literal_binds=True)
         self.assertIn("analysis_runs.run_mode IN ('formal', 'reanalysis')", analysis_sql)
         self.assertIn("'completed', 'blocked_negative_gate'", analysis_sql)
@@ -413,7 +436,11 @@ class RoutingRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_persist_is_atomic_for_evaluation_and_pending_intents(self) -> None:
         session = FakeSession(scalar_results=[EVALUATION_ID])
         database = FakeDatabase(session)
-        repository = SqlAlchemyRoutingRepository(database)  # type: ignore[arg-type]
+        repository = SqlAlchemyRoutingRepository(
+            database,  # type: ignore[arg-type]
+            clock=lambda: NOW,
+            id_factory=lambda: UUID("89888888-8888-4888-8888-888888888888"),
+        )
 
         result = await repository.persist_evaluation(
             evaluation=evaluation_draft(),
@@ -423,10 +450,16 @@ class RoutingRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.persisted)
         self.assertFalse(result.reused)
-        self.assertEqual(len(session.added), 1)
+        self.assertEqual(len(session.added), 2)
         self.assertIsInstance(session.added[0], PublicationIntentRecord)
         assert isinstance(session.added[0], PublicationIntentRecord)
         self.assertEqual(session.added[0].status, "pending")
+        self.assertEqual(session.added[0].rendered_text, "hello")
+        self.assertIsInstance(session.added[1], DurableWakeupRecord)
+        assert isinstance(session.added[1], DurableWakeupRecord)
+        self.assertEqual(session.added[1].queue, "publication")
+        self.assertEqual(session.added[1].entity_id, INTENT_ID)
+        self.assertEqual(session.added[1].next_attempt_at, NOW)
         self.assertEqual(database.session_count, 1)
 
     async def test_conflicting_request_reloads_and_reuses_existing_evaluation(self) -> None:

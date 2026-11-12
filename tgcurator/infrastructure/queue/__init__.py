@@ -2,7 +2,9 @@
 
 from .celery_dispatcher import (
     ANALYSIS_TASK_NAME,
+    CLEANUP_TASK_NAME,
     IMAGE_ARCHIVE_TASK_NAME,
+    PUBLICATION_TASK_NAME,
     RANGE_EXECUTION_TASK_NAME,
     VIDEO_ARCHIVE_TASK_NAME,
     CeleryTaskDispatcher,
@@ -11,7 +13,9 @@ from .celery_dispatcher import (
 
 __all__ = [
     "ANALYSIS_TASK_NAME",
+    "CLEANUP_TASK_NAME",
     "IMAGE_ARCHIVE_TASK_NAME",
+    "PUBLICATION_TASK_NAME",
     "RANGE_EXECUTION_TASK_NAME",
     "VIDEO_ARCHIVE_TASK_NAME",
     "CeleryTaskDispatcher",

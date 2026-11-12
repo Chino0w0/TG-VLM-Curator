@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -16,6 +16,7 @@ from tgcurator.application.ports.routing import (
     RoutingSnapshot,
     validate_routing_request_reuse,
 )
+from tgcurator.domain.publishing import PublicationMode, rendered_snapshot_hash
 from tgcurator.domain.review import (
     LabelValue,
     ManualLabelEvent,
@@ -29,11 +30,12 @@ from tgcurator.domain.routing import (
     RoutingRule,
     RuleOutcome,
 )
-from tgcurator.shared import DomainValidationError
+from tgcurator.shared import DomainValidationError, ensure_aware
 
 from .models import (
     AnalysisRunRecord,
     DestinationChannel,
+    DurableWakeupRecord,
     ImageAssetRecord,
     ManualLabelAssignmentRecord,
     MessageRecord,
@@ -80,8 +82,16 @@ def routing_evaluation_insert_statement(evaluation: RoutingEvaluationDraft):
 class SqlAlchemyRoutingRepository:
     """Load PostgreSQL facts and atomically persist deterministic routing output."""
 
-    def __init__(self, database: AsyncDatabase) -> None:
+    def __init__(
+        self,
+        database: AsyncDatabase,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        id_factory: Callable[[], UUID] | None = None,
+    ) -> None:
         self._database = database
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._id_factory = id_factory or uuid4
 
     async def find_by_request_id(self, *, routing_request_id: str) -> RoutingExecutionResult | None:
         if not isinstance(routing_request_id, str) or not routing_request_id.strip():
@@ -133,7 +143,7 @@ class SqlAlchemyRoutingRepository:
                 )
             )
             actions = await _load_actions(session=session, rules=rules)
-            policy, destination_defaults = await _build_policy(
+            policy, destination_defaults, template_texts = await _build_policy(
                 session=session,
                 policy_version=policy_version,
                 rules=rules,
@@ -179,6 +189,7 @@ class SqlAlchemyRoutingRepository:
             manual_events=manual_events,
             policy=policy,
             destination_publish_identity_ids=destination_defaults,
+            rendering_template_texts=template_texts,
         )
 
     async def persist_evaluation(
@@ -193,6 +204,8 @@ class SqlAlchemyRoutingRepository:
             decision=decision,
             intents=intents,
         )
+        now = self._clock()
+        ensure_aware(now, field="now")
         async with self._database.session() as session:
             async with session.begin():
                 inserted_id = await session.scalar(routing_evaluation_insert_statement(evaluation))
@@ -213,6 +226,16 @@ class SqlAlchemyRoutingRepository:
 
                 for intent in intents:
                     session.add(_intent_record(intent))
+                    session.add(
+                        DurableWakeupRecord(
+                            id=self._id_factory(),
+                            queue="publication",
+                            entity_id=_as_uuid(intent.intent_id, field="intent_id"),
+                            status="pending",
+                            next_attempt_at=now,
+                            dispatch_attempts=0,
+                        )
+                    )
 
         return RoutingExecutionResult(
             evaluation_id=evaluation.evaluation_id,
@@ -254,7 +277,7 @@ async def _build_policy(
     policy_version: RoutingPolicyVersionRecord,
     rules: Sequence[RoutingRuleRecord],
     actions: Sequence[RoutingActionRecord],
-) -> tuple[RoutingPolicy, dict[str, str]]:
+) -> tuple[RoutingPolicy, dict[str, str], dict[str, str]]:
     destination_ids = tuple(sorted({action.destination_channel_id for action in actions}))
     destinations = (
         tuple(
@@ -348,6 +371,8 @@ async def _build_policy(
                         if action.publish_identity_id is not None
                         else None
                     ),
+                    protected_content_fallback=action.protected_content_fallback,
+                    supplement_as_reply=action.supplement_as_reply,
                     routing_rule_id=str(rule.id),
                 )
                 for action in sorted(
@@ -364,7 +389,12 @@ async def _build_policy(
         str(destination.id): str(destination.default_publish_identity_id)
         for destination in destinations
     }
-    return RoutingPolicy(policy_version_id=str(policy_version.id), rules=domain_rules), defaults
+    template_texts = {str(template.id): template.template_text for template in templates}
+    return (
+        RoutingPolicy(policy_version_id=str(policy_version.id), rules=domain_rules),
+        defaults,
+        template_texts,
+    )
 
 
 async def _load_current_model_assignments(
@@ -510,6 +540,8 @@ async def _load_execution_by_request(
                     else None
                 ),
                 publish_identity_id=str(row.publish_identity_id),
+                protected_content_fallback=row.protected_content_fallback,
+                supplement_as_reply=row.supplement_as_reply,
                 routing_rule_id=str(row.routing_rule_id),
             )
             for row in ordered_intents
@@ -568,12 +600,33 @@ def _validate_persistence_payload(
             raise DomainValidationError("publication intent identity does not match evaluation")
         if action.routing_rule_id is None:
             raise DomainValidationError("matched routing action has no owning rule")
+        mode = PublicationMode(action.publication_mode)
+        if mode is PublicationMode.FORWARD_ONLY:
+            if (
+                intent.rendered_text is not None
+                or intent.rendered_context
+                or intent.rendered_snapshot_hash is not None
+            ):
+                raise DomainValidationError("forward-only intent must not contain rendered output")
+        else:
+            if intent.rendered_text is None or intent.rendered_snapshot_hash is None:
+                raise DomainValidationError("rendered publication intent snapshot is incomplete")
+            expected_rendered_hash = rendered_snapshot_hash(
+                text=intent.rendered_text,
+                context=dict(intent.rendered_context),
+            )
+            if intent.rendered_snapshot_hash != expected_rendered_hash:
+                raise DomainValidationError(
+                    "rendered publication intent hash does not match snapshot"
+                )
         if (
             intent.routing_rule_id != action.routing_rule_id
             or intent.routing_action_id != action.action_id
             or intent.destination_channel_id != action.destination_channel_id
             or intent.publication_mode != action.publication_mode
             or intent.rendering_template_version_id != action.rendering_template_version_id
+            or intent.protected_content_fallback != action.protected_content_fallback
+            or intent.supplement_as_reply != action.supplement_as_reply
             or (
                 action.publish_identity_id is not None
                 and intent.publish_identity_id != action.publish_identity_id
@@ -610,6 +663,11 @@ def _intent_record(intent: PublicationIntentDraft) -> PublicationIntentRecord:
             intent.rendering_template_version_id,
             field="rendering_template_version_id",
         ),
+        protected_content_fallback=intent.protected_content_fallback,
+        supplement_as_reply=intent.supplement_as_reply,
+        rendered_text=intent.rendered_text,
+        rendered_context=dict(intent.rendered_context),
+        rendered_snapshot_hash=intent.rendered_snapshot_hash,
         business_idempotency_key=intent.business_idempotency_key,
         status="pending",
     )
@@ -632,6 +690,11 @@ def _intent_draft_from_record(row: PublicationIntentRecord) -> PublicationIntent
             if row.rendering_template_version_id is not None
             else None
         ),
+        protected_content_fallback=row.protected_content_fallback,
+        supplement_as_reply=row.supplement_as_reply,
+        rendered_text=row.rendered_text,
+        rendered_context=row.rendered_context,
+        rendered_snapshot_hash=row.rendered_snapshot_hash,
         business_idempotency_key=row.business_idempotency_key,
         status=row.status,
     )
