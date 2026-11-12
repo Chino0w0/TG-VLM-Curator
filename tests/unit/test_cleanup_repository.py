@@ -102,6 +102,9 @@ class _Session:
     def add(self, value: object) -> None:
         self.added.append(value)
 
+    async def flush(self) -> None:
+        pass
+
 
 class _Database:
     def __init__(self, session: _Session) -> None:
