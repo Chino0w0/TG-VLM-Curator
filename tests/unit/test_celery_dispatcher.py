@@ -5,11 +5,15 @@ import unittest
 from uuid import uuid4
 
 from tgcurator.application.analysis import ANALYSIS_QUEUE
+from tgcurator.application.cleanup import CLEANUP_QUEUE
 from tgcurator.application.media import IMAGE_ARCHIVE_QUEUE, VIDEO_ARCHIVE_QUEUE
 from tgcurator.application.processing.scheduler import RANGE_EXECUTION_QUEUE
+from tgcurator.application.publishing import PUBLICATION_QUEUE
 from tgcurator.infrastructure.queue import (
     ANALYSIS_TASK_NAME,
+    CLEANUP_TASK_NAME,
     IMAGE_ARCHIVE_TASK_NAME,
+    PUBLICATION_TASK_NAME,
     RANGE_EXECUTION_TASK_NAME,
     VIDEO_ARCHIVE_TASK_NAME,
     CeleryTaskDispatcher,
@@ -106,6 +110,42 @@ class CeleryTaskDispatcherTests(unittest.TestCase):
             ],
         )
 
+    def test_dispatches_only_a_normalized_publication_intent_uuid(self) -> None:
+        celery = FakeCelery()
+        dispatcher = CeleryTaskDispatcher(celery)
+        intent_id = str(uuid4()).upper()
+
+        asyncio.run(dispatcher.dispatch(queue=PUBLICATION_QUEUE, entity_id=intent_id))
+
+        self.assertEqual(
+            celery.calls,
+            [
+                (
+                    PUBLICATION_TASK_NAME,
+                    [intent_id.lower()],
+                    {"queue": PUBLICATION_QUEUE},
+                )
+            ],
+        )
+
+    def test_dispatches_only_a_normalized_cleanup_job_uuid(self) -> None:
+        celery = FakeCelery()
+        dispatcher = CeleryTaskDispatcher(celery)
+        job_id = str(uuid4()).upper()
+
+        asyncio.run(dispatcher.dispatch(queue=CLEANUP_QUEUE, entity_id=job_id))
+
+        self.assertEqual(
+            celery.calls,
+            [
+                (
+                    CLEANUP_TASK_NAME,
+                    [job_id.lower()],
+                    {"queue": CLEANUP_QUEUE},
+                )
+            ],
+        )
+
     def test_rejects_unknown_queues_and_non_uuid_payloads(self) -> None:
         celery = FakeCelery()
         dispatcher = CeleryTaskDispatcher(celery)
@@ -128,6 +168,8 @@ class CeleryTaskDispatcherTests(unittest.TestCase):
                 IMAGE_ARCHIVE_QUEUE,
                 VIDEO_ARCHIVE_QUEUE,
                 ANALYSIS_QUEUE,
+                PUBLICATION_QUEUE,
+                CLEANUP_QUEUE,
             ),
         )
 

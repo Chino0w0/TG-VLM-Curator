@@ -24,6 +24,8 @@ from tgcurator.domain.routing import (
 )
 from tgcurator.shared import DomainValidationError
 
+from .rendering import RestrictedTemplateRenderer, build_rendering_context
+
 
 class RoutingService:
     """Evaluate published routing policy snapshots without network side effects."""
@@ -33,9 +35,11 @@ class RoutingService:
         repository: RoutingRepository,
         *,
         id_factory: Callable[[], UUID] | None = None,
+        renderer: RestrictedTemplateRenderer | None = None,
     ) -> None:
         self._repository = repository
         self._id_factory = id_factory or uuid4
+        self._renderer = renderer or RestrictedTemplateRenderer()
 
     async def evaluate(self, request: RoutingRequest) -> RoutingExecutionResult:
         if not isinstance(request, RoutingRequest):
@@ -110,6 +114,7 @@ class RoutingService:
         decision: RoutingDecision,
     ) -> tuple[PublicationIntentDraft, ...]:
         intents: list[PublicationIntentDraft] = []
+        rendering_context = build_rendering_context(evaluation.facts_snapshot)
         for action in decision.actions:
             if action.routing_rule_id is None:
                 raise DomainValidationError("matched routing action has no owning rule")
@@ -121,6 +126,23 @@ class RoutingService:
             if not isinstance(publish_identity_id, str) or not publish_identity_id.strip():
                 raise DomainValidationError("destination channel has no usable publish identity")
             mode = PublicationMode(action.publication_mode)
+            rendered_text: str | None = None
+            rendered_context: dict[str, Any] = {}
+            rendered_snapshot_hash: str | None = None
+            if mode is not PublicationMode.FORWARD_ONLY:
+                template_version_id = action.rendering_template_version_id
+                if template_version_id is None:
+                    raise DomainValidationError("rendered publication action has no template")
+                template_text = snapshot.rendering_template_texts.get(template_version_id)
+                if template_text is None:
+                    raise DomainValidationError("rendering template text is unavailable")
+                rendered = self._renderer.render(
+                    template_text=template_text,
+                    context=rendering_context,
+                )
+                rendered_text = rendered.text
+                rendered_context = dict(rendered.context)
+                rendered_snapshot_hash = rendered.snapshot_hash
             intent_id = str(self._id_factory())
             intents.append(
                 PublicationIntentDraft(
@@ -135,6 +157,11 @@ class RoutingService:
                     publish_identity_id=publish_identity_id,
                     publication_mode=mode.value,
                     rendering_template_version_id=action.rendering_template_version_id,
+                    protected_content_fallback=action.protected_content_fallback,
+                    supplement_as_reply=action.supplement_as_reply,
+                    rendered_text=rendered_text,
+                    rendered_context=rendered_context,
+                    rendered_snapshot_hash=rendered_snapshot_hash,
                     business_idempotency_key=publication_idempotency_key(
                         source_message_id=evaluation.message_id,
                         destination_channel_id=action.destination_channel_id,

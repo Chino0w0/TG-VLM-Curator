@@ -6,14 +6,18 @@ from celery import Celery
 
 from apps.worker.runtime import (
     run_analysis_stage_run_task,
+    run_archive_cleanup_task,
     run_image_archive_task,
+    run_publication_task,
     run_range_execution_task,
     run_video_archive_task,
 )
 from tgcurator.application import get_settings
 from tgcurator.infrastructure.queue import (
     ANALYSIS_TASK_NAME,
+    CLEANUP_TASK_NAME,
     IMAGE_ARCHIVE_TASK_NAME,
+    PUBLICATION_TASK_NAME,
     RANGE_EXECUTION_TASK_NAME,
     VIDEO_ARCHIVE_TASK_NAME,
     create_celery_client,
@@ -60,3 +64,17 @@ def process_video_archive(video_asset_id: str) -> None:
     """Celery transport entry point; payload is only the durable VideoAsset UUID."""
 
     asyncio.run(run_video_archive_task(video_asset_id))
+
+
+@celery_app.task(name=PUBLICATION_TASK_NAME, ignore_result=True)
+def process_publication(intent_id: str) -> None:
+    """Celery transport entry point; payload is only the PublicationIntent UUID."""
+
+    asyncio.run(run_publication_task(intent_id))
+
+
+@celery_app.task(name=CLEANUP_TASK_NAME, ignore_result=True)
+def process_archive_cleanup(job_id: str) -> None:
+    """Celery transport entry point; payload is only the cleanup job UUID."""
+
+    asyncio.run(run_archive_cleanup_task(job_id))

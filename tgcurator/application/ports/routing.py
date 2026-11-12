@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from tgcurator.domain.review import LabelValue, ManualLabelEvent, ReviewStatus
@@ -45,6 +45,7 @@ class RoutingSnapshot:
     manual_events: tuple[ManualLabelEvent, ...]
     policy: RoutingPolicy
     destination_publish_identity_ids: Mapping[str, str]
+    rendering_template_texts: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _nonblank(self.message_id, field="message_id")
@@ -80,6 +81,11 @@ class PublicationIntentDraft:
     publication_mode: str
     rendering_template_version_id: str | None
     business_idempotency_key: str
+    protected_content_fallback: str = "fail"
+    supplement_as_reply: bool = True
+    rendered_text: str | None = None
+    rendered_context: Mapping[str, Any] = field(default_factory=dict)
+    rendered_snapshot_hash: str | None = None
     status: str = "pending"
 
 
