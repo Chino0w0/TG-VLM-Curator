@@ -38,6 +38,7 @@ class FFmpegVideoFrameExtractor:
     max_probe_output_bytes: int = 256 * 1024
     max_stderr_bytes: int = 64 * 1024
     max_frame_bytes: int = 32 * 1024 * 1024
+    temp_dir: Path | None = None
     _process_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _active_processes: set[subprocess.Popen[bytes]] = field(
         default_factory=set, init=False, repr=False
@@ -71,6 +72,9 @@ class FFmpegVideoFrameExtractor:
                 pass
 
     def __post_init__(self) -> None:
+        if self.temp_dir is not None:
+            self.temp_dir = Path(self.temp_dir).expanduser().resolve()
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
         for field_name, value in (
             ("ffprobe_path", self.ffprobe_path),
             ("ffmpeg_path", self.ffmpeg_path),
@@ -117,7 +121,9 @@ class FFmpegVideoFrameExtractor:
         return await asyncio.to_thread(self._extract_sync, content, float(timestamp_seconds))
 
     def _probe_sync(self, content: bytes) -> VideoProbeMetadata:
-        with tempfile.TemporaryDirectory(prefix="tgcurator-ffprobe-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="tgcurator-ffprobe-", dir=self.temp_dir
+        ) as directory:
             source = Path(directory) / "source.video"
             source.write_bytes(content)
             completed = self._run(
@@ -156,7 +162,9 @@ class FFmpegVideoFrameExtractor:
             )
 
     def _extract_sync(self, content: bytes, timestamp_seconds: float) -> bytes:
-        with tempfile.TemporaryDirectory(prefix="tgcurator-ffmpeg-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="tgcurator-ffmpeg-", dir=self.temp_dir
+        ) as directory:
             source = Path(directory) / "source.video"
             frame = Path(directory) / "frame.png"
             source.write_bytes(content)
@@ -195,7 +203,10 @@ class FFmpegVideoFrameExtractor:
         stdout_limit: int,
         error_type: type[FFmpegMediaError],
     ) -> bytes:
-        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        with (
+            tempfile.TemporaryFile(dir=self.temp_dir) as stdout,
+            tempfile.TemporaryFile(dir=self.temp_dir) as stderr,
+        ):
             try:
                 process = subprocess.Popen(
                     arguments,

@@ -31,6 +31,14 @@ class Settings(BaseSettings):
         ),
     )
     app_master_key_id: str = "primary"
+    telegram_api_id: int | None = Field(default=None, gt=0)
+    telegram_api_hash: SecretStr | None = None
+
+    @field_validator("telegram_api_id", "telegram_api_hash", mode="before")
+    @classmethod
+    def normalize_optional_telegram_credentials(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
     archive_root: Path | None = Field(
         default=None,
         validation_alias=AliasChoices("TGCURATOR_ARCHIVE_ROOT", "ARCHIVE_ROOT"),

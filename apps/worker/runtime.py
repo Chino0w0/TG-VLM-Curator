@@ -4,6 +4,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from tgcurator.application import MessagePipelineCoordinator, Settings, get_settings
@@ -71,6 +72,9 @@ class WorkerRuntime:
     cleanup_worker: ArchiveCleanupWorker | None = None
     pipeline_coordinator: MessagePipelineCoordinator | None = None
     telemetry: OperationsTelemetry | None = None
+
+    telegram_client_pool: Any | None = None
+    media_extractors: tuple[FFmpegVideoFrameExtractor, ...] = ()
 
     async def handle_range_execution(self, *, execution_id: str, now: datetime) -> bool:
         normalized_execution_id = _normalize_execution_id(execution_id)
@@ -207,44 +211,167 @@ class WorkerRuntime:
         return result
 
     async def close(self) -> None:
-        await self.database.dispose()
+        try:
+            for extractor in self.media_extractors:
+                extractor.terminate_active_processes()
+                with _EXTRACTOR_LOCK:
+                    _REGISTERED_EXTRACTORS.pop(id(extractor), None)
+            if self.telegram_client_pool is not None:
+                await self.telegram_client_pool.close()
+        finally:
+            await self.database.dispose()
 
 
 def create_worker_runtime(
     *,
     settings: Settings,
     telemetry: OperationsTelemetry | None = None,
+    telegram_client_factory: Callable[..., object] | None = None,
 ) -> WorkerRuntime:
+    from apps.runtime_dependencies import (
+        VaultInferenceSecretResolver,
+        configured_archive_storage,
+        configured_secret_vault,
+    )
+    from tgcurator.application import MessageIngestService
+    from tgcurator.application.media import (
+        ImageArchiveService,
+        VideoFrameSamplingService,
+        VideoSamplingProfile,
+    )
+    from tgcurator.application.ports.media import ImageNormalizationProfile
+    from tgcurator.infrastructure.database.image_archive_repository import (
+        SqlAlchemyImageArchiveWorkRepository,
+    )
+    from tgcurator.infrastructure.database.media_profile_repository import (
+        SqlAlchemyMediaProfileResolver,
+    )
+    from tgcurator.infrastructure.database.message_ingest_repository import (
+        SqlAlchemyTelegramMessageIngestRepository,
+    )
+    from tgcurator.infrastructure.database.publication_repository import (
+        SqlAlchemyPublicationRepository,
+    )
+    from tgcurator.infrastructure.database.video_archive_repository import (
+        SqlAlchemyVideoArchiveWorkRepository,
+    )
+    from tgcurator.infrastructure.inference import OpenAICompatibleInferenceProvider
+    from tgcurator.infrastructure.media import PillowImageProcessor
+    from tgcurator.infrastructure.telegram.configured_runtime import (
+        ConfiguredTelegramClientPool,
+        ConfiguredTelegramGateway,
+        ConfiguredTelegramMediaDownloader,
+    )
+    from tgcurator.infrastructure.telegram.telethon_publisher import TelethonPublisher
+
     database_url = settings.database_url
     if database_url is None or not database_url.strip():
         raise RuntimeError("TGCURATOR_DATABASE_URL is required")
     database = AsyncDatabase(database_url)
-    pipeline_coordinator = MessagePipelineCoordinator(
+    resolved_telemetry = telemetry if telemetry is not None else OperationsMonitor()
+    vault = configured_secret_vault(settings=settings, database=database)
+    storages = configured_archive_storage(settings)
+    pool = (
+        ConfiguredTelegramClientPool(
+            database=database,
+            vault=vault,
+            settings=settings,
+            client_factory=telegram_client_factory,
+        )
+        if vault is not None
+        else None
+    )
+    gateway = ConfiguredTelegramGateway(database=database, client_pool=pool) if pool else None
+    range_worker = RangeExecutionWorker(
+        repository=SqlAlchemyRangeExecutionWorkerRepository(database)
+    )
+    pipeline = MessagePipelineCoordinator(
         repository=SqlAlchemyMessagePipelineRepository(database),
         routing_service=RoutingService(repository=SqlAlchemyRoutingRepository(database)),
     )
-    cleanup_worker = (
-        ArchiveCleanupWorker(
-            repository=SqlAlchemyArchiveCleanupRepository(database),
-            storage_resolver=_LocalStorageResolver(
-                storage=LocalArchiveStorage(root=settings.archive_root)
+    history = (
+        RangeExecutionHistoryIngestion(
+            range_execution_worker=range_worker,
+            telegram_gateway=gateway,
+            message_ingest_service=MessageIngestService(
+                repository=SqlAlchemyTelegramMessageIngestRepository(
+                    database, defer_media_wakeups=True
+                )
             ),
+            pipeline_coordinator=pipeline,
         )
-        if settings.archive_root is not None
+        if gateway is not None
+        else None
+    )
+    image_worker = None
+    video_worker = None
+    extractors: tuple[FFmpegVideoFrameExtractor, ...] = ()
+    if gateway is not None and storages is not None:
+        storage = storages.resolve(storage_backend="local")
+        downloader = ConfiguredTelegramMediaDownloader(gateway)
+        processor = PillowImageProcessor()
+        image_profile = ImageNormalizationProfile(max_side_pixels=1536, quality=85)
+        media_profiles = SqlAlchemyMediaProfileResolver(database)
+        image_worker = ImageArchiveWorker(
+            repository=SqlAlchemyImageArchiveWorkRepository(database),
+            media_downloader=downloader,
+            archive_service=ImageArchiveService(image_processor=processor, archive_storage=storage),
+            normalization_profile=image_profile,
+            storage_backend="local",
+            profile_resolver=media_profiles,
+        )
+        extractor = register_media_extractor(
+            FFmpegVideoFrameExtractor(temp_dir=settings.temp_media_dir)
+        )
+        extractors = (extractor,)
+        video_worker = VideoArchiveWorker(
+            repository=SqlAlchemyVideoArchiveWorkRepository(database),
+            media_downloader=downloader,
+            metadata_probe=extractor,
+            sampling_service=VideoFrameSamplingService(
+                frame_extractor=extractor, image_processor=processor
+            ),
+            archive_storage=storage,
+            sampling_profile=VideoSamplingProfile(),
+            image_profile=image_profile,
+            storage_backend="local",
+            profile_resolver=media_profiles,
+        )
+    provider = (
+        OpenAICompatibleInferenceProvider(secret_resolver=VaultInferenceSecretResolver(vault))
+        if vault is not None
         else None
     )
     return WorkerRuntime(
         database=database,
-        range_execution_worker=RangeExecutionWorker(
-            repository=SqlAlchemyRangeExecutionWorkerRepository(database)
-        ),
+        range_execution_worker=range_worker,
+        range_execution_history_ingestion=history,
+        image_archive_worker=image_worker,
+        video_archive_worker=video_worker,
         analysis_stage_run_worker=AnalysisStageRunWorker(
             repository=SqlAlchemyAnalysisStageRunRepository(database),
-            orchestrator=AnalysisOrchestrator(provider=None),
+            orchestrator=AnalysisOrchestrator(provider=provider, storage_resolver=storages),
         ),
-        cleanup_worker=cleanup_worker,
-        pipeline_coordinator=pipeline_coordinator,
-        telemetry=telemetry if telemetry is not None else OperationsMonitor(),
+        publication_worker=(
+            PublicationWorker(
+                repository=SqlAlchemyPublicationRepository(database),
+                publisher=TelethonPublisher(client_resolver=pool),
+                telemetry=resolved_telemetry,
+            )
+            if pool is not None
+            else None
+        ),
+        cleanup_worker=(
+            ArchiveCleanupWorker(
+                repository=SqlAlchemyArchiveCleanupRepository(database), storage_resolver=storages
+            )
+            if storages is not None
+            else None
+        ),
+        pipeline_coordinator=pipeline,
+        telemetry=resolved_telemetry,
+        telegram_client_pool=pool,
+        media_extractors=extractors,
     )
 
 
