@@ -405,7 +405,10 @@ async def test_multiple_videos_never_reuse_unproven_first_donor():
 
 def test_m7_constraint_names_match_m6_and_downgrade():
     output = StringIO()
-    cfg = Config("alembic.ini", output_buffer=output)
+    # This offline SQL contract needs migrations, not the CLI's global logging setup.
+    # Loading alembic.ini here disables existing worker loggers for later tests.
+    cfg = Config(output_buffer=output)
+    cfg.set_main_option("script_location", "migrations")
     cfg.set_main_option("sqlalchemy.url", "postgresql+asyncpg://test:test@localhost/test")
     command.upgrade(cfg, "e6d4a8b2c951:f1a7c3d9e204", sql=True)
     sql = output.getvalue()
