@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Protocol
 
 from pydantic import SecretStr
 
+from apps.runtime_dependencies import (
+    resolve_database_url,
+    upsert_service_heartbeat,
+    write_heartbeat_file,
+)
 from tgcurator.application import MessagePipelineCoordinator, Settings
 from tgcurator.application.ports.cleanup import ArchiveCleanupRepository
 from tgcurator.application.ports.operations import (
@@ -35,9 +41,12 @@ from tgcurator.infrastructure.database import (
     SqlAlchemyPublicationRepository,
     SqlAlchemyRoutingRepository,
 )
-from tgcurator.infrastructure.database.reanalysis_repository import SqlAlchemyReanalysisRepository
 from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.infrastructure.queue import CeleryTaskDispatcher, create_celery_client
+
+
+class ReanalysisDriver(Protocol):
+    async def drive_active(self, *, now: datetime, limit: int = 100) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +76,8 @@ class SchedulerRuntime:
     pipeline_coordinator: MessagePipelineCoordinator | None = None
     backlog_repository: OperationsBacklogRepository | None = None
     telemetry: OperationsTelemetry | None = None
-    reanalysis_repository: SqlAlchemyReanalysisRepository | None = None
+    reanalysis_repository: ReanalysisDriver | None = None
+    telegram_client_pool: Any | None = None
 
     async def run_once(
         self,
@@ -111,6 +121,7 @@ class SchedulerRuntime:
                 now=now,
                 limit=dispatch_limit,
             )
+            broker_ready = wakeup_dispatch.failed_dispatches == 0
             if self.telemetry is not None:
                 if self.backlog_repository is not None:
                     backlog = await self.backlog_repository.observe_backlog(now=now)
@@ -126,8 +137,16 @@ class SchedulerRuntime:
                 self.telemetry.heartbeat_scheduler(
                     at=now,
                     database_ready=True,
-                    broker_ready=wakeup_dispatch.failed_dispatches == 0,
+                    broker_ready=broker_ready,
                 )
+            write_heartbeat_file("scheduler", status="running", now=now)
+            await upsert_service_heartbeat(
+                self.database,
+                service_name="scheduler",
+                database_ready=True,
+                broker_ready=broker_ready,
+                now=now,
+            )
         except Exception:
             if self.telemetry is not None:
                 self.telemetry.heartbeat_scheduler(
@@ -135,6 +154,13 @@ class SchedulerRuntime:
                     database_ready=False,
                     broker_ready=False,
                 )
+            await upsert_service_heartbeat(
+                self.database,
+                service_name="scheduler",
+                database_ready=False,
+                broker_ready=False,
+                now=now,
+            )
             raise
         return SchedulerCycleReport(
             range_schedule=range_schedule,
@@ -146,7 +172,18 @@ class SchedulerRuntime:
         )
 
     async def close(self) -> None:
-        await self.database.dispose()
+        try:
+            if self.telegram_client_pool is not None:
+                await self.telegram_client_pool.close()
+        finally:
+            try:
+                task_dispatcher = getattr(self.wakeup_dispatcher, "task_dispatcher", None)
+                celery_client = getattr(task_dispatcher, "_celery", None)
+                close_fn = getattr(celery_client, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            finally:
+                await self.database.dispose()
 
 
 def create_scheduler_runtime(
@@ -160,8 +197,14 @@ def create_scheduler_runtime(
     A concrete latest-boundary source is deliberately injected here; its Telethon adapter arrives
     with M3. M2 never fabricates a LATEST boundary while that provider is unavailable.
     """
+    from tgcurator.infrastructure.database.reanalysis_repository import (
+        SqlAlchemyReanalysisRepository,
+    )
 
-    database_url = _required_value(settings.database_url, field="TGCURATOR_DATABASE_URL")
+    database_url = _required_value(
+        resolve_database_url(settings),
+        field="TGCURATOR_DATABASE_URL",
+    )
     broker_url = _required_secret(settings.celery_broker_url, field="TGCURATOR_CELERY_BROKER_URL")
     database = AsyncDatabase(database_url)
     range_scheduler = ProcessingRangeScheduler(

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from apps.runtime_dependencies import (
+    resolve_database_url,
+    upsert_service_heartbeat,
+    write_heartbeat_file,
+)
 from tgcurator.application import (
     MediaGroupAggregationBuffer,
     MessageIngestService,
@@ -25,6 +31,8 @@ from tgcurator.infrastructure.database import (
     SqlAlchemyTelegramMessageIngestRepository,
 )
 from tgcurator.shared import ensure_aware
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,10 +91,25 @@ class TelegramIngestorRuntime:
             report = await self.realtime_ingestion.flush_due(now=now)
         except Exception:
             self.database_ready = False
+            await upsert_service_heartbeat(
+                self.database,
+                service_name="ingestor",
+                database_ready=False,
+                broker_ready=True,
+                now=now,
+            )
             raise
         self.database_ready = True
         if report.logical_messages > 0:
             self.last_event_at = now
+        write_heartbeat_file("ingestor", status="running", now=now)
+        await upsert_service_heartbeat(
+            self.database,
+            service_name="ingestor",
+            database_ready=True,
+            broker_ready=True,
+            now=now,
+        )
         return report
 
     async def reconcile_sources(
@@ -99,16 +122,24 @@ class TelegramIngestorRuntime:
         if self.reconciliation is None:
             return {}
         reports: dict[str, SourceReconciliationReport] = {}
-        try:
-            for source_channel_id in source_channel_ids:
+        had_failure = False
+        for source_channel_id in source_channel_ids:
+            try:
                 reports[source_channel_id] = await self.reconciliation.reconcile(
                     source_channel_id=source_channel_id
                 )
-        except Exception:
-            self.database_ready = False
-            raise
-        self.database_ready = True
-        self.last_reconciled_at = now
+            except Exception:
+                had_failure = True
+                logger.exception(
+                    "Failed to reconcile source channel %s; continuing remaining channels",
+                    source_channel_id,
+                )
+        if had_failure and isinstance(self.database, AsyncDatabase) and self.database.configured:
+            self.database_ready = await self.database.ping()
+        elif not had_failure:
+            self.database_ready = True
+        if reports or not had_failure:
+            self.last_reconciled_at = now
         return reports
 
     async def handle_message_edit(
@@ -192,7 +223,7 @@ def create_telegram_ingestor_runtime(
     defer_media_wakeups: bool = True,
     aggregation_window: timedelta = timedelta(seconds=3),
 ) -> TelegramIngestorRuntime:
-    database_url = settings.database_url
+    database_url = resolve_database_url(settings)
     if database_url is None or not database_url.strip():
         raise RuntimeError("TGCURATOR_DATABASE_URL is required")
     database = AsyncDatabase(database_url)
