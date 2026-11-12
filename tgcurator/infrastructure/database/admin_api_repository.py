@@ -1810,9 +1810,9 @@ class SqlAlchemyAdminBackend:
             "actor_admin_user_id": res.actor_admin_user_id,
             "filter_snapshot": dict(res.filter_snapshot),
             "filter_hash": res.filter_hash,
-            "estimated_asset_count": res.estimate.estimated_asset_count,
-            "estimated_message_count": res.estimate.estimated_message_count,
-            "estimated_bytes": res.estimate.estimated_bytes,
+            "estimated_asset_count": res.estimate.asset_count,
+            "estimated_message_count": res.estimate.message_count,
+            "estimated_bytes": res.estimate.bytes,
             "created_at": res.created_at.isoformat(),
         }
 
@@ -1854,11 +1854,11 @@ class SqlAlchemyAdminBackend:
         return {
             "id": job.job_id,
             "dry_run_id": job.dry_run_id,
-            "confirmed_by_admin_user_id": job.confirmed_by_admin_user_id,
+            "confirmed_by_admin_user_id": actor_admin_user_id,
             "filter_hash": job.filter_hash,
-            "estimated_asset_count": job.estimate.estimated_asset_count,
-            "estimated_message_count": job.estimate.estimated_message_count,
-            "estimated_bytes": job.estimate.estimated_bytes,
+            "estimated_asset_count": job.estimate.asset_count,
+            "estimated_message_count": job.estimate.message_count,
+            "estimated_bytes": job.estimate.bytes,
             "item_count": job.item_count,
             "status": job.status,
             "created_at": job.created_at.isoformat(),
