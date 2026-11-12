@@ -19,7 +19,7 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M4 | Versioned analysis engine and provider adapters | Complete (2026-09-09) |
 | M5 | Human review and routing workflows | Complete (2026-09-09) |
 | M6 | Publication, archive cleanup, and operations | Complete (2026-11-12) |
-| M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Pending |
+| M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Complete (2026-11-12) |
 | M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Pending |
 | M9 | React + TypeScript + Vite web administration console | Pending |
 | M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Pending |
@@ -237,26 +237,36 @@ FloodWait scheduling, and cleanup usage races plus post-delete crash replay. No 
 PostgreSQL, Redis, Telegram session, external inference provider, or inference model is required
 by the local acceptance suite.
 
-## M7 - End-to-end pipeline orchestration, visual deduplication, and continuous watermarks (pending)
+## M7 - End-to-end pipeline orchestration, visual deduplication, and continuous watermarks (complete 2026-11-12)
 
-M7 connects ingestion, archive normalization, versioned analysis, visual deduplication, and formal
-routing into one continuous, crash-recoverable message lifecycle:
+M7 connects ingestion, archive normalization, versioned analysis, visual deduplication, formal
+routing, and publication settlement into one continuous, crash-recoverable message lifecycle:
 
-- pre-download `batch_messages` text PreScreen stages and first-cause Negative Gate blocking
-  before media downloads are scheduled;
+- pre-download `batch_messages` text PreScreen stages (`load_stage_snapshot` co-leasing eligible
+  sibling targets up to `max_batch_size` with `FOR UPDATE SKIP LOCKED`) and first-cause Negative
+  Gate blocking before media downloads are scheduled, while still allowing formal Routing to
+  evaluate blocked messages;
 - automatic image/video archive wake-up generation for unblocked messages, followed by
-  message-level visual fingerprint persistence (`duplicate_matches` and `canonical_message_id`)
-  supporting `skip` and `reclassify_with_text` duplicate policies;
+  order-independent visual fingerprint and unordered pHash multiset pairing (`duplicate_matches`
+  and `canonical_message_id`) supporting `skip` and `reclassify_with_text` duplicate policies,
+  with version-matched canonical visual stage cache reuse when `reclassify_with_text` runs;
 - topological conditional DAG progression across `depends_on` and `run_if` predicates, creating
   downstream `StageRun` rows and UUID-only `analysis` wake-ups until the `AnalysisRun` reaches a
-  terminal state, then triggering formal `RoutingService.evaluate`;
-- gap-free monotonic `processing_watermark` advancement on `RangeExecution` and `ProcessingRange`
-  only across contiguous prefix messages that have reached valid terminal lifecycle states
-  (completed, Negative Gate blocked, skipped by duplicate policy, no eligible stages, or audited
-  administrator skip);
-- scheduler wake-up repair coverage for unfinished/expired media-archive and analysis stage work,
-  plus the long-running `apps/telegram_ingestor` composition root for realtime updates, bounded
-  media-group flushing, reconnect reconciliation, and graceful cursor persistence.
+  terminal state, then triggering formal `RoutingService.evaluate` and waiting for produced
+  `PublicationIntent`s to settle;
+- gap-free monotonic `processing_watermark` advancement on `RangeExecution` (`awaiting_pipeline` ->
+  `completed`) and `ProcessingRange` only across contiguous prefix messages that have reached valid
+  terminal lifecycle states (completed, Negative Gate blocked, skipped by duplicate policy, no
+  eligible stages, unsupported, or audited administrator skip);
+- scheduler wake-up repair coverage across `range_execution`, `image_archive`, `video_archive`,
+  `analysis`, `publication`, and `maintenance` queues, plus the single-instance
+  `apps/telegram_ingestor` composition root for realtime updates, bounded media-group flushing,
+  reconnect reconciliation, source edit/delete lifecycle tracking, and graceful cursor persistence.
+
+Acceptance extends the formatting, lint, pytest, unittest, compileall, pip, schema, and offline
+Alembic gates across visual deduplication, continuous watermarks, conditional DAG progression,
+batch co-leasing, pipeline coordination, and `telegram_ingestor` runtime tests without requiring a
+running PostgreSQL server, Redis broker, Telegram session, external provider, or inference model.
 
 ## M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics (pending)
 

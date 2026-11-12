@@ -266,18 +266,42 @@ def telegram_part_from_record(record: MessagePartRecord) -> TelegramMessagePart:
     )
 
 
-async def synchronize_archive_assets(*, session, message_id: UUID, message) -> None:
+async def synchronize_archive_assets(
+    *,
+    session,
+    message_id: UUID,
+    message,
+    defer_wakeups: bool = False,
+) -> None:
     """Synchronize source media and durable wake-ups without resetting archive history."""
 
-    await _upsert_image_assets(session=session, message_id=message_id, message=message)
-    await _upsert_video_assets(session=session, message_id=message_id, message=message)
+    await _upsert_image_assets(
+        session=session,
+        message_id=message_id,
+        message=message,
+        defer_wakeups=defer_wakeups,
+    )
+    await _upsert_video_assets(
+        session=session,
+        message_id=message_id,
+        message=message,
+        defer_wakeups=defer_wakeups,
+    )
 
 
-async def _upsert_image_assets(*, session, message_id: UUID, message) -> None:
+async def _upsert_image_assets(
+    *,
+    session,
+    message_id: UUID,
+    message,
+    defer_wakeups: bool = False,
+) -> None:
     statement = image_assets_upsert_statement(message_id=message_id, message=message)
     if statement is None:
         return
     await session.execute(statement)
+    if defer_wakeups:
+        return
     source_asset_ids = tuple(
         asset.asset_id for asset in message.media if asset.kind is MediaKind.IMAGE
     )
@@ -300,11 +324,19 @@ async def _upsert_image_assets(*, session, message_id: UUID, message) -> None:
         await session.execute(wakeup)
 
 
-async def _upsert_video_assets(*, session, message_id: UUID, message) -> None:
+async def _upsert_video_assets(
+    *,
+    session,
+    message_id: UUID,
+    message,
+    defer_wakeups: bool = False,
+) -> None:
     statement = video_assets_upsert_statement(message_id=message_id, message=message)
     if statement is None:
         return
     await session.execute(statement)
+    if defer_wakeups:
+        return
     source_asset_ids = tuple(
         asset.asset_id for asset in message.media if asset.kind is MediaKind.VIDEO
     )
@@ -330,10 +362,17 @@ async def _upsert_video_assets(*, session, message_id: UUID, message) -> None:
 class SqlAlchemyTelegramMessageIngestRepository:
     """PostgreSQL message/part/media persistence in one short idempotent transaction."""
 
-    def __init__(self, database: AsyncDatabase) -> None:
+    def __init__(self, database: AsyncDatabase, *, defer_media_wakeups: bool = False) -> None:
         self._database = database
+        self._defer_media_wakeups = defer_media_wakeups
 
-    async def upsert_message(self, *, message: NormalizedTelegramMessage) -> None:
+    async def upsert_message(
+        self,
+        *,
+        message: NormalizedTelegramMessage,
+        defer_media_wakeups: bool | None = None,
+    ) -> None:
+        defer = self._defer_media_wakeups if defer_media_wakeups is None else defer_media_wakeups
         async with self._database.session() as session:
             async with session.begin():
                 parent_result = await session.execute(message_upsert_statement(message))
@@ -373,7 +412,10 @@ class SqlAlchemyTelegramMessageIngestRepository:
                 )
 
                 await synchronize_archive_assets(
-                    session=session, message_id=message_id, message=recomputed
+                    session=session,
+                    message_id=message_id,
+                    message=recomputed,
+                    defer_wakeups=defer,
                 )
 
     @staticmethod

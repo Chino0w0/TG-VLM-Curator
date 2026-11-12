@@ -5,17 +5,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from tgcurator.application import Settings, get_settings
+from tgcurator.application import MessagePipelineCoordinator, Settings, get_settings
 from tgcurator.application.analysis import AnalysisOrchestrator, AnalysisStageRunWorker
 from tgcurator.application.cleanup import ArchiveCleanupWorker
 from tgcurator.application.media import ImageArchiveWorker, VideoArchiveWorker
 from tgcurator.application.ports.operations import OperationsTelemetry
 from tgcurator.application.processing import RangeExecutionHistoryIngestion, RangeExecutionWorker
 from tgcurator.application.publishing import PublicationWorker
+from tgcurator.application.routing import RoutingService
 from tgcurator.infrastructure.database import (
     AsyncDatabase,
     SqlAlchemyAnalysisStageRunRepository,
+    SqlAlchemyMessagePipelineRepository,
     SqlAlchemyRangeExecutionWorkerRepository,
+    SqlAlchemyRoutingRepository,
 )
 from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.shared import DomainValidationError
@@ -33,6 +36,7 @@ class WorkerRuntime:
     analysis_stage_run_worker: AnalysisStageRunWorker | None = None
     publication_worker: PublicationWorker | None = None
     cleanup_worker: ArchiveCleanupWorker | None = None
+    pipeline_coordinator: MessagePipelineCoordinator | None = None
     telemetry: OperationsTelemetry | None = None
 
     async def handle_range_execution(self, *, execution_id: str, now: datetime) -> bool:
@@ -61,10 +65,16 @@ class WorkerRuntime:
                 # The wake-up remains durable and will be repaired once Telegram identity/session
                 # and archive storage composition are injected. Never fake archive completion.
                 return False
-            return await self.image_archive_worker.process(
+            processed = await self.image_archive_worker.process(
                 image_asset_id=normalized_image_asset_id,
                 now=now,
             )
+            if processed and self.pipeline_coordinator is not None:
+                await self.pipeline_coordinator.on_image_asset_event(
+                    image_asset_id=normalized_image_asset_id,
+                    now=now,
+                )
+            return processed
 
         return await self._run_with_heartbeat(now=now, action=_execute)
 
@@ -74,10 +84,16 @@ class WorkerRuntime:
         async def _execute() -> bool:
             if self.video_archive_worker is None:
                 return False
-            return await self.video_archive_worker.process(
+            processed = await self.video_archive_worker.process(
                 video_asset_id=normalized_video_asset_id,
                 now=now,
             )
+            if processed and self.pipeline_coordinator is not None:
+                await self.pipeline_coordinator.on_video_asset_event(
+                    video_asset_id=normalized_video_asset_id,
+                    now=now,
+                )
+            return processed
 
         return await self._run_with_heartbeat(now=now, action=_execute)
 
@@ -87,10 +103,16 @@ class WorkerRuntime:
         async def _execute() -> bool:
             if self.analysis_stage_run_worker is None:
                 return False
-            return await self.analysis_stage_run_worker.process(
+            processed = await self.analysis_stage_run_worker.process(
                 stage_run_id=normalized_stage_run_id,
                 now=now,
             )
+            if processed and self.pipeline_coordinator is not None:
+                await self.pipeline_coordinator.on_stage_run_event(
+                    stage_run_id=normalized_stage_run_id,
+                    now=now,
+                )
+            return processed
 
         return await self._run_with_heartbeat(now=now, action=_execute)
 
@@ -102,10 +124,16 @@ class WorkerRuntime:
                 # Publication remains database-owned and scheduler repair will wake it again after a
                 # Telegram identity/session composition is injected. Never fake remote completion.
                 return False
-            return await self.publication_worker.process(
+            processed = await self.publication_worker.process(
                 intent_id=normalized_intent_id,
                 now=now,
             )
+            if processed and self.pipeline_coordinator is not None:
+                await self.pipeline_coordinator.on_publication_intent_event(
+                    intent_id=normalized_intent_id,
+                    now=now,
+                )
+            return processed
 
         return await self._run_with_heartbeat(now=now, action=_execute)
 
@@ -158,6 +186,10 @@ def create_worker_runtime(
     if database_url is None or not database_url.strip():
         raise RuntimeError("TGCURATOR_DATABASE_URL is required")
     database = AsyncDatabase(database_url)
+    pipeline_coordinator = MessagePipelineCoordinator(
+        repository=SqlAlchemyMessagePipelineRepository(database),
+        routing_service=RoutingService(repository=SqlAlchemyRoutingRepository(database)),
+    )
     return WorkerRuntime(
         database=database,
         range_execution_worker=RangeExecutionWorker(
@@ -167,6 +199,7 @@ def create_worker_runtime(
             repository=SqlAlchemyAnalysisStageRunRepository(database),
             orchestrator=AnalysisOrchestrator(provider=None),
         ),
+        pipeline_coordinator=pipeline_coordinator,
         telemetry=telemetry if telemetry is not None else OperationsMonitor(),
     )
 
