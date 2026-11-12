@@ -43,6 +43,7 @@ from tgcurator.domain.analysis import (
     ValidatedTargetResult,
     VersionStatus,
     VisualCompositionPolicy,
+    apply_stage_parameter_overrides,
 )
 from tgcurator.shared import DomainValidationError
 
@@ -59,6 +60,7 @@ from .models import (
     LabelSetVersionRecord,
     MessageRecord,
     ModelLabelAssignmentRecord,
+    PipelineStageNodeRecord,
     PromptTemplateVersionRecord,
     SourceChannel,
     StageRunRecord,
@@ -320,6 +322,13 @@ class SqlAlchemyAnalysisStageRunRepository:
                     inference_profile=inference_profile_version,
                     bindings=bindings,
                 )
+                if stage_run.pipeline_stage_node_id is not None:
+                    node = await session.get(
+                        PipelineStageNodeRecord, stage_run.pipeline_stage_node_id
+                    )
+                    if node is None:
+                        raise DomainValidationError("analysis pipeline node is unavailable")
+                    stage = apply_stage_parameter_overrides(stage, node.parameter_overrides)
                 media, visual_identity = await _load_media_snapshot(
                     session=session,
                     stage_run=stage_run,
