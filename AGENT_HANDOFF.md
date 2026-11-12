@@ -1,182 +1,50 @@
-# Agent Handoff - TG-VLM-Curator
+# Agent Handoff — TG-VLM-Curator
 
-Updated: November 12, 2026 (Asia/Shanghai)
-Workspace: E:\Project\TG-VLM-Curator
-Remote: https://github.com/Chino0w0/TG-VLM-Curator
+更新：2026-11-12 11:53 UTC。工作区：`E:/Project/TG-VLM-Curator`。本轮代码基线：`8fc2737`。详细33项映射、证据与限制见 `docs/reviews/2026-11-12-remediation-status.md`；架构依据为 `tg-vlm-curator-architecture.md`，模块边界为 `tg-vlm-curator-module-implementation.md`。
 
-## User delivery rules
+## 当前交付与授权
 
-- Follow tg-vlm-curator-module-implementation.md and tg-vlm-curator-architecture.md.
-- A delivery unit is one complete documented module, not one file or one small change.
-- Use one branch, one commit, and one English pull request for each completed module.
-- Leave stacked pull requests open without merging until the user reviews them.
-- Push completed module branches to the GitHub remote only after all local checks pass.
-- PostgreSQL is business truth; Redis/Celery messages are reconstructable UUID-only wake-ups.
-- Do not bundle, deploy, or fabricate an inference model/provider.
+M0–M5为已有合并实现。M6 / #27已合并 `99696fa2`，M7 / #28已合并 `28c3e6fd`，M8 / #29已合并 `b0e955f4`，M9 / #30已合并 `0007be1e`。M10交付PR为#31，base为main，代码head `8fc2737` 已通过全部GitHub CI；文档最终head须按同一门禁并使用match-head-commit合并。实际merge commit读取远端PR记录，不从冻结SHA推导。用户已授权修复、测试、提交、推送和按门禁合并；未授权生产数据库、真实频道投递或外部推理验收。
 
-## Current delivery
+本机pytest为596 passed、2 warnings，JUnit tests596/errors0/failures0/skipped0，耗时281.558秒；完整Docker部署退出0。GitHub PR run `43212224146` 与push run `43212215720` 的python/web/deployment全部SUCCESS，远端596 passed、1 warning、127.86秒。首轮依赖漂移引发的nullable JSON单测已用生产asyncpg dialect修正，并分别验证SQLAlchemy2.0.52与2.1.8。新任务先读取当前main与PR最终状态，不套用历史所有PR保持open的限制。
 
-- M0, M1, M2, M3, M4, and M5 are merged into origin/main (`78d3d3e`).
-- M6 (`module/m6-publication-lifecycle`) is open as PR #27 (`2163124`).
-- M7 (`module/m7-pipeline-orchestration`) is open as PR #28 (`0f82278`), stacked on
-  `module/m6-publication-lifecycle`.
-- M8 (`module/m8-admin-api`) is open as PR #29 (`6b086aa`), stacked on
-  `module/m7-pipeline-orchestration`.
-- M9 (`module/m9-web-admin`) is open as PR #30 (`eb08a7b`), stacked on `module/m8-admin-api`.
-- M10 (`module/m10-deployment-and-operations`) is stacked on `module/m9-web-admin` and completes the
-  entire first-edition TG-VLM-Curator architecture (M0-M10): production 10-service Docker Compose
-  topology, graceful `SIGTERM` daemons and FFmpeg child-process cleanup, backup/restore scripts,
-  `StorageConsistencyScanner`, and closed-loop E2E verification.
+## 已完成的修复范围
 
-## M10 completed scope
+M6修复非空清理父子写入顺序、带历史意图的迁移回填及触发器恢复、受保护内容首次/恢复fallback；发布人工retry仅重置本轮预算，审计attempt编号持续递增。M7修复实际迁移约束名、同秒canonical环、跨窗口媒体组revision、formal首次创建并发和重叠范围结算；无法证明当前语义等价的donor结果不直接复制，而进入正常worker/cache key路径。
 
-M10 delivers the production container topology, operational tooling, and closed-loop E2E suite:
+M8真实SQLAlchemy配置创建与更新、消息筛选、SET/CLEAR有效事实、失败父run恢复和完整reanalysis DAG已修复。独立reanalysis不依赖旧ProcessingRange，不改旧formal历史，不自动reroute/publish。原生浏览器追加发现的cleanup estimate/confirm DTO也已修复。M9十项历史问题、初始配置schema/引用、清理竞态、安全确认、详情DTO、分页、MEDIA身份、dirty发布、注销/会话及必要管理入口已有回归。
 
-- Container & Compose topology (`docker/backend.Dockerfile`, `docker/web.Dockerfile`,
-  `docker/nginx.conf`, `.dockerignore`, `.env.example`, `docker-compose.yml`): exact 10 core
-  services (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`,
-  `worker-analysis`, `worker-publish`, `worker-maintenance`), 4 named volumes (`postgres-data`,
-  `redis-data`, `archive-data`, `temp-media`), read-only file secret `app_master_key`, and strictly
-  zero bundled LLM/VLM services.
-- Daemon lifecycles, subprocess cleanup, and health probes (`apps/scheduler/__main__.py`,
-  `apps/telegram_ingestor/__main__.py`, `apps/worker/__main__.py`, `apps/worker/runtime.py`,
-  `tgcurator/infrastructure/media/ffmpeg.py`, `apps/healthcheck.py`): graceful `SIGTERM`/`SIGINT`
-  shutdown loops, media-group flush before ingestor exit, active `ffprobe`/`ffmpeg` child-process
-  termination on worker shutdown, `_LocalStorageResolver` archive cleanup wiring, and PostgreSQL vs
-  PostgreSQL+Redis service readiness probes (`tgcurator-healthcheck`).
-- Backup/restore & consistency scanner (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
-  `scripts/restore-postgres.sh`, `tgcurator/domain/archive/consistency.py`,
-  `tgcurator/application/maintenance/consistency.py`,
-  `tgcurator/infrastructure/database/consistency_repository.py`, `apps/worker/consistency_cli.py`):
-  UTC timestamp + SHA-256 backup manifests, independent `APP_MASTER_KEY` vault reminders, and
-  `tgcurator-check-consistency` verifying `READY` archive blobs against observed files.
-- Closed-loop E2E & topology tests (`tests/e2e/test_closed_loop_pipeline.py`,
-  `tests/unit/test_consistency_scanner.py`, `tests/unit/test_deployment_topology.py`).
+视觉输入通过异步storage resolver读取实际归档图片/帧，Manifest v2绑定发送内容、次序和目标/区域；raw/contact_sheet/adaptive执行真实预算，媒体缺失、损坏、容量不足失败关闭。冻结Source Profile的媒体版本实际控制图片规格与视频帧数，后续active Profile变更不能改写冻结执行。显式缺失/冲突配置不会静默回退；旧READY资产不会自动重写。
 
-## M9 completed scope
+生产组合入口从vault和已发布版本连接Telegram历史、实时订阅/补抓、媒体、HTTP推理及发布，身份停用会撤销客户端和排队旧事件。Compose保持十服务、四named volumes、只读master-key文件和零模型服务；HTTPS保留Secure cookie，备份恢复通过Compose PG16/媒体volume与独立主密钥操作。
 
-M9 implements the browser administration console (`web/`) over `/api/v1/*`:
+## 验证证据与准确边界
 
-- Typed HTTP client & session security (`web/src/api/types.ts`, `web/src/api/client.ts`,
-  `web/src/components/LoginView.tsx`): `credentials: "include"` cookie propagation, automatic
-  `X-CSRF-Token` header attachment on mutating requests, autofill-compliant login controls, and
-  explicit session logout.
-- Reusable UI primitives (`web/src/components/ResponsiveTable.tsx`, `ModalDialog.tsx`, `Tabs.tsx`,
-  `web/src/styles/app.css`): keyboard-focusable container-query responsive tables, native modal
-  `<dialog>` with safe destructive focus defaults, accessible tablists, and `:user-invalid` forms.
-- All workspaces (`web/src/workspaces/`): `DashboardWorkspace`, `SourceChannelsWorkspace`,
-  `ProcessingRangesWorkspace`, `TelegramIdentitiesWorkspace` (write-only secrets that immediately
-  scrub plaintext), `MessagesWorkspace` (16 filters + cursor pagination),
-  `MessageDetailWorkspace` (6-stage causal chain inspector + audited skip), `ReviewWorkspace`
-  (append-only manual overrides + dry-run/formal re-route diffs), `AnalysisConfigWorkspace`
-  (immutable published versions + clone-to-draft + `Prompt Test Bench`), `RoutingWorkspace`,
-  `ArchiveManagementWorkspace` (two-step `Dry-Run -> Confirm` lock invalidated on any filter edit),
-  `OperationsWorkspace` (targeted step retry), and `AuditLogWorkspace`.
-- Automated Vitest + Testing Library suite (`web/src/__tests__/app.test.tsx`).
+证据根目录 `.git/fix-2026-11-12/` 不随普通Git提交分发。禁止把其中的服务配置、任何环境文件或密钥复制到报告/日志/提交；可归档的结果应先脱敏。
 
-## M8 completed scope
+| 验证 | 结果 / 定位 |
+| --- | --- |
+| 最终全量 | `main/final-full.txt`、`main/final-full.xml`：596 passed，0 skip/failure/error。 |
+| 原生集成31项 | M6=6、M7=6、M8=8、media_profile=6、runtime_closed_loop=3、telegram_revocation=1、worker_process_restart=1；另有offline_sql=17。 |
+| 原生浏览器 | `main/pr30-native-independent/`：真实PG16、FastAPI、SQL vault、Chrome生产bundle，17组全过，无DTO回放或InMemory。 |
+| 前端 | 24 Vitest、typecheck/build通过；`main/web-audit.json`漏洞总数0。 |
+| runtime | `runtime/fixed.json`、`latest.json`、`final-run.txt`：真实PG/Redis/Celery、生产factory及本地外部fixture。 |
+| 独立OS重启 | `runtime/restart-run.txt`、`restart-latest.json`：未知远端fixture结果时kill、4秒租约、新worker PID恢复、5条记录/5个唯一效果；包含在最终596中。 |
+| 完整部署 | `main/final-deployment.txt`退出0：十服务启动重启、真实ffprobe/frame/FFmpeg取消、TLS登录、应用SIGTERM、PG16+media+独立key恢复、orphan错误与clean scan、wrong-key、自有两个project/卷清理。 |
+| 静态检查 | Ruff282文件、pip check、compileall通过；asyncpg兼容单测增量 `8fc2737` 在2.0.52/2.1.8均通过。 |
 
-M8 exposes the complete single-administrator FastAPI control plane over the domain and application
-layers without breaking dependency boundaries:
+中间590/5失败已修复并由最终全量取代：E2E使用有效真实图像fixture，M7离线Alembic测试改用隔离Config避免fileConfig禁用其他worker logger，诊断断言保留。不要删除断言来“修复”日志捕获。两条弃用警告保留，不能称零警告。
 
-- Domain additions: `tgcurator/shared/pagination.py` (opaque `(timestamp, entity_id)` cursor codec),
-  `tgcurator/domain/telegram/capabilities.py` (`TelegramCapabilityResolver` across `mtproto_user`
-  and `bot` identities plus protected-content constraints), and `tgcurator/domain/audit/models.py`
-  (recursive credential/token/cookie redaction for `AuditEvent` snapshots).
-- Application administration layer (`tgcurator/application/admin/`): `AdminSessionService`
-  (Argon2id verification, opaque SHA-256-hashed session tokens, sliding idle expiry, HMAC-SHA256
-  CSRF tokens), `PromptTestBenchService` (`run_mode="test"` side-effect-free prompt/manifest/schema
-  and external provider execution), `config_validation.py` (domain validation across all 10
-  versioned configuration families), `metrics.py` (Prometheus 0.0.4 text exposition),
-  `AdminApplicationService`, and `InMemoryAdminBackend`.
-- PostgreSQL persistence & migration (`a8b2d4e1f305`): adds `admin_sessions`,
-  `media_processing_profiles`, and `media_processing_profile_versions` (with partial unique index on
-  published versions and immutability trigger), extends `SecretVault` with `rotate()` and
-  `list_statuses()`, and implements `SqlAlchemyAdminBackend` across Section 37 message filters,
-  causal message detail, review/reroute/reanalyze/skip/retry, archive cleanup, audit queries, and
-  metrics snapshots.
-- FastAPI routers & security (`apps/api/`): `/api/v1/*` endpoints with `HttpOnly`, `Secure` (outside
-  dev/test), `SameSite=Lax` session cookies, mandatory `X-CSRF-Token` checks on mutating routes,
-  structured error envelopes, `/metrics`, and unchanged PostgreSQL-only `/health/ready`.
+原生浏览器不运行清理worker，60个cleanup items仅验证入库，没有删媒体；Test Bench使用preview_only，不调用外部模型。注销503故障注入在早期InMemory真实HTTP/Vitest中验证，原生模式只验证过期与正常注销。手机仅抽查Audit，不扩称全页面/跨浏览器。独立重启测试的Telegram效果为持久fixture，不是真实频道投递。
 
-## M8 migration
+runtime专属数据库与Redis键已实时核查为空；独立子进程、浏览器及HTTP harness按各自清理证据退出。Docker演练已清理其自有两个project/卷。共享测试PG/Redis容器由主代理统一决定保留或关闭，不删除别的任务资源。
 
-- Revision: a8b2d4e1f305
-- Down revision: f1a7c3d9e204
-- File: migrations/versions/a8b2d4e1f305_m8_admin_sessions_and_media_profiles.py
-- Chronology date: November 12, 2026
-- Adds `admin_sessions`, `media_processing_profiles`, and `media_processing_profile_versions` with
-  check constraints, partial unique published index, and published/archived immutability trigger.
-- Offline upgrade to M8 and downgrade from M8 to M7 are covered by integration tests.
+## 继续工作入口
 
-## M7 completed scope
+运行配置见 `docs/operations/runtime.md`；TLS、备份与恢复见 `docs/operations/deployment.md`。关键代码为 `apps/worker/runtime.py`、`apps/telegram_ingestor/runtime.py`、`tgcurator/infrastructure/database/reanalysis_repository.py`、`pipeline_repository.py`、`admin_api_repository.py`、`tgcurator/application/analysis/input_composer.py`；可复跑入口为 `tests/integration/`、`web/tests/README.md` 和 `scripts/check-deployment.py`。
 
-M7 connects ingestion, media archiving, versioned analysis, visual deduplication, formal routing,
-and publication settlement into one continuous PostgreSQL-backed lifecycle:
+接续工作先读取当前main、#31最终head的GitHubCI与mergeCommit；本文件记录的是明确代码基线，不替代实时Git状态。真实Telegram账号/session、测试来源/目的频道和真实provider需另有具体授权与配置；禁止用生产频道试发补验收。API readiness只证明PG，worker/scheduler readiness证明PG+Redis，不等于外部业务能力就绪。主密钥独立保存，恢复必须确认可解密和媒体一致，不将密钥放入数据库/媒体备份。
 
-- Domain visual deduplication (`tgcurator/domain/messages/deduplication.py`): order-independent
-  SHA-256 visual fingerprints and exact Held-Karp bitmask DP pairing across image and video-cover
-  perceptual hashes (never message text, source channel, media order, or representative video
-  frames), supporting `skip` (`duplicate_skipped`) and `reclassify_with_text`
-  (`duplicate_reclassify`).
-- Domain continuous watermarks (`tgcurator/domain/processing/watermark.py`) and conditional DAG
-  progression (`tgcurator/domain/analysis/progression.py`): monotonic gap-free watermark
-  advancement across contiguous terminal messages and sparse Telegram IDs, plus topological DAG
-  planning across `depends_on`, `run_if`, pre-download PreScreen roots, media readiness gates, and
-  first-cause Negative Gate halting.
-- Pre-download `batch_messages` and `batch_assets` co-leasing in
-  `SqlAlchemyAnalysisStageRunRepository.load_stage_snapshot` (`FOR UPDATE SKIP LOCKED`) with
-  multi-run Negative Gate grouping and completion in `AnalysisStageRunWorker`.
-- `MessagePipelineCoordinator` and `SqlAlchemyMessagePipelineRepository`: `RangeExecution` handoff
-  (`awaiting_pipeline`), pre-download PreScreen scheduling, Negative Gate media-wakeup cancellation
-  while preserving formal Routing, post-PreScreen media archive wake-ups, `duplicate_matches`
-  persistence, version-matched canonical visual stage cache reuse under `reclassify_with_text`,
-  conditional DAG progression, formal `RoutingService.evaluate`, publication settlement gating,
-  continuous watermark persistence, and wake-up repair across `range_execution`, `image_archive`,
-  `video_archive`, and `analysis` queues.
-- `SchedulerRuntime`, `WorkerRuntime`, and `apps/telegram_ingestor` (`TelegramIngestorRuntime`)
-  wiring with `defer_media_wakeups=True` for realtime updates, bounded media-group flushing,
-  reconnect reconciliation, source edit/delete lifecycle preservation, and graceful shutdown.
+## 工作规则
 
-## M7 migration
-
-- Revision: f1a7c3d9e204
-- Down revision: e6d4a8b2c951
-- File: migrations/versions/f1a7c3d9e204_m7_pipeline_dedup_watermarks.py
-- Chronology date: September 20, 2026
-- Extends `range_executions` with `awaiting_pipeline`; extends `messages` with
-  `canonical_message_id`, `duplicate_status`, `duplicate_distance`, `terminal_reason`,
-  `failure_stage`, `last_error_code`, check constraints, and indexes; adds `duplicate_matches`.
-- Offline upgrade to M7 and downgrade from M7 to M6 are covered by integration tests.
-
-## Important implementation locations
-
-- tgcurator/domain/messages/deduplication.py
-- tgcurator/domain/processing/watermark.py
-- tgcurator/domain/analysis/progression.py
-- tgcurator/application/ports/pipeline.py
-- tgcurator/application/pipeline/coordinator.py
-- tgcurator/application/analysis/worker.py
-- tgcurator/application/processing/history_ingestion.py
-- tgcurator/infrastructure/database/pipeline_repository.py
-- tgcurator/infrastructure/database/analysis_repository.py
-- tgcurator/infrastructure/database/message_ingest_repository.py
-- tgcurator/infrastructure/database/routing_repository.py
-- tgcurator/infrastructure/database/models.py
-- migrations/versions/f1a7c3d9e204_m7_pipeline_dedup_watermarks.py
-- apps/scheduler/runtime.py
-- apps/worker/runtime.py
-- apps/telegram_ingestor/runtime.py
-- tests/unit/test_deduplication.py
-- tests/unit/test_continuous_watermark.py
-- tests/unit/test_pipeline_progression.py
-- tests/unit/test_pipeline_coordinator.py
-- tests/unit/test_telegram_ingestor_runtime.py
-
-## Stacked PR chain (all left open for user review)
-
-- `main` <- PR #27 `module/m6-publication-lifecycle`
-- `module/m6-publication-lifecycle` <- PR #28 `module/m7-pipeline-orchestration`
-- `module/m7-pipeline-orchestration` <- PR #29 `module/m8-admin-api`
-- `module/m8-admin-api` <- PR #30 `module/m9-web-admin`
-- `module/m9-web-admin` <- PR #31 `module/m10-deployment-and-operations`
+遵循本机与项目AGENTS及现有模块边界，保留他人修改；PostgreSQL是业务真相，Redis为可重建UUID唤醒；不捆绑或部署模型。新验证必须标清代码SHA、命令结果与fixture/真实服务边界。历史审查报告保持原始证据，当前状态只在交付文档同步。没有对应终态证据时，明确写待核验，不写“首版全栈生产完成”。
