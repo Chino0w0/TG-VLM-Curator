@@ -58,16 +58,21 @@ class PublicationWorker:
         main_remote_message_ids = claim.main_remote_message_ids
         try:
             if claim.in_flight_part is not None and claim.in_flight_operation is not None:
-                result = await self._reconcile_or_publish(
+                execution = await self._execute_part(
                     claim=claim,
                     part=claim.in_flight_part,
                     operation=claim.in_flight_operation,
                     main_remote_message_ids=main_remote_message_ids,
+                    reconcile=True,
+                    now=now,
                 )
+                if isinstance(execution, bool):
+                    return execution
+                operation, result = execution
                 if not await self.repository.record_part(
                     claim=claim,
                     part=claim.in_flight_part,
-                    operation=claim.in_flight_operation,
+                    operation=operation,
                     remote_message_ids=result.remote_message_ids,
                     reconciled=result.reconciled,
                     now=now,
@@ -89,27 +94,17 @@ class PublicationWorker:
                     now=now,
                 ):
                     return False
-                try:
-                    published = await self.publisher.publish(
-                        request=self._request(
-                            claim=claim,
-                            part=step.part,
-                            operation=operation,
-                            main_remote_message_ids=main_remote_message_ids,
-                        )
-                    )
-                except TelegramProtectedContent as error:
-                    fallback_result = await self._handle_protected_content(
-                        claim=claim,
-                        part=step.part,
-                        operation=operation,
-                        main_remote_message_ids=main_remote_message_ids,
-                        error=error,
-                        now=now,
-                    )
-                    if isinstance(fallback_result, bool):
-                        return fallback_result
-                    operation, published = fallback_result
+                execution = await self._execute_part(
+                    claim=claim,
+                    part=step.part,
+                    operation=operation,
+                    main_remote_message_ids=main_remote_message_ids,
+                    reconcile=False,
+                    now=now,
+                )
+                if isinstance(execution, bool):
+                    return execution
+                operation, published = execution
 
                 if not await self.repository.record_part(
                     claim=claim,
@@ -156,6 +151,52 @@ class PublicationWorker:
                 retryable=True,
                 retry_at=now + self.failure_retry_delay,
                 now=now,
+            )
+
+    async def _execute_part(
+        self,
+        *,
+        claim: ClaimedPublicationIntent,
+        part: PublicationPart,
+        operation: PublicationOperation,
+        main_remote_message_ids: tuple[int, ...],
+        reconcile: bool,
+        now: datetime,
+    ) -> tuple[PublicationOperation, _ExecutionResult] | bool:
+        """Apply one protected-content policy to fresh sends and crash recovery."""
+        try:
+            if reconcile:
+                result = await self._reconcile_or_publish(
+                    claim=claim,
+                    part=part,
+                    operation=operation,
+                    main_remote_message_ids=main_remote_message_ids,
+                )
+            else:
+                published = await self.publisher.publish(
+                    request=self._request(
+                        claim=claim,
+                        part=part,
+                        operation=operation,
+                        main_remote_message_ids=main_remote_message_ids,
+                    )
+                )
+                result = _ExecutionResult(published.remote_message_ids, reconciled=False)
+            return operation, result
+        except TelegramProtectedContent as error:
+            fallback = await self._handle_protected_content(
+                claim=claim,
+                part=part,
+                operation=operation,
+                main_remote_message_ids=main_remote_message_ids,
+                error=error,
+                now=now,
+            )
+            if isinstance(fallback, bool):
+                return fallback
+            fallback_operation, published = fallback
+            return fallback_operation, _ExecutionResult(
+                published.remote_message_ids, reconciled=False
             )
 
     async def _reconcile_or_publish(

@@ -29,6 +29,7 @@ from .pipeline import (
     PipelineDefinition,
     PipelineStage,
     PipelineStageNode,
+    apply_stage_parameter_overrides,
 )
 from .profiles import InferenceProfileVersion
 from .progression import (
@@ -95,6 +96,7 @@ __all__ = [
     "PipelineProgressionPlan",
     "PipelineStage",
     "PipelineStageNode",
+    "apply_stage_parameter_overrides",
     "PlannedNodeTarget",
     "PromptTemplateVersion",
     "RenderedPrompt",
