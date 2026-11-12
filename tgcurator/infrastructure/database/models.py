@@ -1872,7 +1872,7 @@ class PipelineStageNodeRecord(TimestampMixin, Base):
     depends_on: Mapped[list[str]] = mapped_column(
         ARRAY(String(128)), nullable=False, default=list, server_default=text("'{}'")
     )
-    run_if: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    run_if: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     parameter_overrides: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
@@ -1907,6 +1907,14 @@ class AnalysisRunRecord(TimestampMixin, Base):
         ),
         Index("ix_analysis_runs_message_created", "message_id", "created_at"),
         Index("ix_analysis_runs_status", "status"),
+        Index(
+            "uq_analysis_runs_formal_input",
+            "message_id",
+            "analysis_pipeline_version_id",
+            text("(COALESCE(facts_snapshot->>'_pipeline_input_revision', ''))"),
+            unique=True,
+            postgresql_where=text("run_mode = 'formal'"),
+        ),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -2046,8 +2054,12 @@ class InferenceCallRecord(CreatedAtMixin, Base):
         String(16), nullable=False, default="pending", server_default=text("'pending'")
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
-    raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    raw_response: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    token_usage: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -2216,7 +2228,9 @@ class StageRunRecord(TimestampMixin, Base):
     inference_call_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("inference_calls.id", ondelete="RESTRICT"), nullable=True
     )
-    parsed_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    parsed_result: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     cache_policy: Mapped[str] = mapped_column(
         String(32), nullable=False, default="none", server_default=text("'none'")
     )

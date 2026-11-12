@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,13 +29,13 @@ from tgcurator.domain.analysis import (
     MessageMediaReadiness,
     PipelineNodeActionKind,
     PlannedNodeTarget,
+    StageRetryPolicy,
 )
+from tgcurator.domain.analysis.pipeline import _ALLOWED_STAGE_OVERRIDES
 from tgcurator.domain.messages import (
     DuplicateMatchResult,
-    DuplicateStatus,
     VisualCandidate,
     compute_archived_visual_identity,
-    phash_hamming_distance,
 )
 from tgcurator.domain.processing import (
     SourceChannelProfileConfig,
@@ -43,13 +43,14 @@ from tgcurator.domain.processing import (
 )
 from tgcurator.shared import DomainValidationError, ensure_aware
 
-from .analysis_repository import ANALYSIS_QUEUE, sanitize_json
+from .analysis_repository import ANALYSIS_QUEUE
 from .models import (
     AnalysisRunRecord,
     AnalysisStageTemplateVersionRecord,
     DuplicateMatchRecord,
     DurableWakeupRecord,
     ImageAssetRecord,
+    MessagePartRecord,
     MessageRecord,
     ModelLabelAssignmentRecord,
     PipelineStageNodeRecord,
@@ -153,10 +154,21 @@ class SqlAlchemyMessagePipelineRepository:
                     .where(
                         ProcessingRangeRecord.source_channel_id == msg.source_channel_id,
                         RangeExecutionRecord.status == "awaiting_pipeline",
-                        RangeExecutionRecord.from_message_id_exclusive
-                        < msg.primary_telegram_message_id,
-                        RangeExecutionRecord.to_message_id_inclusive
-                        >= msg.primary_telegram_message_id,
+                        or_(
+                            and_(
+                                RangeExecutionRecord.from_message_id_exclusive
+                                < msg.primary_telegram_message_id,
+                                RangeExecutionRecord.to_message_id_inclusive
+                                >= msg.primary_telegram_message_id,
+                            ),
+                            exists().where(
+                                MessagePartRecord.message_id == msg_uuid,
+                                MessagePartRecord.telegram_message_id
+                                > RangeExecutionRecord.from_message_id_exclusive,
+                                MessagePartRecord.telegram_message_id
+                                <= RangeExecutionRecord.to_message_id_inclusive,
+                            ),
+                        ),
                     )
                     .order_by(RangeExecutionRecord.created_at, RangeExecutionRecord.id)
                 )
@@ -263,10 +275,21 @@ class SqlAlchemyMessagePipelineRepository:
                     select(MessageRecord)
                     .where(
                         MessageRecord.source_channel_id == source_uuid,
-                        MessageRecord.primary_telegram_message_id
-                        > execution.from_message_id_exclusive,
-                        MessageRecord.primary_telegram_message_id
-                        <= execution.to_message_id_inclusive,
+                        or_(
+                            and_(
+                                MessageRecord.primary_telegram_message_id
+                                > execution.from_message_id_exclusive,
+                                MessageRecord.primary_telegram_message_id
+                                <= execution.to_message_id_inclusive,
+                            ),
+                            exists().where(
+                                MessagePartRecord.message_id == MessageRecord.id,
+                                MessagePartRecord.telegram_message_id
+                                > execution.from_message_id_exclusive,
+                                MessagePartRecord.telegram_message_id
+                                <= execution.to_message_id_inclusive,
+                            ),
+                        ),
                     )
                     .order_by(MessageRecord.primary_telegram_message_id, MessageRecord.id)
                 )
@@ -317,20 +340,35 @@ class SqlAlchemyMessagePipelineRepository:
                     )
                     .order_by(AnalysisRunRecord.created_at.desc(), AnalysisRunRecord.id.desc())
                 ):
-                    formal_run_by_msg.setdefault(run.message_id, run)
+                    message = next(msg for msg in messages if msg.id == run.message_id)
+                    if (run.facts_snapshot or {}).get("_pipeline_input_revision") == (
+                        _message_input_revision(message)
+                    ):
+                        formal_run_by_msg.setdefault(run.message_id, run)
 
-            request_ids = tuple(
-                f"formal:exec:{execution.execution_id}:msg:{msg.id}" for msg in messages
-            )
+            # Formal routing belongs to a message/policy, not a history-fetch window.
+            # Include legacy execution requests so upgrades do not republish.
             eval_by_msg: dict[UUID, RoutingEvaluationRecord] = {}
             eval_ids: list[UUID] = []
             for ev in await session.scalars(
-                select(RoutingEvaluationRecord).where(
-                    RoutingEvaluationRecord.routing_request_id.in_(request_ids)
+                select(RoutingEvaluationRecord)
+                .where(
+                    RoutingEvaluationRecord.message_id.in_(msg_ids),
+                    RoutingEvaluationRecord.routing_policy_version_id
+                    == (
+                        UUID(execution.profile.routing_policy_version_id)
+                        if execution.profile.routing_policy_version_id
+                        else None
+                    ),
+                    RoutingEvaluationRecord.routing_request_id.like("formal:%"),
+                )
+                .order_by(
+                    RoutingEvaluationRecord.created_at.desc(), RoutingEvaluationRecord.id.desc()
                 )
             ):
-                eval_by_msg[ev.message_id] = ev
-                eval_ids.append(ev.id)
+                if ev.message_id not in eval_by_msg:
+                    eval_by_msg[ev.message_id] = ev
+                    eval_ids.append(ev.id)
 
             intents_by_eval: dict[UUID, list[PublicationIntentRecord]] = defaultdict(list)
             if eval_ids:
@@ -368,7 +406,17 @@ class SqlAlchemyMessagePipelineRepository:
                 WindowMessageSnapshot(
                     message_id=str(msg.id),
                     source_channel_id=str(msg.source_channel_id),
-                    primary_telegram_message_id=msg.primary_telegram_message_id,
+                    # Window-local component coordinate; never change the parent primary.
+                    primary_telegram_message_id=min(
+                        (
+                            part_id
+                            for part_id in msg.telegram_message_ids
+                            if execution.from_message_id_exclusive
+                            < part_id
+                            <= execution.to_message_id_inclusive
+                        ),
+                        key=lambda part_id: (part_id <= execution.watermark_message_id, part_id),
+                    ),
                     published_at=msg.published_at,
                     processing_status=msg.processing_status,
                     terminal_reason=getattr(msg, "terminal_reason", None),
@@ -422,15 +470,25 @@ class SqlAlchemyMessagePipelineRepository:
         pipeline_uuid = UUID(pipeline_version_id)
         async with self._database.session() as session:
             async with session.begin():
+                # A missing child row cannot be locked: serialize on the durable parent.
+                message = await session.scalar(
+                    select(MessageRecord).where(MessageRecord.id == msg_uuid).with_for_update()
+                )
+                if message is None:
+                    raise DomainValidationError("message does not exist")
+                input_revision = _message_input_revision(message)
                 existing = await session.scalar(
                     select(AnalysisRunRecord)
                     .where(
                         AnalysisRunRecord.message_id == msg_uuid,
                         AnalysisRunRecord.analysis_pipeline_version_id == pipeline_uuid,
                         AnalysisRunRecord.run_mode == "formal",
+                        func.coalesce(
+                            AnalysisRunRecord.facts_snapshot["_pipeline_input_revision"].astext, ""
+                        )
+                        == input_revision,
                     )
                     .order_by(AnalysisRunRecord.created_at.desc(), AnalysisRunRecord.id.desc())
-                    .with_for_update()
                 )
                 if existing is not None:
                     return str(existing.id)
@@ -440,7 +498,7 @@ class SqlAlchemyMessagePipelineRepository:
                     analysis_pipeline_version_id=pipeline_uuid,
                     run_mode="formal",
                     status="running",
-                    facts_snapshot={},
+                    facts_snapshot={"_pipeline_input_revision": input_revision},
                     started_at=now,
                 )
                 session.add(created)
@@ -454,17 +512,22 @@ class SqlAlchemyMessagePipelineRepository:
         run_uuid = UUID(analysis_run_id)
         async with self._database.session() as session:
             async with session.begin():
-                selected = (
-                    await session.execute(
-                        select(AnalysisRunRecord, MessageRecord)
-                        .join(MessageRecord, MessageRecord.id == AnalysisRunRecord.message_id)
-                        .where(AnalysisRunRecord.id == run_uuid)
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                if selected is None:
+                # Match worker lock order: existing run first, then its message.
+                # ensure_formal locks only the parent (its existing-run lookup is read-only).
+                run = await session.scalar(
+                    select(AnalysisRunRecord)
+                    .where(AnalysisRunRecord.id == run_uuid)
+                    .with_for_update()
+                )
+                if run is None:
                     return None
-                run, msg = selected
+                msg = await session.scalar(
+                    select(MessageRecord)
+                    .where(MessageRecord.id == run.message_id)
+                    .with_for_update()
+                )
+                if msg is None:
+                    return None
                 nodes = await _load_pipeline_nodes_in_session(
                     session=session,
                     pipeline_uuid=run.analysis_pipeline_version_id,
@@ -500,6 +563,10 @@ class SqlAlchemyMessagePipelineRepository:
                     )
                 )
                 facts = _build_analysis_facts(message=msg, assignments=assignments)
+                if "_pipeline_input_revision" in (run.facts_snapshot or {}):
+                    facts["_pipeline_input_revision"] = run.facts_snapshot[
+                        "_pipeline_input_revision"
+                    ]
                 run.facts_snapshot = facts
 
                 imgs = tuple(
@@ -557,11 +624,8 @@ class SqlAlchemyMessagePipelineRepository:
         ensure_aware(now, field="now")
         run_uuid = UUID(analysis_run_id)
         msg_uuid = UUID(message_id)
-        canonical_uuid = UUID(canonical_message_id) if canonical_message_id is not None else None
 
         scheduled_count = 0
-        cached_count = 0
-        negative_triggered = False
 
         async with self._database.session() as session:
             async with session.begin():
@@ -617,98 +681,8 @@ class SqlAlchemyMessagePipelineRepository:
                         )
                         continue
 
-                    # Check canonical visual cache reuse under duplicate_reclassify!
-                    reused_source: StageRunRecord | None = None
-                    if (
-                        duplicate_status == DuplicateStatus.DUPLICATE_RECLASSIFY.value
-                        and canonical_uuid is not None
-                        and item.cache_policy in {CachePolicy.ASSET, CachePolicy.MESSAGE_VISUAL}
-                    ):
-                        reused_source = await _find_canonical_visual_stage_source(
-                            session=session,
-                            stage_version_id=stage_uuid,
-                            canonical_message_id=canonical_uuid,
-                            target_kind=item.target_kind,
-                            current_target_id=target_uuid,
-                        )
-
-                    if reused_source is not None and reused_source.input_manifest_id is not None:
-                        parsed = dict(sanitize_json(reused_source.parsed_result or {}))
-                        parsed["target_id"] = str(target_uuid)
-                        stage_run_id = self._id_factory()
-                        cached_row = StageRunRecord(
-                            id=stage_run_id,
-                            analysis_run_id=run_uuid,
-                            pipeline_stage_node_id=node_uuid,
-                            analysis_stage_template_version_id=stage_uuid,
-                            message_id=msg_uuid,
-                            target_scope=item.target_scope.value,
-                            target_kind=item.target_kind,
-                            target_id=target_uuid,
-                            image_asset_id=img_id,
-                            video_asset_id=vid_id,
-                            status="succeeded",
-                            attempt_count=0,
-                            max_attempts=item.max_attempts,
-                            input_manifest_id=reused_source.input_manifest_id,
-                            parsed_result=parsed,
-                            cache_policy=item.cache_policy.value,
-                            cache_scope_identity=reused_source.cache_scope_identity,
-                            semantic_cache_key=reused_source.semantic_cache_key,
-                            result_origin="cache",
-                            reused_from_stage_run_id=reused_source.id,
-                            started_at=now,
-                            completed_at=now,
-                        )
-                        session.add(cached_row)
-                        await session.flush()
-
-                        source_assignments = tuple(
-                            await session.scalars(
-                                select(ModelLabelAssignmentRecord).where(
-                                    ModelLabelAssignmentRecord.stage_run_id == reused_source.id
-                                )
-                            )
-                        )
-                        for src_assign in source_assignments:
-                            copied_id = self._id_factory()
-                            copied = ModelLabelAssignmentRecord(
-                                id=copied_id,
-                                stage_run_id=stage_run_id,
-                                analysis_run_id=run_uuid,
-                                message_id=msg_uuid,
-                                target_scope=item.target_scope.value,
-                                target_kind=item.target_kind,
-                                target_id=target_uuid,
-                                image_asset_id=img_id,
-                                video_asset_id=vid_id,
-                                label_definition_version_id=src_assign.label_definition_version_id,
-                                label_key=src_assign.label_key,
-                                score=src_assign.score,
-                                activated=src_assign.activated,
-                                negative=src_assign.negative,
-                                reason=src_assign.reason,
-                                evidence=list(src_assign.evidence),
-                                created_at=now,
-                            )
-                            session.add(copied)
-                            if (
-                                copied.activated
-                                and copied.negative
-                                and not msg.blocked_from_analysis
-                            ):
-                                await session.flush()
-                                msg.blocked_from_analysis = True
-                                msg.blocked_at = now
-                                msg.blocked_by_stage_run_id = stage_run_id
-                                msg.blocked_by_label_assignment_id = copied_id
-                                msg.updated_at = now
-                                negative_triggered = True
-                        cached_count += 1
-                        if negative_triggered:
-                            break
-                        continue
-
+                    # The worker prepares the current Manifest and complete semantic key.
+                    # Preserve cache_policy; do not copy a merely visually similar donor.
                     stage_run_id = self._id_factory()
                     session.add(
                         StageRunRecord(
@@ -737,19 +711,13 @@ class SqlAlchemyMessagePipelineRepository:
                     )
                     scheduled_count += 1
 
-                if negative_triggered:
-                    run.status = "blocked_negative_gate"
-                    run.started_at = run.started_at or now
-                    run.completed_at = now
-                    run.last_error_code = None
-                    run.last_error_type = None
-                elif scheduled_count > 0 or run_status == "running":
+                if scheduled_count > 0 or run_status == "running":
                     run.status = "running"
                     run.started_at = run.started_at or now
                     run.completed_at = None
                 run.updated_at = now
 
-        return scheduled_count, cached_count, negative_triggered
+        return scheduled_count, 0, False
 
     async def set_analysis_run_status(
         self,
@@ -907,7 +875,15 @@ class SqlAlchemyMessagePipelineRepository:
                     .where(
                         MessageRecord.id != msg_uuid,
                         MessageRecord.visual_fingerprint == visual_fingerprint,
-                        MessageRecord.published_at <= published_at,
+                        or_(
+                            MessageRecord.published_at < published_at,
+                            and_(
+                                MessageRecord.published_at == published_at,
+                                MessageRecord.id < msg_uuid,
+                            ),
+                        ),
+                        MessageRecord.duplicate_status == "unique",
+                        MessageRecord.processing_status != "failed",
                     )
                     .order_by(MessageRecord.published_at, MessageRecord.id)
                     .limit(limit)
@@ -919,8 +895,14 @@ class SqlAlchemyMessagePipelineRepository:
                 .where(
                     MessageRecord.id != msg_uuid,
                     MessageRecord.media_count > 0,
-                    MessageRecord.published_at <= published_at,
-                    MessageRecord.duplicate_status.in_(("unique", "unchecked")),
+                    or_(
+                        MessageRecord.published_at < published_at,
+                        and_(
+                            MessageRecord.published_at == published_at, MessageRecord.id < msg_uuid
+                        ),
+                    ),
+                    MessageRecord.duplicate_status == "unique",
+                    MessageRecord.processing_status != "failed",
                 )
                 .order_by(MessageRecord.published_at.desc(), MessageRecord.id.desc())
                 .limit(limit)
@@ -1038,10 +1020,13 @@ class SqlAlchemyMessagePipelineRepository:
                     update(MessageRecord)
                     .where(
                         MessageRecord.id == UUID(message_id),
-                        MessageRecord.processing_status == "ingested",
+                        MessageRecord.processing_status.in_(("ingested", "processed")),
                     )
                     .values(
                         processing_status="processing",
+                        duplicate_status="unchecked",
+                        canonical_message_id=None,
+                        duplicate_distance=None,
                         terminal_reason=None,
                         failure_stage=None,
                         last_error_code=None,
@@ -1336,8 +1321,20 @@ async def _load_pipeline_nodes_in_session(
     for node_row, stage_row in rows:
         input_policy = stage_row.input_policy or {}
         requires_media = bool(input_policy.get("media", False))
-        retry_policy = stage_row.retry_policy or {}
-        max_attempts = max(1, int(retry_policy.get("max_attempts", 3)))
+        overrides = node_row.parameter_overrides or {}
+        unsupported = set(overrides) - _ALLOWED_STAGE_OVERRIDES
+        if unsupported:
+            raise DomainValidationError(
+                f"unsupported pipeline stage overrides: {sorted(unsupported)}"
+            )
+        retry_override = overrides.get("retry_policy", {})
+        if not isinstance(retry_override, dict):
+            raise DomainValidationError("pipeline retry_policy override must be an object")
+        retry_policy = {**(stage_row.retry_policy or {}), **retry_override}
+        try:
+            max_attempts = StageRetryPolicy(**retry_policy).max_attempts
+        except TypeError as exc:
+            raise DomainValidationError("invalid pipeline retry_policy override") from exc
         scope = LabelScope(stage_row.target_scope)
         specs.append(
             PipelineNodeSpec(
@@ -1425,66 +1422,19 @@ async def _find_canonical_visual_stage_source(
     target_kind: str,
     current_target_id: UUID,
 ) -> StageRunRecord | None:
-    stage_row = await session.scalar(
-        select(AnalysisStageTemplateVersionRecord).where(
-            AnalysisStageTemplateVersionRecord.id == stage_version_id
-        )
-    )
-    if stage_row is None or bool((stage_row.input_policy or {}).get("text", False)):
-        return None
+    """A donor cannot be proven safe without the current prepared input Manifest.
 
-    candidates = tuple(
-        await session.scalars(
-            select(StageRunRecord)
-            .where(
-                StageRunRecord.message_id == canonical_message_id,
-                StageRunRecord.analysis_stage_template_version_id == stage_version_id,
-                StageRunRecord.target_kind == target_kind,
-                StageRunRecord.status == "succeeded",
-                StageRunRecord.parsed_result.is_not(None),
-                StageRunRecord.input_manifest_id.is_not(None),
-            )
-            .order_by(StageRunRecord.completed_at.desc(), StageRunRecord.id.desc())
-        )
-    )
-    if not candidates:
-        return None
-    if target_kind == "message" or len(candidates) == 1:
-        return candidates[0]
+    Visual dedup equivalence is not semantic-cache equivalence. A video cover is not
+    its sampled frame set; previous results/source context may also differ. Fail closed
+    and schedule the normal worker, whose AnalysisOrchestrator compares the full key
+    with cache_policy intact. Kept as a compatibility hook, never a bypass.
+    """
+    return None
 
-    # Match multi-asset album target against the closest canonical asset by SHA-256 / pHash!
-    if target_kind == "image_asset":
-        current_img = await session.scalar(
-            select(ImageAssetRecord).where(ImageAssetRecord.id == current_target_id)
-        )
-        if current_img is None:
-            return candidates[0]
-        canonical_imgs = {
-            row.id: row
-            for row in await session.scalars(
-                select(ImageAssetRecord).where(
-                    ImageAssetRecord.id.in_(tuple(c.target_id for c in candidates))
-                )
-            )
-        }
-        best_sr: StageRunRecord | None = None
-        best_dist = 65
-        for sr in candidates:
-            cand_img = canonical_imgs.get(sr.target_id)
-            if cand_img is None:
-                continue
-            if current_img.archive_sha256 and current_img.archive_sha256 == cand_img.archive_sha256:
-                return sr
-            cur_phash = current_img.perceptual_hash or current_img.source_phash
-            cand_phash = cand_img.perceptual_hash or cand_img.source_phash
-            if cur_phash and cand_phash:
-                dist = phash_hamming_distance(cur_phash, cand_phash)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_sr = sr
-        return best_sr or candidates[0]
 
-    return candidates[0]
+def _message_input_revision(message: MessageRecord) -> str:
+    """A formal run owns one component set, not every future album extension."""
+    return ",".join(str(value) for value in sorted(message.telegram_message_ids))
 
 
 async def _upsert_pending_wakeup(

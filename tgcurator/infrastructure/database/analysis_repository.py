@@ -43,6 +43,7 @@ from tgcurator.domain.analysis import (
     ValidatedTargetResult,
     VersionStatus,
     VisualCompositionPolicy,
+    apply_stage_parameter_overrides,
 )
 from tgcurator.shared import DomainValidationError
 
@@ -59,6 +60,7 @@ from .models import (
     LabelSetVersionRecord,
     MessageRecord,
     ModelLabelAssignmentRecord,
+    PipelineStageNodeRecord,
     PromptTemplateVersionRecord,
     SourceChannel,
     StageRunRecord,
@@ -320,6 +322,13 @@ class SqlAlchemyAnalysisStageRunRepository:
                     inference_profile=inference_profile_version,
                     bindings=bindings,
                 )
+                if stage_run.pipeline_stage_node_id is not None:
+                    node = await session.get(
+                        PipelineStageNodeRecord, stage_run.pipeline_stage_node_id
+                    )
+                    if node is None:
+                        raise DomainValidationError("analysis pipeline node is unavailable")
+                    stage = apply_stage_parameter_overrides(stage, node.parameter_overrides)
                 media, visual_identity = await _load_media_snapshot(
                     session=session,
                     stage_run=stage_run,
@@ -545,7 +554,9 @@ class SqlAlchemyAnalysisStageRunRepository:
                     created_at=now,
                 )
                 session.add(manifest_row)
+                await session.flush()
                 session.add(inference_call)
+                await session.flush()
                 for row in rows.values():
                     row.input_manifest_id = manifest_row.id
                     row.inference_call_id = inference_call.id
@@ -887,6 +898,11 @@ class SqlAlchemyAnalysisStageRunRepository:
                 )
                 if run is None:
                     return False
+                if run.run_mode == "reanalysis":
+                    from .reanalysis_repository import advance_reanalysis_in_session
+
+                    await advance_reanalysis_in_session(session=session, run=run, now=now)
+                    return True
                 stages = tuple(
                     await session.scalars(
                         select(StageRunRecord)
