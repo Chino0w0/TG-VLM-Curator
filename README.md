@@ -8,8 +8,9 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 **M0 - Domain foundation**, **M1 - API, security, and PostgreSQL foundation**,
 **M2 - durable processing scheduling**, **M3 - Telegram ingestion and media archive
 workflows**, **M4 - versioned analysis engine and provider adapters**, **M5 - human
-review and routing workflows**, **M6 - publication, archive cleanup, and operations**, and
-**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**
+review and routing workflows**, **M6 - publication, archive cleanup, and operations**,
+**M7 - end-to-end pipeline orchestration, visual deduplication, and continuous watermarks**, and
+**M8 - Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics**
 are complete.
 
 M0 provides deterministic, framework-independent rules for message visual identity,
@@ -139,7 +140,25 @@ M7, completed on 2026-11-12, adds:
   `video_archive`, `analysis`, `publication`, and `maintenance`) and the single-instance
   `apps/telegram_ingestor` composition root.
 
-See tg-vlm-curator-module-implementation.md for module boundaries, the M8-M10 roadmap, and
+M8, completed on 2026-11-12, adds:
+
+- single-administrator Argon2id session authentication (`HttpOnly`, `Secure`, `SameSite=Lax`
+  cookies), HMAC-SHA256 CSRF protection on state-mutating endpoints, durable `admin_sessions`, and
+  recursively sanitized `AuditEvent` logging;
+- write-only AES-256-GCM secret creation and rotation endpoints that never echo plaintext, Telegram
+  identity management with `TelegramCapabilityResolver`, source and destination channel endpoints,
+  and `ProcessingRange` lifecycle (`FIXED` / `LATEST`, pause, resume), audited message skip, and
+  exact step-level retry controls;
+- full `DRAFT -> PUBLISHED -> ARCHIVED` (and `RETIRED` for source channel profiles) endpoints across
+  all ten versioned configuration families, including `media_processing_profiles` and
+  `media_processing_profile_versions` (`a8b2d4e1f305`), plus isolated `run_mode="test"` Prompt Test
+  Bench execution (`POST /api/v1/analysis/test-bench`);
+- cursor-paginated `Messages` search across Section 37 filters, full causal-chain `Message Detail`
+  inspection, append-only manual review/labeling, explicit reanalysis, dry-run/formal reroute
+  comparison, two-step archive cleanup (`Dry-Run` -> hash-verified `Confirm`), operations/audit
+  queries, and Prometheus text exposition (`GET /metrics`).
+
+See tg-vlm-curator-module-implementation.md for module boundaries, the M9-M10 roadmap, and
 acceptance criteria.
 
 ## Dependency direction

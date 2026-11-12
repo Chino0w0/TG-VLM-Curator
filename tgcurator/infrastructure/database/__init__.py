@@ -1,3 +1,4 @@
+from .admin_api_repository import SqlAlchemyAdminBackend
 from .admin_repository import SqlAlchemyAdminBootstrapRepository
 from .analysis_repository import (
     SqlAlchemyAnalysisStageRunRepository,
@@ -80,6 +81,7 @@ __all__ = [
     "publication_repair_candidates_statement",
     "range_execution_claim_statement",
     "routing_evaluation_insert_statement",
+    "SqlAlchemyAdminBackend",
     "SqlAlchemyAdminBootstrapRepository",
     "SqlAlchemySecretVault",
     "SqlAlchemySourceMessageLifecycleRepository",

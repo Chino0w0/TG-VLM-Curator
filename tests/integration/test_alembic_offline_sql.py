@@ -14,6 +14,7 @@ M4_REVISION = "c4a9e7d2f5b1"
 M5_REVISION = "d7b3f9a1e6c2"
 M6_REVISION = "e6d4a8b2c951"
 M7_REVISION = "f1a7c3d9e204"
+M8_REVISION = "a8b2d4e1f305"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -362,6 +363,46 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         self.assertIn("CREATE INDEX ix_messages_visual_fingerprint", result.stdout)
         self.assertIn("CREATE INDEX ix_duplicate_matches_canonical", result.stdout)
         self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_upgrade_renders_complete_m8_postgresql_ddl_without_connecting(self) -> None:
+        result = self.run_alembic("upgrade", M8_REVISION, "--sql")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for table_name in (
+            "admin_sessions",
+            "media_processing_profiles",
+            "media_processing_profile_versions",
+        ):
+            self.assertIn(f"CREATE TABLE {table_name}", result.stdout)
+        for constraint_name in (
+            "uq_admin_sessions_token_hash",
+            "ck_admin_sessions_admin_session_token_hash_format",
+            "ck_admin_sessions_admin_session_csrf_hash_format",
+            "ck_media_processing_profile_versions_media_version_lifecycle",
+            "ck_media_processing_profile_versions_media_content_hash_format",
+        ):
+            self.assertIn(constraint_name, result.stdout)
+        self.assertIn("CREATE UNIQUE INDEX uq_media_profile_one_published", result.stdout)
+        self.assertIn("tgcurator_enforce_media_profile_version_immutability", result.stdout)
+        self.assertIn("trg_media_profile_version_immutable", result.stdout)
+        self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_m8_downgrade_restores_the_m7_schema(self) -> None:
+        result = self.run_alembic(
+            "downgrade",
+            f"{M8_REVISION}:{M7_REVISION}",
+            "--sql",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DROP TRIGGER trg_media_profile_version_immutable", result.stdout)
+        self.assertIn(
+            "DROP FUNCTION tgcurator_enforce_media_profile_version_immutability()",
+            result.stdout,
+        )
+        self.assertIn("DROP TABLE media_processing_profile_versions", result.stdout)
+        self.assertIn("DROP TABLE media_processing_profiles", result.stdout)
+        self.assertIn("DROP TABLE admin_sessions", result.stdout)
 
     def test_m7_downgrade_restores_the_m6_schema(self) -> None:
         result = self.run_alembic(
