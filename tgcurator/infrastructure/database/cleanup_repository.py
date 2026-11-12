@@ -586,6 +586,9 @@ class SqlAlchemyArchiveCleanupRepository:
                     updated_at=now,
                 )
                 session.add(job)
+                # No ORM relationship orders these independent mappers. Persist the
+                # FK parent first, but keep job/items/wakeup/audit in this transaction.
+                await session.flush()
                 for candidate in candidates:
                     session.add(
                         ArchiveCleanupItemRecord(
