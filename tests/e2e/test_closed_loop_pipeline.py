@@ -892,7 +892,10 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
                     include_text=True,
                     include_media=False,
                 )
-                orchestrator = AnalysisOrchestrator(provider=provider)
+                orchestrator = AnalysisOrchestrator(
+                    provider=provider,
+                    storage_resolver=MappingArchiveStorageResolver({"local": storage}),
+                )
                 prescreen_exec = await orchestrator.execute(
                     stage=prescreen_stage,
                     targets=tuple(
@@ -1008,7 +1011,7 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
                     prompt_version_id="prompt-v2",
                     cache_policy=CachePolicy.ASSET,
                 )
-                prep_v1 = orchestrator.prepare(
+                prep_v1 = await orchestrator.prepare_async(
                     stage=vlm_stage,
                     targets=(
                         AnalysisTargetInput(
@@ -1018,14 +1021,15 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
                             media=(
                                 {
                                     "storage_key": repost_meta.storage_key,
-                                    "sha256": repost_meta.archive_sha256,
+                                    "storage_backend": "local",
+                                    "archive_sha256": repost_meta.archive_sha256,
                                 },
                             ),
                             visual_identity=repost_meta.archive_sha256,
                         ),
                     ),
                 )
-                prep_v2 = orchestrator.prepare(
+                prep_v2 = await orchestrator.prepare_async(
                     stage=vlm_stage_v2,
                     targets=(
                         AnalysisTargetInput(
@@ -1035,7 +1039,8 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
                             media=(
                                 {
                                     "storage_key": repost_meta.storage_key,
-                                    "sha256": repost_meta.archive_sha256,
+                                    "storage_backend": "local",
+                                    "archive_sha256": repost_meta.archive_sha256,
                                 },
                             ),
                             visual_identity=repost_meta.archive_sha256,
@@ -1124,7 +1129,10 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
                             media=(
                                 {
                                     "storage_key": image_store.ready_metadata[aid].storage_key,
-                                    "sha256": image_store.ready_metadata[aid].archive_sha256,
+                                    "storage_backend": "local",
+                                    "archive_sha256": image_store.ready_metadata[
+                                        aid
+                                    ].archive_sha256,
                                 },
                             ),
                             visual_identity=image_store.ready_metadata[aid].archive_sha256,
@@ -1155,7 +1163,8 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
                                     "storage_key": image_store.ready_metadata[
                                         dual_assets[1]
                                     ].storage_key,
-                                    "sha256": image_store.ready_metadata[
+                                    "storage_backend": "local",
+                                    "archive_sha256": image_store.ready_metadata[
                                         dual_assets[1]
                                     ].archive_sha256,
                                 },

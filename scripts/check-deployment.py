@@ -168,7 +168,26 @@ def main() -> None:
                 "-c",
                 "printf smoke-media > /archive/smoke-orphan.bin",
             )
-            compose(env, "up", "-d", "--wait", "api", "web")
+            application_services = (
+                "api",
+                "web",
+                "telegram-ingestor",
+                "scheduler",
+                "worker-media",
+                "worker-analysis",
+                "worker-publish",
+                "worker-maintenance",
+            )
+            compose(env, "up", "-d", "--wait", "--build", *application_services)
+            running = set(compose(env, "ps", "--status", "running", "--services").decode().split())
+            assert running == {"postgres", "redis", *application_services}
+            compose(env, "exec", "-T", "worker-media", "python", "-", data=MEDIA_VERIFY.encode())
+            compose(env, "restart", *application_services)
+            compose(env, "up", "-d", "--wait", *application_services)
+            print(
+                "All ten services started and restarted; real media subprocess checks passed",
+                flush=True,
+            )
             https_port = compose(env, "port", "web", "443").decode().strip().rsplit(":", 1)[1]
             http_port = compose(env, "port", "web", "80").decode().strip().rsplit(":", 1)[1]
             # Keep OS-selected random ports while testing the real nonstandard-port redirect.
@@ -180,7 +199,21 @@ def main() -> None:
             compose(env, "up", "-d", "--wait", "web")
             tls_login(https_port, http_port, cert, admin_password)
             print("TLS verified; Secure cookie login and /auth/me passed", flush=True)
-            compose(env, "stop", "api", "web")
+            compose(env, "stop", *application_services)
+            for service in application_services:
+                container = compose(env, "ps", "--all", "--quiet", service).decode().strip()
+                state = json.loads(run(["docker", "inspect", container], env))[0]["State"]
+                # Modern Uvicorn re-raises SIGTERM after lifespan shutdown.
+                # 143 is normal signal completion; forced SIGKILL (137) is never accepted.
+                allowed = {0, 143} if service == "api" else {0}
+                assert not state["Running"] and state["ExitCode"] in allowed, (
+                    service,
+                    state["ExitCode"],
+                )
+                if service == "api":
+                    logs = compose(env, "logs", "--no-color", "--tail", "80", service).decode()
+                    assert "Application shutdown complete" in logs, "API lifespan did not close"
+            print("SIGTERM stop verified for all application service roles", flush=True)
             env["BACKUP_DIR"] = (work / "backups").as_posix()
             run([BASH, (ROOT / "scripts/backup-postgres.sh").as_posix()], env)
             run([BASH, (ROOT / "scripts/backup-media.sh").as_posix()], env)
@@ -306,6 +339,62 @@ def tls_login(https_port: str, http_port: str, cert: Path, password: str) -> Non
         assert "CERTIFICATE_VERIFY_FAILED" in str(exc), "expected certificate trust failure"
     else:
         raise AssertionError("Local-only test certificate unexpectedly trusted")
+
+
+MEDIA_VERIFY = """
+import asyncio
+import io
+import subprocess
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from PIL import Image
+from tgcurator.infrastructure.media.ffmpeg import (
+    FFmpegVideoFrameExtractor, FFmpegFrameExtractionError,
+)
+
+def verify():
+    root = Path('/var/lib/tgcurator/tmp')
+    with tempfile.TemporaryDirectory(dir=root) as work:
+        source = Path(work) / 'fixture.mp4'
+        subprocess.run([
+            'ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+            '-i', 'color=c=blue:s=96x64:r=5', '-t', '1', '-c:v', 'mpeg4',
+            '-pix_fmt', 'yuv420p', '-y', str(source),
+        ], check=True, stdin=subprocess.DEVNULL, capture_output=True)
+        extractor = FFmpegVideoFrameExtractor(temp_dir=Path(work))
+        async def sample():
+            probe = await extractor.probe(content=source.read_bytes())
+            assert probe.width == 96 and probe.height == 64 and probe.duration_seconds > 0
+            frame = await extractor.extract_frame(content=source.read_bytes(), timestamp_seconds=0)
+            with Image.open(io.BytesIO(frame)) as image:
+                image.load()
+                assert image.size == (96, 64)
+        asyncio.run(sample())
+        # Exercise cancellation of a genuinely running FFmpeg process, not a mocked Popen.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                extractor._run,
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-re', '-f', 'lavfi',
+                 '-i', 'color=c=black:s=16x16:r=5', '-t', '60', '-f', 'null', '-'],
+                stdout_limit=1024, error_type=FFmpegFrameExtractionError,
+            )
+            deadline = time.monotonic() + 10
+            while not extractor._active_processes and time.monotonic() < deadline:
+                time.sleep(.05)
+            assert extractor._active_processes, 'real ffmpeg child never started'
+            assert extractor.terminate_active_processes() == 1
+            try:
+                future.result(timeout=5)
+            except FFmpegFrameExtractionError:
+                pass
+            else:
+                raise AssertionError('cancelled media process unexpectedly succeeded')
+        assert not extractor._active_processes
+    print('PASS: real ffprobe/frame extraction and active FFmpeg child cancellation')
+verify()
+"""
 
 
 SEED = """
