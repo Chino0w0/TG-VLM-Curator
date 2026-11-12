@@ -1,3 +1,4 @@
+import { RecordEditor } from "../components/RecordEditor";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
@@ -364,6 +365,7 @@ export function TelegramIdentitiesWorkspace({
             "Read Source",
             "Native Forward",
             "Copy Publish",
+            "Manage",
           ]}
         >
           {identities.map((idItem) => (
@@ -383,6 +385,14 @@ export function TelegramIdentitiesWorkspace({
               </td>
               <td data-label="Copy Publish">
                 {idItem.capabilities.can_copy_publish ? "Allowed" : "Blocked"}
+              </td>
+              <td data-label="Manage">
+                <span className="badge">{idItem.enabled ? "Enabled" : "Disabled"}</span>
+                <RecordEditor label="Identity" fields={[
+                  {key: "name", label: "Identity Name", value: idItem.name, required: true},
+                  {key: "enabled", label: "Enabled", value: idItem.enabled},
+                  {key: "secret_id", label: "Credential Reference", value: idItem.secret_id, required: true, options: secrets.map(s => ({value: s.secret_id, label: `${s.secret_type} / ${s.secret_id}`}))},
+                ]} onSave={async changes => { await client.updateIdentity(idItem.id, changes); await loadAll(); }} />
               </td>
             </tr>
           ))}

@@ -40,6 +40,13 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export class AdminApiClient {
   private csrfToken: string | null = null;
+  private authEpoch = 0;
+  private readonly unauthorizedListeners = new Set<() => void>();
+
+  onUnauthorized(listener: () => void): () => void {
+    this.unauthorizedListeners.add(listener);
+    return () => { this.unauthorizedListeners.delete(listener); };
+  }
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 
@@ -65,6 +72,7 @@ export class AdminApiClient {
       skipCsrf?: boolean;
     } = {},
   ): Promise<T> {
+    const epoch = this.authEpoch;
     const method = options.method ?? "GET";
     const url = new URL(`${this.baseUrl}${path}`, "http://localhost");
     if (options.params) {
@@ -96,8 +104,9 @@ export class AdminApiClient {
     });
 
     if (!response.ok) {
-      if (response.status === 401) {
+      if (response.status === 401 && epoch === this.authEpoch && !options.skipCsrf) {
         this.csrfToken = null;
+        this.unauthorizedListeners.forEach(listener => listener());
       }
       let code = "http_error";
       let message = `HTTP ${response.status}`;
@@ -129,12 +138,14 @@ export class AdminApiClient {
       body: { username, password },
       skipCsrf: true,
     });
+    this.authEpoch += 1;
     this.csrfToken = session.csrf_token;
     return session;
   }
 
   async currentSession(): Promise<AdminSessionResponse> {
     const session = await this.request<AdminSessionResponse>("/api/v1/auth/me");
+    this.authEpoch += 1;
     this.csrfToken = session.csrf_token;
     return session;
   }
@@ -443,6 +454,8 @@ export class AdminApiClient {
       target_scope: "global" | "media";
       target_kind: string;
       target_id: string;
+      image_asset_id?: string;
+      video_asset_id?: string;
       label_definition_version_id: string;
       label_key: string;
       score?: number;
