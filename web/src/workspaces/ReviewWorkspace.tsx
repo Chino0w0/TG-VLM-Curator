@@ -1,0 +1,651 @@
+import { type FormEvent, useCallback, useEffect, useState } from "react";
+import type { AdminApiClient } from "../api/client";
+import type {
+  ConfigEntity,
+  MessageDetail,
+  MessageSummary,
+  RerouteResult,
+} from "../api/types";
+import { ResponsiveTable } from "../components/ResponsiveTable";
+
+export interface ReviewWorkspaceProps {
+  client: AdminApiClient;
+  selectedMessageId: string | null;
+  onSelectMessageId: (messageId: string) => void;
+}
+
+export function ReviewWorkspace({
+  client,
+  selectedMessageId,
+  onSelectMessageId,
+}: ReviewWorkspaceProps) {
+  const [queueFilter, setQueueFilter] = useState("unreviewed");
+  const [queueItems, setQueueItems] = useState<MessageSummary[]>([]);
+  const [labelDefs, setLabelDefs] = useState<ConfigEntity[]>([]);
+  const [pipelines, setPipelines] = useState<ConfigEntity[]>([]);
+  const [routingPolicies, setRoutingPolicies] = useState<ConfigEntity[]>([]);
+  const [detail, setDetail] = useState<MessageDetail | null>(null);
+
+  // Manual Label Override Form
+  const [operation, setOperation] = useState<"set" | "clear">("set");
+  const [targetScope, setTargetScope] = useState<"global" | "media">("global");
+  const [targetKind, setTargetKind] = useState("message");
+  const [targetId, setTargetId] = useState("");
+  const [labelVersionId, setLabelVersionId] = useState("");
+  const [labelKey, setLabelKey] = useState("");
+  const [score, setScore] = useState("1.0");
+  const [activated, setActivated] = useState(true);
+  const [labelReason, setLabelReason] = useState("");
+
+  // Review Status Form
+  const [nextReviewStatus, setNextReviewStatus] = useState("reviewed");
+  const [reviewReason, setReviewReason] = useState("");
+
+  // Reanalyze & Reroute Forms
+  const [reanalyzePipelineVersionId, setReanalyzePipelineVersionId] =
+    useState("");
+  const [reanalyzeReason, setReanalyzeReason] = useState("");
+  const [reroutePolicyVersionId, setReroutePolicyVersionId] = useState("");
+  const [rerouteReason, setRerouteReason] = useState("");
+  const [reroutePreview, setReroutePreview] = useState<RerouteResult | null>(
+    null,
+  );
+
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const loadQueueAndMetadata = useCallback(async () => {
+    setErrorMsg(null);
+    try {
+      const [page, lbls, pipes, policies] = await Promise.all([
+        client.listMessages(
+          queueFilter ? { review_status: queueFilter } : {},
+          null,
+          25,
+        ),
+        client.listConfigEntities("label-definitions"),
+        client.listConfigEntities("analysis-pipelines"),
+        client.listConfigEntities("routing-policies"),
+      ]);
+      setQueueItems(page.items);
+      setLabelDefs(lbls);
+      setPipelines(pipes);
+      setRoutingPolicies(policies);
+      if (!selectedMessageId && page.items.length > 0) {
+        onSelectMessageId(page.items[0].id);
+      }
+      if (!labelVersionId && lbls.length > 0) {
+        const pub = lbls[0].published_version ?? lbls[0].versions[0];
+        if (pub) {
+          setLabelVersionId(pub.id);
+          setLabelKey(String(pub.content.key ?? lbls[0].name));
+        }
+      }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Failed to load review queue.",
+      );
+    }
+  }, [client, queueFilter, selectedMessageId, onSelectMessageId, labelVersionId]);
+
+  const loadSelectedDetail = useCallback(
+    async (msgId: string) => {
+      if (!msgId) return;
+      try {
+        const loaded = await client.getMessageDetail(msgId);
+        setDetail(loaded);
+        if (targetScope === "global") {
+          setTargetKind("message");
+          setTargetId(loaded.message.id);
+        }
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : "Failed to load selected message for review.",
+        );
+      }
+    },
+    [client, targetScope],
+  );
+
+  useEffect(() => {
+    void loadQueueAndMetadata();
+  }, [loadQueueAndMetadata]);
+
+  useEffect(() => {
+    if (selectedMessageId) {
+      setReroutePreview(null);
+      void loadSelectedDetail(selectedMessageId);
+    }
+  }, [selectedMessageId, loadSelectedDetail]);
+
+  async function handleManualLabelSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!detail) return;
+    setErrorMsg(null);
+    setStatusMsg(null);
+    try {
+      await client.applyManualLabel(detail.message.id, {
+        operation,
+        target_scope: targetScope,
+        target_kind: targetKind,
+        target_id: targetId || detail.message.id,
+        label_definition_version_id: labelVersionId,
+        label_key: labelKey.trim(),
+        score: operation === "set" ? Number(score) : undefined,
+        activated: operation === "set" ? activated : undefined,
+        reason: labelReason.trim() || undefined,
+      });
+      setStatusMsg(
+        `Append-only manual label event (${operation} ${labelKey}) recorded; ModelLabelAssignment preserved untouched.`,
+      );
+      await loadSelectedDetail(detail.message.id);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Failed to apply manual label.",
+      );
+    }
+  }
+
+  async function handleReviewTransition(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!detail) return;
+    setErrorMsg(null);
+    setStatusMsg(null);
+    try {
+      await client.transitionReviewStatus(
+        detail.message.id,
+        nextReviewStatus,
+        reviewReason.trim() || undefined,
+      );
+      setStatusMsg(`Review status updated to '${nextReviewStatus}'.`);
+      await Promise.all([
+        loadSelectedDetail(detail.message.id),
+        loadQueueAndMetadata(),
+      ]);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Failed to transition review status.",
+      );
+    }
+  }
+
+  async function handleReanalyze(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!detail) return;
+    setErrorMsg(null);
+    setStatusMsg(null);
+    try {
+      await client.reanalyzeMessage(detail.message.id, {
+        pipeline_version_id: reanalyzePipelineVersionId || undefined,
+        reason: reanalyzeReason.trim() || undefined,
+      });
+      setStatusMsg(
+        "Explicit Reanalysis triggered without overwriting manual overrides.",
+      );
+      await loadSelectedDetail(detail.message.id);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Failed to trigger reanalysis.",
+      );
+    }
+  }
+
+  async function runReroute(dryRun: boolean) {
+    if (!detail) return;
+    setErrorMsg(null);
+    setStatusMsg(null);
+    try {
+      const result = await client.rerouteMessage(detail.message.id, {
+        routing_policy_version_id: reroutePolicyVersionId || undefined,
+        dry_run: dryRun,
+        reason: rerouteReason.trim() || undefined,
+      });
+      setReroutePreview(result);
+      setStatusMsg(
+        dryRun
+          ? `Dry-Run Re-route evaluated: ${result.comparison.added_destinations.length} added destination(s); existing PublishRecords untouched.`
+          : `Formal Re-route executed: ${result.comparison.added_destinations.length} incremental destination(s) queued.`,
+      );
+      if (!dryRun) {
+        await loadSelectedDetail(detail.message.id);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Re-route failed.");
+    }
+  }
+
+  return (
+    <section aria-labelledby="review-heading">
+      <div className="workspace-header">
+        <div>
+          <h1 id="review-heading">Human Review &amp; Label Override</h1>
+          <p className="workspace-subtitle">
+            Append-only GLOBAL &amp; MEDIA manual label overrides (preserving
+            raw ModelLabelAssignments), review status workflow, explicit
+            reanalysis, and incremental re-route destination diffs.
+          </p>
+        </div>
+        <div className="btn-row">
+          <label htmlFor="review-queue-select">Queue:</label>
+          <select
+            id="review-queue-select"
+            value={queueFilter}
+            onChange={(e) => setQueueFilter(e.target.value)}
+          >
+            <option value="unreviewed">unreviewed</option>
+            <option value="needs_attention">needs_attention</option>
+            <option value="in_review">in_review</option>
+            <option value="reviewed">reviewed</option>
+            <option value="">All messages</option>
+          </select>
+        </div>
+      </div>
+
+      {errorMsg ? (
+        <div role="alert" className="alert-banner alert-error">
+          {errorMsg}
+        </div>
+      ) : null}
+      {statusMsg ? (
+        <div role="status" className="alert-banner alert-info">
+          {statusMsg}
+        </div>
+      ) : null}
+
+      <div className="panel">
+        <h2>Review Queue ({queueItems.length})</h2>
+        <ResponsiveTable
+          caption="Messages available for human review"
+          headers={["TG Msg ID", "Review Status", "Excerpt", "Action"]}
+        >
+          {queueItems.map((item) => (
+            <tr key={item.id}>
+              <th scope="row">#{item.primary_telegram_message_id}</th>
+              <td data-label="Review Status">
+                <span className="badge">{item.review_status}</span>
+              </td>
+              <td data-label="Excerpt">
+                {item.original_text?.slice(0, 70) ?? "(media-only)"}
+              </td>
+              <td data-label="Action">
+                <button
+                  type="button"
+                  className={
+                    item.id === selectedMessageId
+                      ? "btn btn-primary"
+                      : "btn"
+                  }
+                  onClick={() => onSelectMessageId(item.id)}
+                >
+                  {item.id === selectedMessageId ? "Inspecting" : "Select"}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </ResponsiveTable>
+      </div>
+
+      {detail ? (
+        <>
+          <div className="card-grid">
+            {/* Layered Labels View */}
+            <div className="panel">
+              <h2>
+                Active Message #{detail.message.primary_telegram_message_id}
+              </h2>
+              <p className="stat-meta">
+                Review Status:{" "}
+                <span className="badge badge-accent">
+                  {detail.message.review_status}
+                </span>
+              </p>
+              <h3>Model Labels (Never Overwritten)</h3>
+              <pre className="code-block">
+                {JSON.stringify(detail.labels.namespaces.model, null, 2)}
+              </pre>
+              <h3>Effective Labels (Manual ?? Model)</h3>
+              <pre className="code-block">
+                {JSON.stringify(detail.labels.namespaces.effective, null, 2)}
+              </pre>
+            </div>
+
+            {/* Append-Only Manual Label Form */}
+            <div className="panel">
+              <h2 id="manual-label-form-title">
+                Append-Only Manual Label Override
+              </h2>
+              <form
+                method="post"
+                aria-labelledby="manual-label-form-title"
+                onSubmit={handleManualLabelSubmit}
+              >
+                <div className="form-grid">
+                  <div className="field">
+                    <label htmlFor="rev-op">Operation</label>
+                    <select
+                      id="rev-op"
+                      value={operation}
+                      onChange={(e) =>
+                        setOperation(e.target.value as "set" | "clear")
+                      }
+                    >
+                      <option value="set">set (override)</option>
+                      <option value="clear">
+                        clear (revert to model output)
+                      </option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="rev-scope">Target Scope</label>
+                    <select
+                      id="rev-scope"
+                      value={targetScope}
+                      onChange={(e) => {
+                        const nextScope = e.target.value as "global" | "media";
+                        setTargetScope(nextScope);
+                        if (nextScope === "global") {
+                          setTargetKind("message");
+                          setTargetId(detail.message.id);
+                        } else if (detail.media.images[0]) {
+                          setTargetKind("image_asset");
+                          setTargetId(detail.media.images[0].id);
+                        }
+                      }}
+                    >
+                      <option value="global">global (message)</option>
+                      <option value="media">media (per-asset)</option>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="rev-target-id">Target ID *</label>
+                    <input
+                      id="rev-target-id"
+                      type="text"
+                      required
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={targetId}
+                      onChange={(e) => setTargetId(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="rev-label-def">
+                      Label Definition Version *
+                    </label>
+                    {labelDefs.length > 0 ? (
+                      <select
+                        id="rev-label-def"
+                        value={labelVersionId}
+                        onChange={(e) => {
+                          setLabelVersionId(e.target.value);
+                          for (const ent of labelDefs) {
+                            const found = ent.versions.find(
+                              (v) => v.id === e.target.value,
+                            );
+                            if (found) {
+                              setLabelKey(
+                                String(found.content.key ?? ent.name),
+                              );
+                            }
+                          }
+                        }}
+                      >
+                        {labelDefs.flatMap((ent) =>
+                          ent.versions.map((ver) => (
+                            <option key={ver.id} value={ver.id}>
+                              {ent.name} v{ver.version_number} ({ver.state})
+                            </option>
+                          )),
+                        )}
+                      </select>
+                    ) : (
+                      <input
+                        id="rev-label-def"
+                        type="text"
+                        required
+                        value={labelVersionId}
+                        onChange={(e) => setLabelVersionId(e.target.value)}
+                      />
+                    )}
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="rev-label-key">Label Key *</label>
+                    <input
+                      id="rev-label-key"
+                      type="text"
+                      required
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={labelKey}
+                      onChange={(e) => setLabelKey(e.target.value)}
+                    />
+                  </div>
+
+                  {operation === "set" ? (
+                    <div className="field">
+                      <label htmlFor="rev-score">Score (0.0 – 1.0)</label>
+                      <input
+                        id="rev-score"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={score}
+                        onChange={(e) => setScore(e.target.value)}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+
+                {operation === "set" ? (
+                  <div className="field-inline">
+                    <input
+                      id="rev-activated"
+                      type="checkbox"
+                      checked={activated}
+                      onChange={(e) => setActivated(e.target.checked)}
+                    />
+                    <label htmlFor="rev-activated">Label Activated</label>
+                  </div>
+                ) : null}
+
+                <div className="field">
+                  <label htmlFor="rev-label-reason">Override Reason</label>
+                  <input
+                    id="rev-label-reason"
+                    type="text"
+                    value={labelReason}
+                    onChange={(e) => setLabelReason(e.target.value)}
+                  />
+                </div>
+
+                <button type="submit" className="btn btn-primary">
+                  Record Manual Label Event
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div className="card-grid">
+            {/* Review Status & Explicit Reanalysis */}
+            <div className="panel">
+              <h2>Review Status &amp; Explicit Reanalysis</h2>
+              <form method="post" onSubmit={handleReviewTransition}>
+                <div className="form-grid">
+                  <div className="field">
+                    <label htmlFor="rev-next-status">New Review Status</label>
+                    <select
+                      id="rev-next-status"
+                      value={nextReviewStatus}
+                      onChange={(e) => setNextReviewStatus(e.target.value)}
+                    >
+                      <option value="unreviewed">unreviewed</option>
+                      <option value="in_review">in_review</option>
+                      <option value="reviewed">reviewed</option>
+                      <option value="needs_attention">needs_attention</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="rev-status-reason">Transition Note</label>
+                    <input
+                      id="rev-status-reason"
+                      type="text"
+                      value={reviewReason}
+                      onChange={(e) => setReviewReason(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <button type="submit" className="btn btn-primary">
+                  Update Review Status
+                </button>
+              </form>
+
+              <hr
+                style={{
+                  borderColor: "var(--border)",
+                  marginBlock: "1.1rem",
+                }}
+              />
+
+              <form method="post" onSubmit={handleReanalyze}>
+                <h3>Trigger Explicit Reanalysis</h3>
+                <div className="form-grid">
+                  <div className="field">
+                    <label htmlFor="rev-reanalyze-pipe">
+                      Pipeline Version (optional override)
+                    </label>
+                    <select
+                      id="rev-reanalyze-pipe"
+                      value={reanalyzePipelineVersionId}
+                      onChange={(e) =>
+                        setReanalyzePipelineVersionId(e.target.value)
+                      }
+                    >
+                      <option value="">Active channel pipeline</option>
+                      {pipelines.flatMap((p) =>
+                        p.versions
+                          .filter((v) => v.state === "published")
+                          .map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {p.name} v{v.version_number}
+                            </option>
+                          )),
+                      )}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="rev-reanalyze-reason">Reason</label>
+                    <input
+                      id="rev-reanalyze-reason"
+                      type="text"
+                      value={reanalyzeReason}
+                      onChange={(e) => setReanalyzeReason(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <button type="submit" className="btn">
+                  Trigger Reanalysis
+                </button>
+              </form>
+            </div>
+
+            {/* Re-route Dry-Run & Incremental Execution */}
+            <div className="panel">
+              <h2>Re-route &amp; Destination Diff</h2>
+              <p className="hint">
+                Dry-run previews destination diffs without creating intents;
+                formal re-route queues only newly added destinations and never
+                deletes prior PublishRecords.
+              </p>
+              <div className="form-grid">
+                <div className="field">
+                  <label htmlFor="rev-reroute-policy">
+                    Routing Policy Version
+                  </label>
+                  <select
+                    id="rev-reroute-policy"
+                    value={reroutePolicyVersionId}
+                    onChange={(e) => setReroutePolicyVersionId(e.target.value)}
+                  >
+                    <option value="">Active channel routing policy</option>
+                    {routingPolicies.flatMap((rp) =>
+                      rp.versions
+                        .filter((v) => v.state === "published")
+                        .map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {rp.name} v{v.version_number}
+                          </option>
+                        )),
+                    )}
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="rev-reroute-reason">Reason</label>
+                  <input
+                    id="rev-reroute-reason"
+                    type="text"
+                    value={rerouteReason}
+                    onChange={(e) => setRerouteReason(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void runReroute(true)}
+                >
+                  Preview Dry-Run Re-route
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void runReroute(false)}
+                >
+                  Execute Formal Re-route
+                </button>
+              </div>
+
+              {reroutePreview ? (
+                <div style={{ marginBlockStart: "1rem" }}>
+                  <p className="stat-meta">
+                    Mode:{" "}
+                    <span className="badge">
+                      {reroutePreview.dry_run ? "DRY-RUN" : "FORMAL"}
+                    </span>{" "}
+                    | Existing Destinations:{" "}
+                    <strong className="mono">
+                      {reroutePreview.comparison.existing_destinations.join(
+                        ", ",
+                      ) || "none"}
+                    </strong>{" "}
+                    | Newly Added Destinations:{" "}
+                    <strong className="mono">
+                      {reroutePreview.comparison.added_destinations.join(
+                        ", ",
+                      ) || "none"}
+                    </strong>
+                  </p>
+                  <pre className="code-block">
+                    {JSON.stringify(reroutePreview, null, 2)}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </>
+      ) : null}
+    </section>
+  );
+}

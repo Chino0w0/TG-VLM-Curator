@@ -20,11 +20,34 @@ Remote: https://github.com/Chino0w0/TG-VLM-Curator
 - M6 (`module/m6-publication-lifecycle`) is open as PR #27 (`2163124`).
 - M7 (`module/m7-pipeline-orchestration`) is open as PR #28 (`0f82278`), stacked on
   `module/m6-publication-lifecycle`.
-- M8 (`module/m8-admin-api`) is stacked on `module/m7-pipeline-orchestration` and delivers the
-  complete FastAPI administration HTTP API, Argon2id session authentication + CSRF enforcement,
-  write-only secret rotation, all 10 versioned configuration lifecycles, isolated Prompt Test Bench,
-  cursor-paginated causal message/review/reroute/cleanup endpoints, and Prometheus `/metrics`.
-- M9 and M10 remain in tg-vlm-curator-module-implementation.md.
+- M8 (`module/m8-admin-api`) is open as PR #29 (`6b086aa`), stacked on
+  `module/m7-pipeline-orchestration`.
+- M9 (`module/m9-web-admin`) is stacked on `module/m8-admin-api` and delivers the complete React +
+  TypeScript + Vite single-administrator web console under `web/` across all architectural
+  workspaces, backed by strict `tsc --noEmit`, Vitest + Testing Library component tests, and Vite
+  production builds.
+- M10 remains in tg-vlm-curator-module-implementation.md.
+
+## M9 completed scope
+
+M9 implements the browser administration console (`web/`) over `/api/v1/*`:
+
+- Typed HTTP client & session security (`web/src/api/types.ts`, `web/src/api/client.ts`,
+  `web/src/components/LoginView.tsx`): `credentials: "include"` cookie propagation, automatic
+  `X-CSRF-Token` header attachment on mutating requests, autofill-compliant login controls, and
+  explicit session logout.
+- Reusable UI primitives (`web/src/components/ResponsiveTable.tsx`, `ModalDialog.tsx`, `Tabs.tsx`,
+  `web/src/styles/app.css`): keyboard-focusable container-query responsive tables, native modal
+  `<dialog>` with safe destructive focus defaults, accessible tablists, and `:user-invalid` forms.
+- All workspaces (`web/src/workspaces/`): `DashboardWorkspace`, `SourceChannelsWorkspace`,
+  `ProcessingRangesWorkspace`, `TelegramIdentitiesWorkspace` (write-only secrets that immediately
+  scrub plaintext), `MessagesWorkspace` (16 filters + cursor pagination),
+  `MessageDetailWorkspace` (6-stage causal chain inspector + audited skip), `ReviewWorkspace`
+  (append-only manual overrides + dry-run/formal re-route diffs), `AnalysisConfigWorkspace`
+  (immutable published versions + clone-to-draft + `Prompt Test Bench`), `RoutingWorkspace`,
+  `ArchiveManagementWorkspace` (two-step `Dry-Run -> Confirm` lock invalidated on any filter edit),
+  `OperationsWorkspace` (targeted step retry), and `AuditLogWorkspace`.
+- Automated Vitest + Testing Library suite (`web/src/__tests__/app.test.tsx`).
 
 ## M8 completed scope
 
@@ -127,8 +150,6 @@ and publication settlement into one continuous PostgreSQL-backed lifecycle:
 
 ## Next modules
 
-- M9 (`module/m9-web-admin`): React + TypeScript + Vite single-administrator web console covering
-  all 11 architectural workspaces.
 - M10 (`module/m10-deployment-and-operations`): Docker Compose 10-service topology, graceful
   daemon lifecycles, backup/restore scripts, storage consistency scanner, and closed-loop E2E
   verification.
