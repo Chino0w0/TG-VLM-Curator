@@ -834,3 +834,51 @@ class M8PostgresRegressions(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 [a.status for a in attempts], ["retry_wait", "failed", "retry_wait", "failed"]
             )
+
+    async def test_cleanup_estimate_and_confirmation_match_real_domain_result_contract(self):
+        mid = await self.message()
+        asset_id = uuid4()
+        async with self.db.session() as session, session.begin():
+            session.add(
+                m.ImageAssetRecord(
+                    id=asset_id,
+                    message_id=mid,
+                    source_asset_id="cleanup-review",
+                    archive_state="ready",
+                    storage_backend="local",
+                    storage_key="cleanup-review.webp",
+                    content_type="image/webp",
+                    width=10,
+                    height=10,
+                    source_sha256="a" * 64,
+                    archive_sha256="b" * 64,
+                    perceptual_hash="0" * 16,
+                    archive_size_bytes=123,
+                    archive_ready_at=NOW,
+                )
+            )
+        dry_run = await self.backend.create_cleanup_dry_run(
+            filter_payload={"media_types": ["image"]},
+            actor_admin_user_id=str(self.admin),
+            now=NOW,
+        )
+        self.assertEqual(dry_run["estimated_asset_count"], 1)
+        self.assertEqual(dry_run["estimated_message_count"], 1)
+        self.assertEqual(dry_run["estimated_bytes"], 123)
+        job = await self.backend.confirm_cleanup_job(
+            dry_run_id=dry_run["id"],
+            expected_filter_hash=dry_run["filter_hash"],
+            actor_admin_user_id=str(self.admin),
+            now=NOW,
+        )
+        self.assertEqual(job["confirmed_by_admin_user_id"], str(self.admin))
+        self.assertEqual(job["item_count"], 1)
+        self.assertEqual(job["estimated_asset_count"], 1)
+        self.assertEqual(job["estimated_message_count"], 1)
+        self.assertEqual(job["estimated_bytes"], 123)
+        stored = await self.backend.get_cleanup_job(job_id=job["id"])
+        self.assertEqual(stored["estimated_bytes"], 123)
+        # Queueing is tested; no cleanup worker or external blob is touched.
+        async with self.db.session() as session:
+            asset = await session.get(m.ImageAssetRecord, asset_id)
+            self.assertEqual(asset.archive_state, "ready")
