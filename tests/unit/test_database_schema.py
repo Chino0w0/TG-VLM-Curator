@@ -63,13 +63,14 @@ M6_TABLES = {
     "publish_attempts",
     "publish_records",
 }
+M7_TABLES = {"duplicate_matches"}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
-    def test_schema_contains_exactly_the_documented_m1_through_m6_tables(self) -> None:
+    def test_schema_contains_exactly_the_documented_m1_through_m7_tables(self) -> None:
         self.assertEqual(
             set(Base.metadata.tables),
-            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES,
+            M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES | M7_TABLES,
         )
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:
@@ -515,6 +516,47 @@ class DatabaseSchemaTests(unittest.TestCase):
             for index in table.indexes:
                 if index.name is not None:
                     self.assertLessEqual(len(str(index.name)), 63)
+
+    def test_m7_deduplication_and_watermark_terminal_state_constraints_are_explicit(self) -> None:
+        message = Base.metadata.tables["messages"]
+        for column_name in (
+            "canonical_message_id",
+            "duplicate_status",
+            "duplicate_distance",
+            "terminal_reason",
+            "failure_stage",
+            "last_error_code",
+        ):
+            self.assertIn(column_name, message.c)
+        message_constraints = {str(c.name) for c in message.constraints}
+        self.assertTrue(
+            {
+                "ck_messages_message_duplicate_status",
+                "ck_messages_message_duplicate_canonical_state",
+                "ck_messages_message_terminal_reason_state",
+                "ck_messages_message_failure_stage_state",
+            }.issubset(message_constraints)
+        )
+        message_indexes = {idx.name for idx in message.indexes}
+        self.assertTrue(
+            {"ix_messages_source_primary_status", "ix_messages_visual_fingerprint"}.issubset(
+                message_indexes
+            )
+        )
+
+        dup = Base.metadata.tables["duplicate_matches"]
+        dup_constraints = {str(c.name) for c in dup.constraints}
+        self.assertTrue(
+            {
+                "ck_duplicate_matches_duplicate_match_not_self",
+                "ck_duplicate_matches_duplicate_match_kind",
+                "ck_duplicate_matches_duplicate_match_distance",
+                "ck_duplicate_matches_duplicate_match_policy",
+                "uq_duplicate_matches_message",
+            }.issubset(dup_constraints)
+        )
+        self.assertIn("ix_duplicate_matches_canonical", {idx.name for idx in dup.indexes})
+        self.assertTrue(dup.c.created_at.type.timezone)
 
 
 if __name__ == "__main__":

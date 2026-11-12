@@ -246,107 +246,126 @@ class SqlAlchemyAnalysisStageRunRepository:
         stage_run_id = UUID(claim.stage_run_id)
         lease_token = UUID(claim.lease_token)
         async with self._database.session() as session:
-            result = await session.execute(
-                select(
-                    StageRunRecord,
-                    AnalysisRunRecord,
-                    MessageRecord,
-                    SourceChannel,
-                    AnalysisStageTemplateVersionRecord,
-                    PromptTemplateVersionRecord,
-                    LabelSetVersionRecord,
-                    InferenceProfileVersionRecord,
-                )
-                .join(AnalysisRunRecord, AnalysisRunRecord.id == StageRunRecord.analysis_run_id)
-                .join(MessageRecord, MessageRecord.id == StageRunRecord.message_id)
-                .join(SourceChannel, SourceChannel.id == MessageRecord.source_channel_id)
-                .join(
-                    AnalysisStageTemplateVersionRecord,
-                    AnalysisStageTemplateVersionRecord.id
-                    == StageRunRecord.analysis_stage_template_version_id,
-                )
-                .join(
-                    PromptTemplateVersionRecord,
-                    PromptTemplateVersionRecord.id
-                    == AnalysisStageTemplateVersionRecord.prompt_template_version_id,
-                )
-                .join(
-                    LabelSetVersionRecord,
-                    LabelSetVersionRecord.id
-                    == AnalysisStageTemplateVersionRecord.label_set_version_id,
-                )
-                .join(
-                    InferenceProfileVersionRecord,
-                    InferenceProfileVersionRecord.id
-                    == AnalysisStageTemplateVersionRecord.inference_profile_version_id,
-                )
-                .where(
-                    StageRunRecord.id == stage_run_id,
-                    StageRunRecord.status == "running",
-                    StageRunRecord.lease_token == lease_token,
-                )
-            )
-            selected = result.one_or_none()
-            if selected is None:
-                raise DomainValidationError("analysis stage run lease is no longer active")
-            (
-                stage_run,
-                analysis_run,
-                message,
-                source_channel,
-                stage_version,
-                prompt_version,
-                label_set_version,
-                inference_profile_version,
-            ) = selected
-
-            bindings = tuple(
-                await session.execute(
-                    select(LabelBindingRecord, LabelDefinitionVersionRecord)
-                    .join(
-                        LabelDefinitionVersionRecord,
-                        LabelDefinitionVersionRecord.id
-                        == LabelBindingRecord.label_definition_version_id,
+            async with session.begin():
+                result = await session.execute(
+                    select(
+                        StageRunRecord,
+                        AnalysisRunRecord,
+                        MessageRecord,
+                        SourceChannel,
+                        AnalysisStageTemplateVersionRecord,
+                        PromptTemplateVersionRecord,
+                        LabelSetVersionRecord,
+                        InferenceProfileVersionRecord,
                     )
-                    .where(LabelBindingRecord.label_set_version_id == label_set_version.id)
-                    .order_by(LabelBindingRecord.output_order, LabelBindingRecord.id)
+                    .join(AnalysisRunRecord, AnalysisRunRecord.id == StageRunRecord.analysis_run_id)
+                    .join(MessageRecord, MessageRecord.id == StageRunRecord.message_id)
+                    .join(SourceChannel, SourceChannel.id == MessageRecord.source_channel_id)
+                    .join(
+                        AnalysisStageTemplateVersionRecord,
+                        AnalysisStageTemplateVersionRecord.id
+                        == StageRunRecord.analysis_stage_template_version_id,
+                    )
+                    .join(
+                        PromptTemplateVersionRecord,
+                        PromptTemplateVersionRecord.id
+                        == AnalysisStageTemplateVersionRecord.prompt_template_version_id,
+                    )
+                    .join(
+                        LabelSetVersionRecord,
+                        LabelSetVersionRecord.id
+                        == AnalysisStageTemplateVersionRecord.label_set_version_id,
+                    )
+                    .join(
+                        InferenceProfileVersionRecord,
+                        InferenceProfileVersionRecord.id
+                        == AnalysisStageTemplateVersionRecord.inference_profile_version_id,
+                    )
+                    .where(
+                        StageRunRecord.id == stage_run_id,
+                        StageRunRecord.status == "running",
+                        StageRunRecord.lease_token == lease_token,
+                    )
                 )
-            )
-            stage = _stage_from_records(
-                stage=stage_version,
-                prompt=prompt_version,
-                label_set=label_set_version,
-                inference_profile=inference_profile_version,
-                bindings=bindings,
-            )
-            media, visual_identity = await _load_media_snapshot(
-                session=session,
-                stage_run=stage_run,
-                message=message,
-            )
-            previous_results = await _load_previous_results(
-                session=session,
-                stage_run=stage_run,
-                facts_snapshot=analysis_run.facts_snapshot,
-            )
+                selected = result.one_or_none()
+                if selected is None:
+                    raise DomainValidationError("analysis stage run lease is no longer active")
+                (
+                    stage_run,
+                    analysis_run,
+                    message,
+                    source_channel,
+                    stage_version,
+                    prompt_version,
+                    label_set_version,
+                    inference_profile_version,
+                ) = selected
 
-        target = AnalysisTargetSnapshot(
-            stage_run_id=str(stage_run.id),
-            lease_token=claim.lease_token,
-            target_id=str(stage_run.target_id),
-            message_id=str(stage_run.message_id),
-            target_kind=stage_run.target_kind,
-            asset_id=(str(stage_run.target_id) if stage_run.target_kind != "message" else None),
-            text=message.original_text,
-            telegram_metadata=sanitize_json(message.telegram_metadata),
-            media=media,
-            previous_results=previous_results,
-            visual_identity=visual_identity,
-        )
+                bindings = tuple(
+                    await session.execute(
+                        select(LabelBindingRecord, LabelDefinitionVersionRecord)
+                        .join(
+                            LabelDefinitionVersionRecord,
+                            LabelDefinitionVersionRecord.id
+                            == LabelBindingRecord.label_definition_version_id,
+                        )
+                        .where(LabelBindingRecord.label_set_version_id == label_set_version.id)
+                        .order_by(LabelBindingRecord.output_order, LabelBindingRecord.id)
+                    )
+                )
+                stage = _stage_from_records(
+                    stage=stage_version,
+                    prompt=prompt_version,
+                    label_set=label_set_version,
+                    inference_profile=inference_profile_version,
+                    bindings=bindings,
+                )
+                media, visual_identity = await _load_media_snapshot(
+                    session=session,
+                    stage_run=stage_run,
+                    message=message,
+                )
+                previous_results = await _load_previous_results(
+                    session=session,
+                    stage_run=stage_run,
+                    facts_snapshot=analysis_run.facts_snapshot,
+                )
+
+                primary_target = AnalysisTargetSnapshot(
+                    stage_run_id=str(stage_run.id),
+                    lease_token=claim.lease_token,
+                    target_id=str(stage_run.target_id),
+                    message_id=str(stage_run.message_id),
+                    target_kind=stage_run.target_kind,
+                    asset_id=(
+                        str(stage_run.target_id) if stage_run.target_kind != "message" else None
+                    ),
+                    text=message.original_text,
+                    telegram_metadata=sanitize_json(message.telegram_metadata),
+                    media=media,
+                    previous_results=previous_results,
+                    visual_identity=visual_identity,
+                    analysis_run_id=str(stage_run.analysis_run_id),
+                )
+                batch_targets = [primary_target]
+                if stage.max_batch_size > 1 and stage.execution_mode in (
+                    ExecutionMode.BATCH_MESSAGES,
+                    ExecutionMode.BATCH_ASSETS,
+                ):
+                    coleased = await _colease_batch_targets(
+                        session=session,
+                        primary_stage_run=stage_run,
+                        primary_analysis_run=analysis_run,
+                        primary_message=message,
+                        source_channel_id=source_channel.id,
+                        stage=stage,
+                    )
+                    batch_targets.extend(coleased)
+
         return AnalysisStageSnapshot(
             claim=claim,
             stage=stage,
-            targets=(target,),
+            targets=tuple(batch_targets),
             source_channel_context={
                 "source_channel_id": str(source_channel.id),
                 "telegram_peer_id": source_channel.telegram_peer_id,
@@ -1159,6 +1178,204 @@ def _stage_from_records(
         max_concurrency=stage.max_concurrency,
         status=VersionStatus(stage.state),
     )
+
+
+async def _colease_batch_targets(
+    *,
+    session: AsyncSession,
+    primary_stage_run: StageRunRecord,
+    primary_analysis_run: AnalysisRunRecord,
+    primary_message: MessageRecord,
+    source_channel_id: UUID,
+    stage: AnalysisStageTemplateVersion,
+) -> tuple[AnalysisTargetSnapshot, ...]:
+    remaining_slots = max(0, stage.max_batch_size - 1)
+    if remaining_slots == 0:
+        return ()
+    lease_expires_at = primary_stage_run.lease_expires_at
+    now_ref = primary_stage_run.updated_at
+
+    coleased: list[AnalysisTargetSnapshot] = []
+    if stage.execution_mode is ExecutionMode.BATCH_ASSETS:
+        node_pred = (
+            StageRunRecord.pipeline_stage_node_id.is_(None)
+            if primary_stage_run.pipeline_stage_node_id is None
+            else (StageRunRecord.pipeline_stage_node_id == primary_stage_run.pipeline_stage_node_id)
+        )
+        siblings = tuple(
+            await session.scalars(
+                select(StageRunRecord)
+                .where(
+                    StageRunRecord.id != primary_stage_run.id,
+                    StageRunRecord.analysis_run_id == primary_stage_run.analysis_run_id,
+                    StageRunRecord.analysis_stage_template_version_id
+                    == primary_stage_run.analysis_stage_template_version_id,
+                    node_pred,
+                    StageRunRecord.status == "pending",
+                    StageRunRecord.attempt_count < StageRunRecord.max_attempts,
+                )
+                .order_by(StageRunRecord.created_at, StageRunRecord.id)
+                .limit(remaining_slots)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        for sib in siblings:
+            if sib.target_kind in ("image_asset", "video_asset"):
+                asset = await session.scalar(
+                    analysis_target_asset_lock_statement(
+                        target_kind=sib.target_kind,
+                        asset_id=sib.target_id,
+                    )
+                )
+                if asset is None:
+                    continue
+            sib_token = uuid4()
+            sib.status = "running"
+            sib.attempt_count += 1
+            sib.next_retry_at = None
+            sib.lease_token = sib_token
+            sib.lease_expires_at = lease_expires_at
+            sib.started_at = sib.started_at or now_ref
+            sib.updated_at = now_ref
+            media, visual_identity = await _load_media_snapshot(
+                session=session,
+                stage_run=sib,
+                message=primary_message,
+            )
+            previous_results = await _load_previous_results(
+                session=session,
+                stage_run=sib,
+                facts_snapshot=primary_analysis_run.facts_snapshot,
+            )
+            coleased.append(
+                AnalysisTargetSnapshot(
+                    stage_run_id=str(sib.id),
+                    lease_token=str(sib_token),
+                    target_id=str(sib.target_id),
+                    message_id=str(sib.message_id),
+                    target_kind=sib.target_kind,
+                    asset_id=(str(sib.target_id) if sib.target_kind != "message" else None),
+                    text=primary_message.original_text,
+                    telegram_metadata=sanitize_json(primary_message.telegram_metadata),
+                    media=media,
+                    previous_results=previous_results,
+                    visual_identity=visual_identity,
+                    analysis_run_id=str(sib.analysis_run_id),
+                )
+            )
+        return tuple(coleased)
+
+    if stage.execution_mode is ExecutionMode.BATCH_MESSAGES:
+        node_pred = (
+            StageRunRecord.pipeline_stage_node_id.is_(None)
+            if primary_stage_run.pipeline_stage_node_id is None
+            else (StageRunRecord.pipeline_stage_node_id == primary_stage_run.pipeline_stage_node_id)
+        )
+        rows = tuple(
+            await session.execute(
+                select(StageRunRecord, AnalysisRunRecord, MessageRecord)
+                .join(
+                    AnalysisRunRecord,
+                    AnalysisRunRecord.id == StageRunRecord.analysis_run_id,
+                )
+                .join(MessageRecord, MessageRecord.id == StageRunRecord.message_id)
+                .where(
+                    StageRunRecord.id != primary_stage_run.id,
+                    StageRunRecord.analysis_stage_template_version_id
+                    == primary_stage_run.analysis_stage_template_version_id,
+                    node_pred,
+                    StageRunRecord.target_kind == "message",
+                    StageRunRecord.status == "pending",
+                    StageRunRecord.attempt_count < StageRunRecord.max_attempts,
+                    AnalysisRunRecord.run_mode == primary_analysis_run.run_mode,
+                    AnalysisRunRecord.status.not_in(_TERMINAL_RUN_STATUSES),
+                    MessageRecord.source_channel_id == source_channel_id,
+                    MessageRecord.blocked_from_analysis.is_(False),
+                )
+                .order_by(
+                    MessageRecord.primary_telegram_message_id,
+                    StageRunRecord.created_at,
+                    StageRunRecord.id,
+                )
+                .limit(remaining_slots * 2)
+                .with_for_update(of=StageRunRecord, skip_locked=True)
+            )
+        )
+        seen_messages = {primary_stage_run.message_id}
+        for sib, sib_run, sib_msg in rows:
+            if len(coleased) >= remaining_slots:
+                break
+            if sib.message_id in seen_messages:
+                continue
+            locked_run = await session.scalar(
+                select(AnalysisRunRecord)
+                .where(AnalysisRunRecord.id == sib_run.id)
+                .with_for_update()
+            )
+            if locked_run is None or locked_run.status in _TERMINAL_RUN_STATUSES:
+                continue
+            if stage.input_policy.media:
+                non_ready_img = await session.scalar(
+                    select(ImageAssetRecord.id)
+                    .where(
+                        ImageAssetRecord.message_id == sib_msg.id,
+                        ImageAssetRecord.archive_state != "ready",
+                    )
+                    .limit(1)
+                )
+                non_ready_vid = await session.scalar(
+                    select(VideoAssetRecord.id)
+                    .where(
+                        VideoAssetRecord.message_id == sib_msg.id,
+                        VideoAssetRecord.archive_state != "ready",
+                    )
+                    .limit(1)
+                )
+                if non_ready_img is not None or non_ready_vid is not None:
+                    continue
+            seen_messages.add(sib.message_id)
+            sib_token = uuid4()
+            sib.status = "running"
+            sib.attempt_count += 1
+            sib.next_retry_at = None
+            sib.lease_token = sib_token
+            sib.lease_expires_at = lease_expires_at
+            sib.started_at = sib.started_at or now_ref
+            sib.updated_at = now_ref
+            locked_run.status = "running"
+            locked_run.started_at = locked_run.started_at or now_ref
+            locked_run.completed_at = None
+            locked_run.updated_at = now_ref
+
+            media, visual_identity = await _load_media_snapshot(
+                session=session,
+                stage_run=sib,
+                message=sib_msg,
+            )
+            previous_results = await _load_previous_results(
+                session=session,
+                stage_run=sib,
+                facts_snapshot=locked_run.facts_snapshot,
+            )
+            coleased.append(
+                AnalysisTargetSnapshot(
+                    stage_run_id=str(sib.id),
+                    lease_token=str(sib_token),
+                    target_id=str(sib.target_id),
+                    message_id=str(sib.message_id),
+                    target_kind=sib.target_kind,
+                    asset_id=None,
+                    text=sib_msg.original_text,
+                    telegram_metadata=sanitize_json(sib_msg.telegram_metadata),
+                    media=media,
+                    previous_results=previous_results,
+                    visual_identity=visual_identity,
+                    analysis_run_id=str(sib.analysis_run_id),
+                )
+            )
+        return tuple(coleased)
+
+    return ()
 
 
 async def _load_media_snapshot(

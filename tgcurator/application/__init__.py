@@ -1,5 +1,6 @@
 from .ingestion import MessageIngestService
 from .media_group_buffer import MediaGroupAggregationBuffer
+from .pipeline import MessagePipelineCoordinator
 from .processing import (
     RANGE_EXECUTION_QUEUE,
     DurableWakeupDispatcher,
@@ -20,6 +21,7 @@ from .source_lifecycle import SourceMessageLifecycleService
 __all__ = [
     "MediaGroupAggregationBuffer",
     "MessageIngestService",
+    "MessagePipelineCoordinator",
     "RealtimeTelegramIngestion",
     "ReconnectTelegramReconciliation",
     "RANGE_EXECUTION_QUEUE",

@@ -389,7 +389,8 @@ class RangeExecutionRecord(TimestampMixin, Base):
     __tablename__ = "range_executions"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'running', 'retry_wait', 'completed', 'failed')",
+            "status IN ('pending', 'running', 'awaiting_pipeline', "
+            "'retry_wait', 'completed', 'failed')",
             name="range_execution_status",
         ),
         CheckConstraint(
@@ -439,7 +440,9 @@ class RangeExecutionRecord(TimestampMixin, Base):
             "uq_range_execution_one_active",
             "processing_range_id",
             unique=True,
-            postgresql_where=text("status IN ('pending', 'running', 'retry_wait')"),
+            postgresql_where=text(
+                "status IN ('pending', 'running', 'awaiting_pipeline', 'retry_wait')"
+            ),
         ),
     )
 
@@ -590,7 +593,43 @@ class MessageRecord(TimestampMixin, Base):
             "AND blocked_by_label_assignment_id IS NOT NULL)",
             name="message_analysis_block_state",
         ),
+        CheckConstraint(
+            "duplicate_status IN ('unchecked', 'unique', "
+            "'duplicate_skipped', 'duplicate_reclassify')",
+            name="message_duplicate_status",
+        ),
+        CheckConstraint(
+            "(duplicate_status IN ('unchecked', 'unique') "
+            "AND canonical_message_id IS NULL AND duplicate_distance IS NULL) OR "
+            "(duplicate_status IN ('duplicate_skipped', 'duplicate_reclassify') "
+            "AND canonical_message_id IS NOT NULL AND canonical_message_id <> id "
+            "AND duplicate_distance IS NOT NULL "
+            "AND duplicate_distance >= 0 AND duplicate_distance <= 64)",
+            name="message_duplicate_canonical_state",
+        ),
+        CheckConstraint(
+            "terminal_reason IS NULL OR (processing_status = 'processed' AND terminal_reason IN "
+            "('completed', 'blocked_negative_gate', 'duplicate_skipped', "
+            "'no_eligible_stages', 'unsupported', 'admin_skipped'))",
+            name="message_terminal_reason_state",
+        ),
+        CheckConstraint(
+            "failure_stage IS NULL OR failure_stage IN "
+            "('media_failed', 'analysis_failed', 'routing_failed', 'publish_failed')",
+            name="message_failure_stage_state",
+        ),
         Index("ix_messages_source_published_at", "source_channel_id", "published_at"),
+        Index(
+            "ix_messages_source_primary_status",
+            "source_channel_id",
+            "primary_telegram_message_id",
+            "processing_status",
+        ),
+        Index(
+            "ix_messages_visual_fingerprint",
+            "visual_fingerprint",
+            postgresql_where=text("visual_fingerprint IS NOT NULL"),
+        ),
         Index(
             "uq_messages_source_regular",
             "source_channel_id",
@@ -683,6 +722,24 @@ class MessageRecord(TimestampMixin, Base):
         ),
         nullable=True,
     )
+    canonical_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "messages.id",
+            name="fk_messages_canonical_message",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    duplicate_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="unchecked",
+        server_default=text("'unchecked'"),
+    )
+    duplicate_distance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    terminal_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    failure_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class MessagePartRecord(TimestampMixin, Base):
@@ -2918,3 +2975,42 @@ class PublishRecord(CreatedAtMixin, Base):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DuplicateMatchRecord(CreatedAtMixin, Base):
+    """Durable message-level visual deduplication audit relationship."""
+
+    __tablename__ = "duplicate_matches"
+    __table_args__ = (
+        UniqueConstraint("message_id", name="uq_duplicate_matches_message"),
+        CheckConstraint(
+            "message_id <> canonical_message_id",
+            name="duplicate_match_not_self",
+        ),
+        CheckConstraint(
+            "match_kind IN ('exact_fingerprint', 'perceptual_multiset')",
+            name="duplicate_match_kind",
+        ),
+        CheckConstraint(
+            "hamming_distance >= 0 AND hamming_distance <= 64",
+            name="duplicate_match_distance",
+        ),
+        CheckConstraint(
+            "duplicate_policy IN ('skip', 'reclassify_with_text')",
+            name="duplicate_match_policy",
+        ),
+        Index("ix_duplicate_matches_canonical", "canonical_message_id", "created_at"),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", name="fk_duplicate_matches_message", ondelete="CASCADE"),
+        nullable=False,
+    )
+    canonical_message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", name="fk_duplicate_matches_canonical", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    match_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    hamming_distance: Mapped[int] = mapped_column(Integer, nullable=False)
+    duplicate_policy: Mapped[str] = mapped_column(String(32), nullable=False)

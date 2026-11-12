@@ -1,3 +1,15 @@
+from .deduplication import (
+    DuplicateMatchKind,
+    DuplicateMatchResult,
+    DuplicatePolicy,
+    DuplicateStatus,
+    VisualCandidate,
+    compute_archived_visual_identity,
+    evaluate_visual_duplicate,
+    multiset_hamming_distance,
+    normalize_phash,
+    phash_hamming_distance,
+)
 from .models import (
     MediaAsset,
     MediaKind,
@@ -15,15 +27,25 @@ from .telegram import (
 )
 
 __all__ = [
+    "DuplicateMatchKind",
+    "DuplicateMatchResult",
+    "DuplicatePolicy",
+    "DuplicateStatus",
     "MediaAsset",
     "MediaKind",
     "MessageContent",
     "NormalizedTelegramMessage",
     "TelegramMessage",
     "TelegramMessagePart",
+    "VisualCandidate",
+    "compute_archived_visual_identity",
+    "evaluate_visual_duplicate",
     "media_assets_from_json",
     "media_assets_to_json",
     "message_visual_fingerprint",
+    "multiset_hamming_distance",
+    "normalize_phash",
     "normalize_telegram_messages",
     "normalized_from_parts",
+    "phash_hamming_distance",
 ]

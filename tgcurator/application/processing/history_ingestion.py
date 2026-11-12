@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Protocol
 
 from tgcurator.application.ingestion import MessageIngestService
 from tgcurator.application.ports.contracts import TelegramGateway
@@ -10,12 +11,22 @@ from tgcurator.domain.messages import TelegramMessage
 from tgcurator.shared import DomainValidationError, ensure_aware
 
 
+class RangePipelineHandoff(Protocol):
+    async def handoff_and_drive_execution(
+        self,
+        *,
+        execution_id: str,
+        lease_token: str,
+        now: datetime,
+    ) -> bool: ...
+
+
 class RangeExecutionHistoryIngestion:
     """Fetch and persist one immutable history window without a long database transaction.
 
     Telegram I/O happens first, followed by idempotent persistence, then short watermark
-    and completion transactions. A crash at any boundary is safe because the lease can expire
-    and replay the immutable window.
+    and completion transactions (or pipeline handoff when asynchronous stages are wired).
+    A crash at any boundary is safe because the lease can expire and replay the immutable window.
     """
 
     def __init__(
@@ -24,10 +35,12 @@ class RangeExecutionHistoryIngestion:
         range_execution_worker: RangeExecutionWorker,
         telegram_gateway: TelegramGateway,
         message_ingest_service: MessageIngestService,
+        pipeline_coordinator: RangePipelineHandoff | None = None,
     ) -> None:
         self._range_execution_worker = range_execution_worker
         self._telegram_gateway = telegram_gateway
         self._message_ingest_service = message_ingest_service
+        self._pipeline_coordinator = pipeline_coordinator
 
     async def process(self, *, claim: ClaimedRangeExecution, now: datetime) -> bool:
         ensure_aware(now, field="now")
@@ -38,6 +51,13 @@ class RangeExecutionHistoryIngestion:
         )
         self._validate_history_window(messages=messages, claim=claim)
         await self._message_ingest_service.ingest_history(messages)
+
+        if self._pipeline_coordinator is not None:
+            return await self._pipeline_coordinator.handoff_and_drive_execution(
+                execution_id=claim.execution_id,
+                lease_token=claim.lease_token,
+                now=now,
+            )
 
         advanced = await self._range_execution_worker.advance_watermark(
             execution_id=claim.execution_id,

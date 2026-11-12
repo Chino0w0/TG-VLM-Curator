@@ -13,6 +13,7 @@ M3_REVISION = "b8e6c4f2a137"
 M4_REVISION = "c4a9e7d2f5b1"
 M5_REVISION = "d7b3f9a1e6c2"
 M6_REVISION = "e6d4a8b2c951"
+M7_REVISION = "f1a7c3d9e204"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -328,6 +329,59 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         self.assertIn("- ''main_random_ids''", result.stdout)
         self.assertIn("- ''completed_at''", result.stdout)
         self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_upgrade_renders_complete_m7_postgresql_ddl_without_connecting(self) -> None:
+        result = self.run_alembic("upgrade", M7_REVISION, "--sql")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CREATE TABLE duplicate_matches", result.stdout)
+        self.assertIn("'awaiting_pipeline'", result.stdout)
+        for column_name in (
+            "canonical_message_id",
+            "duplicate_status",
+            "duplicate_distance",
+            "terminal_reason",
+            "failure_stage",
+            "last_error_code",
+        ):
+            self.assertIn(f"ALTER TABLE messages ADD COLUMN {column_name}", result.stdout)
+        for constraint_name in (
+            "fk_messages_canonical_message",
+            "ck_messages_message_duplicate_status",
+            "ck_messages_message_duplicate_canonical_state",
+            "ck_messages_message_terminal_reason_state",
+            "ck_messages_message_failure_stage_state",
+            "ck_duplicate_matches_duplicate_match_not_self",
+            "ck_duplicate_matches_duplicate_match_kind",
+            "ck_duplicate_matches_duplicate_match_distance",
+            "ck_duplicate_matches_duplicate_match_policy",
+            "uq_duplicate_matches_message",
+        ):
+            self.assertIn(constraint_name, result.stdout)
+        self.assertIn("CREATE INDEX ix_messages_source_primary_status", result.stdout)
+        self.assertIn("CREATE INDEX ix_messages_visual_fingerprint", result.stdout)
+        self.assertIn("CREATE INDEX ix_duplicate_matches_canonical", result.stdout)
+        self.assertNotIn("sqlite", result.stdout.lower())
+
+    def test_m7_downgrade_restores_the_m6_schema(self) -> None:
+        result = self.run_alembic(
+            "downgrade",
+            f"{M7_REVISION}:{M6_REVISION}",
+            "--sql",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DROP TABLE duplicate_matches", result.stdout)
+        for column_name in (
+            "canonical_message_id",
+            "duplicate_status",
+            "duplicate_distance",
+            "terminal_reason",
+            "failure_stage",
+            "last_error_code",
+        ):
+            self.assertIn(f"ALTER TABLE messages DROP COLUMN {column_name}", result.stdout)
+        self.assertIn("DOWNGRADED_AWAITING_PIPELINE", result.stdout)
 
     def test_m6_downgrade_restores_the_m5_schema(self) -> None:
         result = self.run_alembic(
