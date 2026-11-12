@@ -1,4 +1,7 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
+import { publishedVersion } from "../api/config";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
   ConfigEntity,
@@ -19,6 +22,16 @@ export function ReviewWorkspace({
   selectedMessageId,
   onSelectMessageId,
 }: ReviewWorkspaceProps) {
+  const { busy, runAction } = useMutationGuard();
+  const selectedId = useRef(selectedMessageId);
+  selectedId.current = selectedMessageId;
+  const queueRequests = useRequestGeneration();
+  const detailRequests = useRequestGeneration();
+  const [queueCursor, setQueueCursor] = useState<string | null>(null);
+  const [queueNextCursor, setQueueNextCursor] = useState<string | null>(null);
+  const [queueHasMore, setQueueHasMore] = useState(false);
+  const [queueStack, setQueueStack] = useState<Array<string | null>>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
   const [queueFilter, setQueueFilter] = useState("unreviewed");
   const [queueItems, setQueueItems] = useState<MessageSummary[]>([]);
   const [labelDefs, setLabelDefs] = useState<ConfigEntity[]>([]);
@@ -55,18 +68,23 @@ export function ReviewWorkspace({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadQueueAndMetadata = useCallback(async () => {
+    const request = queueRequests.next();
+    setQueueLoading(true);
     setErrorMsg(null);
     try {
       const [page, lbls, pipes, policies] = await Promise.all([
         client.listMessages(
           queueFilter ? { review_status: queueFilter } : {},
-          null,
+          queueCursor,
           25,
         ),
         client.listConfigEntities("label-definitions"),
         client.listConfigEntities("analysis-pipelines"),
         client.listConfigEntities("routing-policies"),
       ]);
+      if (!queueRequests.isCurrent(request)) return;
+      setQueueNextCursor(page.next_cursor);
+      setQueueHasMore(page.has_more);
       setQueueItems(page.items);
       setLabelDefs(lbls);
       setPipelines(pipes);
@@ -75,30 +93,33 @@ export function ReviewWorkspace({
         onSelectMessageId(page.items[0].id);
       }
       if (!labelVersionId && lbls.length > 0) {
-        const pub = lbls[0].published_version ?? lbls[0].versions[0];
+        const pub = publishedVersion(lbls[0]) ?? lbls[0].versions[0];
         if (pub) {
           setLabelVersionId(pub.id);
           setLabelKey(String(pub.content.key ?? lbls[0].name));
         }
       }
     } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Failed to load review queue.",
-      );
+      if (queueRequests.isCurrent(request)) setErrorMsg(err instanceof Error ? err.message : "Failed to load review queue.");
+    } finally {
+      if (queueRequests.isCurrent(request)) setQueueLoading(false);
     }
-  }, [client, queueFilter, selectedMessageId, onSelectMessageId, labelVersionId]);
+  }, [client, queueFilter, queueCursor, queueRequests, selectedMessageId, onSelectMessageId, labelVersionId]);
 
   const loadSelectedDetail = useCallback(
     async (msgId: string) => {
-      if (!msgId) return;
+      if (!msgId || msgId !== selectedId.current) return;
+      const request = detailRequests.next();
+      setDetail(null);
       try {
         const loaded = await client.getMessageDetail(msgId);
+        if (!detailRequests.isCurrent(request) || msgId !== selectedId.current) return;
         setDetail(loaded);
-        if (targetScope === "global") {
-          setTargetKind("message");
-          setTargetId(loaded.message.id);
-        }
+        setTargetScope("global");
+        setTargetKind("message");
+        setTargetId(loaded.message.id);
       } catch (err) {
+        if (!detailRequests.isCurrent(request) || msgId !== selectedId.current) return;
         setErrorMsg(
           err instanceof Error
             ? err.message
@@ -106,7 +127,7 @@ export function ReviewWorkspace({
         );
       }
     },
-    [client, targetScope],
+    [client, detailRequests],
   );
 
   useEffect(() => {
@@ -126,11 +147,16 @@ export function ReviewWorkspace({
     setErrorMsg(null);
     setStatusMsg(null);
     try {
+      if (targetScope === "media" && !(targetKind === "image_asset" ? detail.media.images : detail.media.videos).some(asset => asset.id === targetId)) {
+        throw new Error("Select an image or video belonging to this message.");
+      }
       await client.applyManualLabel(detail.message.id, {
         operation,
         target_scope: targetScope,
         target_kind: targetKind,
-        target_id: targetId || detail.message.id,
+        target_id: targetScope === "global" ? detail.message.id : targetId,
+        image_asset_id: targetScope === "media" && targetKind === "image_asset" ? targetId : undefined,
+        video_asset_id: targetScope === "media" && targetKind === "video_asset" ? targetId : undefined,
         label_definition_version_id: labelVersionId,
         label_key: labelKey.trim(),
         score: operation === "set" ? Number(score) : undefined,
@@ -220,6 +246,7 @@ export function ReviewWorkspace({
 
   return (
     <section aria-labelledby="review-heading">
+      <fieldset disabled={busy} style={{border: 0, padding: 0, margin: 0, minWidth: 0}}>
       <div className="workspace-header">
         <div>
           <h1 id="review-heading">Human Review &amp; Label Override</h1>
@@ -234,7 +261,7 @@ export function ReviewWorkspace({
           <select
             id="review-queue-select"
             value={queueFilter}
-            onChange={(e) => setQueueFilter(e.target.value)}
+            onChange={(e) => { queueRequests.invalidate(); setQueueCursor(null); setQueueStack([]); setQueueFilter(e.target.value); }}
           >
             <option value="unreviewed">unreviewed</option>
             <option value="needs_attention">needs_attention</option>
@@ -258,6 +285,11 @@ export function ReviewWorkspace({
 
       <div className="panel">
         <h2>Review Queue ({queueItems.length})</h2>
+        <p className="hint">The inspected message stays selected when paging, filtering, or recording a review. Select a queue row to inspect another message.</p>
+        <div className="btn-row">
+          <button className="btn" disabled={queueLoading || !queueStack.length} onClick={() => { const stack = [...queueStack]; setQueueCursor(stack.pop() ?? null); setQueueStack(stack); }}>Previous Queue Page</button>
+          <button className="btn" disabled={queueLoading || !queueHasMore || !queueNextCursor} onClick={() => { setQueueStack(s => [...s, queueCursor]); setQueueCursor(queueNextCursor); }}>Next Queue Page</button>
+        </div>
         <ResponsiveTable
           caption="Messages available for human review"
           headers={["TG Msg ID", "Review Status", "Excerpt", "Action"]}
@@ -321,7 +353,7 @@ export function ReviewWorkspace({
               <form
                 method="post"
                 aria-labelledby="manual-label-form-title"
-                onSubmit={handleManualLabelSubmit}
+                onSubmit={event => { event.preventDefault(); void runAction(() => handleManualLabelSubmit(event)); }}
               >
                 <div className="form-grid">
                   <div className="field">
@@ -351,9 +383,11 @@ export function ReviewWorkspace({
                         if (nextScope === "global") {
                           setTargetKind("message");
                           setTargetId(detail.message.id);
-                        } else if (detail.media.images[0]) {
-                          setTargetKind("image_asset");
-                          setTargetId(detail.media.images[0].id);
+                        } else {
+                          const image = detail.media.images[0];
+                          const video = detail.media.videos[0];
+                          setTargetKind(image ? "image_asset" : "video_asset");
+                          setTargetId(image?.id ?? video?.id ?? "");
                         }
                       }}
                     >
@@ -364,16 +398,15 @@ export function ReviewWorkspace({
 
                   <div className="field">
                     <label htmlFor="rev-target-id">Target ID *</label>
-                    <input
-                      id="rev-target-id"
-                      type="text"
-                      required
-                      autoCorrect="off"
-                      autoCapitalize="none"
-                      spellCheck={false}
-                      value={targetId}
-                      onChange={(e) => setTargetId(e.target.value)}
-                    />
+                    <select id="rev-target-id" required value={`${targetKind}:${targetId}`} onChange={e => {
+                      const [kind, id] = e.target.value.split(":"); setTargetKind(kind); setTargetId(id);
+                    }}>
+                      {targetScope === "global" ? <option value={`message:${detail.message.id}`}>Message {detail.message.id}</option> : <>
+                        <option value="">-- Select media asset --</option>
+                        {detail.media.images.map(asset => <option key={asset.id} value={`image_asset:${asset.id}`}>Image {asset.id}</option>)}
+                        {detail.media.videos.map(asset => <option key={asset.id} value={`video_asset:${asset.id}`}>Video {asset.id}</option>)}
+                      </>}
+                    </select>
                   </div>
 
                   <div className="field">
@@ -480,7 +513,7 @@ export function ReviewWorkspace({
             {/* Review Status & Explicit Reanalysis */}
             <div className="panel">
               <h2>Review Status &amp; Explicit Reanalysis</h2>
-              <form method="post" onSubmit={handleReviewTransition}>
+              <form method="post" onSubmit={event => { event.preventDefault(); void runAction(() => handleReviewTransition(event)); }}>
                 <div className="form-grid">
                   <div className="field">
                     <label htmlFor="rev-next-status">New Review Status</label>
@@ -517,7 +550,7 @@ export function ReviewWorkspace({
                 }}
               />
 
-              <form method="post" onSubmit={handleReanalyze}>
+              <form method="post" onSubmit={event => { event.preventDefault(); void runAction(() => handleReanalyze(event)); }}>
                 <h3>Trigger Explicit Reanalysis</h3>
                 <div className="form-grid">
                   <div className="field">
@@ -604,14 +637,14 @@ export function ReviewWorkspace({
                 <button
                   type="button"
                   className="btn"
-                  onClick={() => void runReroute(true)}
+                  onClick={() => void runAction(() => runReroute(true))}
                 >
                   Preview Dry-Run Re-route
                 </button>
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => void runReroute(false)}
+                  onClick={() => void runAction(() => runReroute(false))}
                 >
                   Execute Formal Re-route
                 </button>
@@ -624,11 +657,9 @@ export function ReviewWorkspace({
                     <span className="badge">
                       {reroutePreview.dry_run ? "DRY-RUN" : "FORMAL"}
                     </span>{" "}
-                    | Existing Destinations:{" "}
+                    | Previous Evaluation:{" "}
                     <strong className="mono">
-                      {reroutePreview.comparison.existing_destinations.join(
-                        ", ",
-                      ) || "none"}
+                      {reroutePreview.comparison.previous_evaluation_id ?? "none"}
                     </strong>{" "}
                     | Newly Added Destinations:{" "}
                     <strong className="mono">
@@ -646,6 +677,7 @@ export function ReviewWorkspace({
           </div>
         </>
       ) : null}
+      </fieldset>
     </section>
   );
 }

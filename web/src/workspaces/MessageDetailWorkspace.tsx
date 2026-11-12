@@ -1,3 +1,4 @@
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type { MessageDetail } from "../api/types";
@@ -16,6 +17,7 @@ export function MessageDetailWorkspace({
   onSelectMessageId,
   onOpenReview,
 }: MessageDetailWorkspaceProps) {
+  const reads = useRequestGeneration();
   const [lookupInput, setLookupInput] = useState(selectedMessageId ?? "");
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   const [skipReason, setSkipReason] = useState("");
@@ -31,21 +33,24 @@ export function MessageDetailWorkspace({
 
   const loadDetail = useCallback(
     async (messageId: string) => {
+      const request = reads.next();
       if (!messageId) return;
       setLoading(true);
       setErrorMsg(null);
       try {
         const res = await client.getMessageDetail(messageId);
+        if (!reads.isCurrent(request)) return;
         setDetail(res);
       } catch (err) {
+        if (!reads.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error ? err.message : "Failed to load message detail.",
         );
       } finally {
-        setLoading(false);
+        if (reads.isCurrent(request)) setLoading(false);
       }
     },
-    [client],
+    [client, reads],
   );
 
   useEffect(() => {
@@ -179,17 +184,17 @@ export function MessageDetailWorkspace({
               caption="Telegram MessageParts (album / single message items)"
               headers={["Part ID", "Index", "Telegram Message ID", "Media Kind"]}
             >
-              {detail.parts.map((part) => (
+              {detail.parts.map((part, index) => (
                 <tr key={part.id}>
                   <th scope="row">{part.id.slice(0, 8)}</th>
                   <td data-label="Index" className="mono">
-                    {part.part_index ?? 0}
+                    {index}
                   </td>
                   <td data-label="Telegram Message ID" className="mono">
                     {part.telegram_message_id}
                   </td>
                   <td data-label="Media Kind" className="mono">
-                    {part.media_kind ?? "text"}
+                    {part.media?.map(item => String(item.kind ?? item.media_type ?? "media")).join(", ") || "text"}
                   </td>
                 </tr>
               ))}
@@ -209,9 +214,9 @@ export function MessageDetailWorkspace({
                 <strong className="mono">
                   {detail.duplicate_match.duplicate_policy}
                 </strong>{" "}
-                | Max Hamming Distance:{" "}
+                | Hamming Distance:{" "}
                 <strong className="mono">
-                  {detail.duplicate_match.max_hamming_distance}
+                  {detail.duplicate_match.hamming_distance ?? "n/a"}
                 </strong>
               </div>
             ) : (
@@ -263,7 +268,7 @@ export function MessageDetailWorkspace({
                   <div key={vid.id} className="code-block">
                     Video {vid.id.slice(0, 8)} | archive_state=
                     {vid.archive_state} | cover_pHash=
-                    {vid.cover_perceptual_hash ?? "n/a"} | sampled_frames=
+                    {vid.source_cover_phash ?? "n/a"} | sampled_frames=
                     {vid.frames.length}
                   </div>
                 ))}
@@ -321,7 +326,8 @@ export function MessageDetailWorkspace({
                         ) : null}
                       </td>
                       <td data-label="Manifest Hash" className="mono">
-                        {sr.input_manifest?.manifest_hash.slice(0, 16) ?? "n/a"}
+                        {sr.input_manifest?.input_manifest_hash?.slice(0, 16) ?? "n/a"}
+                        <details><summary>Manifest &amp; inference diagnostics</summary><pre className="code-block">{JSON.stringify({input_manifest: sr.input_manifest, inference_call: sr.inference_call, last_error_code: sr.last_error_code, last_error_type: sr.last_error_type}, null, 2)}</pre></details>
                       </td>
                       <td data-label="Inference Call" className="mono">
                         {sr.inference_call
@@ -411,7 +417,7 @@ export function MessageDetailWorkspace({
                     "Remote PublishRecords",
                   ]}
                 >
-                  {ev.publication_intents.map((intent) => (
+                  {detail.publication_intents.filter((intent) => intent.routing_evaluation_id === ev.id).map((intent) => (
                     <tr key={intent.id}>
                       <th scope="row">{intent.id.slice(0, 8)}</th>
                       <td data-label="Destination" className="mono">
@@ -431,7 +437,7 @@ export function MessageDetailWorkspace({
                           ? "none"
                           : intent.records
                               .map(
-                                (r) => `${r.part_kind}:#${r.remote_message_id}`,
+                                (r) => `${r.part}:${r.remote_message_ids.map(id => `#${id}`).join(", ")}`,
                               )
                               .join(", ")}
                       </td>

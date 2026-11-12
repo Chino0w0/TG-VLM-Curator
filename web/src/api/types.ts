@@ -162,7 +162,7 @@ export interface SourceChannel {
   display_name: string;
   username: string | null;
   enabled: boolean;
-  protected_content: boolean;
+  protected_content?: boolean;
   default_read_identity_id: string | null;
   active_profile_version_id: string | null;
   last_observed_message_id?: number | null;
@@ -229,8 +229,8 @@ export interface ConfigEntity {
   family: ConfigFamily;
   name: string;
   description?: string;
-  source_channel_id?: string;
-  published_version: ConfigVersion | null;
+  source_channel_id?: string | null;
+  published_version_id: string | null;
   versions: ConfigVersion[];
   created_at?: string;
 }
@@ -293,7 +293,10 @@ export interface MessageSummary {
 }
 
 export interface LabelFactItem {
-  message_id: string;
+  assignment_id?: string;
+  stage_run_id?: string;
+  analysis_run_id?: string;
+  message_id?: string;
   target_scope: "global" | "media";
   target_kind: string;
   target_id: string;
@@ -304,7 +307,7 @@ export interface LabelFactItem {
 }
 
 export interface ManualLabelEventItem {
-  id: string;
+  event_id: string;
   message_id: string;
   operation: "set" | "clear";
   target_scope: "global" | "media";
@@ -326,7 +329,8 @@ export interface NamespaceScopeSnapshot {
 
 export interface StageRunCausalItem {
   id: string;
-  analysis_run_id: string;
+  analysis_run_id?: string;
+  analysis_stage_template_version_id?: string;
   node_key?: string;
   target_id?: string;
   status: string;
@@ -336,7 +340,7 @@ export interface StageRunCausalItem {
   last_error_type?: string | null;
   input_manifest: {
     id: string;
-    manifest_hash: string;
+    input_manifest_hash: string;
     content: Record<string, unknown>;
   } | null;
   inference_call: {
@@ -344,7 +348,7 @@ export interface StageRunCausalItem {
     provider_adapter: string;
     model_name: string;
     status: string;
-    http_status: number | null;
+    http_status?: number | null;
     latency_ms: number | null;
     structured_output_schema_hash: string | null;
     token_usage: Record<string, unknown> | null;
@@ -360,12 +364,15 @@ export interface AnalysisRunCausalItem {
   run_mode: string;
   status: string;
   blocked_by_negative_gate?: boolean;
-  created_at: string;
+  created_at?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
   stage_runs: StageRunCausalItem[];
 }
 
 export interface PublicationIntentCausalItem {
   id: string;
+  routing_evaluation_id: string;
   destination_channel_id: string;
   publish_identity_id: string | null;
   publication_mode: string;
@@ -384,8 +391,10 @@ export interface PublicationIntentCausalItem {
   }>;
   records: Array<{
     id: string;
-    part_kind: string;
-    remote_message_id: number;
+    part: string;
+    operation?: string;
+    remote_message_ids: number[];
+    sent_at?: string;
     created_at?: string;
   }>;
 }
@@ -399,7 +408,6 @@ export interface RoutingEvaluationCausalItem {
   rule_outcomes: Array<Record<string, unknown>>;
   stopped_at_rule_id: string | null;
   created_at: string;
-  publication_intents: PublicationIntentCausalItem[];
 }
 
 export interface AuditEventItem {
@@ -420,8 +428,10 @@ export interface MessageDetail {
   parts: Array<{
     id: string;
     telegram_message_id: number;
-    part_index?: number;
-    media_kind?: string | null;
+    published_at?: string;
+    original_text?: string | null;
+    media?: Array<Record<string, unknown>>;
+    media_count?: number;
   }>;
   media: {
     images: Array<{
@@ -437,7 +447,7 @@ export interface MessageDetail {
     videos: Array<{
       id: string;
       archive_state: string;
-      cover_perceptual_hash?: string | null;
+      source_cover_phash?: string | null;
       duration_seconds?: number | null;
       frames: Array<{
         id: string;
@@ -451,7 +461,8 @@ export interface MessageDetail {
   duplicate_match: {
     canonical_message_id: string;
     duplicate_policy: string;
-    max_hamming_distance: number;
+    hamming_distance: number | null;
+    match_kind?: string;
   } | null;
   analysis_runs: AnalysisRunCausalItem[];
   labels: {
@@ -464,13 +475,14 @@ export interface MessageDetail {
     };
   };
   review_events: Array<{
-    id: string;
-    previous_status: string;
+    event_id: string;
+    old_status: string;
     new_status: string;
     reason: string | null;
     created_at: string;
   }>;
   routing_evaluations: RoutingEvaluationCausalItem[];
+  publication_intents: PublicationIntentCausalItem[];
   audit_events: AuditEventItem[];
 }
 
@@ -483,16 +495,18 @@ export interface RerouteResult {
   facts_hash: string;
   matched_rule_ids: string[];
   stopped_at_rule_id: string | null;
-  planned_intents: Array<{
+  intents: Array<{
+    intent_id: string;
     destination_channel_id: string;
+    publish_identity_id: string;
     publication_mode: string;
-    rendering_template_version_id: string | null;
+    rendered_text: string | null;
   }>;
   comparison: {
-    existing_destinations: string[];
-    planned_destinations: string[];
+    previous_evaluation_id: string | null;
     added_destinations: string[];
-    unchanged_destinations?: string[];
+    removed_destinations: string[];
+    changed_modes: Record<string, { before: string; after: string }>;
   };
 }
 
