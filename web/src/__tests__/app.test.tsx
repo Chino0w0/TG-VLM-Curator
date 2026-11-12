@@ -33,7 +33,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
   const secrets: SecretStatusRecord[] = [
     {
       secret_id: "sec-11112222-3333",
-      secret_type: "telethon_session",
+      secret_type: "telegram_session",
       key_id: "master-v1",
       configured: true,
       created_at: "2026-11-12T00:00:00Z",
@@ -256,7 +256,7 @@ function createMockBackend(options?: { authenticatedInitially?: boolean }) {
         entity_type: "secret",
         entity_id: "sec-11112222-3333",
         actor_admin_user_id: "admin-0001",
-        payload: { secret_type: "telethon_session", plaintext: "[REDACTED]" },
+        payload: { secret_type: "telegram_session", plaintext: "[REDACTED]" },
         created_at: "2026-11-12T00:00:00Z",
       },
     ],

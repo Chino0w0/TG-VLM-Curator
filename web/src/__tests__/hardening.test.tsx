@@ -14,6 +14,7 @@ import type {
   RangeExecution,
   TelegramIdentity,
 } from "../api/types";
+import { ConfigReferences } from "../components/ConfigReferences";
 import { ModalDialog } from "../components/ModalDialog";
 import { Tabs } from "../components/Tabs";
 import { AnalysisConfigWorkspace } from "../workspaces/AnalysisConfigWorkspace";
@@ -355,17 +356,44 @@ describe("Phase 2 Web & API Hardening Coverage", () => {
     expect(screen.queryByText("exec-a-s")).not.toBeInTheDocument();
   });
 
-  it("TelegramIdentitiesWorkspace loads once and clears stale evaluated capabilities on identity change", async () => {
+  it("TelegramIdentitiesWorkspace & ConfigReferences enforce canonical secret_type options, identity-kind secret filtering, and stale capability reset", async () => {
     const c = baseClient();
-    const id1 = makeIdentity("id-1", "Reader One", "mtproto_user");
-    const id2 = makeIdentity("id-2", "Bot Two", "bot");
+    const id1 = {
+      ...makeIdentity("id-1", "Reader One", "mtproto_user"),
+      secret_id: "sec-tg-session",
+    };
+    const id2 = {
+      ...makeIdentity("id-2", "Bot Two", "bot"),
+      secret_id: "sec-bot-token",
+    };
     const listIds = vi
       .spyOn(c, "listIdentities")
       .mockResolvedValue([id1, id2]);
     vi.spyOn(c, "listSecrets").mockResolvedValue([
       {
-        secret_id: "sec-1",
-        secret_type: "telethon_session",
+        secret_id: "sec-api-key",
+        secret_type: "api_key",
+        key_id: "k1",
+        configured: true,
+        created_at: "2026-11-12T00:00:00Z",
+      },
+      {
+        secret_id: "sec-bot-token",
+        secret_type: "bot_token",
+        key_id: "k1",
+        configured: true,
+        created_at: "2026-11-12T00:00:00Z",
+      },
+      {
+        secret_id: "sec-tg-session",
+        secret_type: "telegram_session",
+        key_id: "k1",
+        configured: true,
+        created_at: "2026-11-12T00:00:00Z",
+      },
+      {
+        secret_id: "sec-legacy-inf",
+        secret_type: "inference_api_key",
         key_id: "k1",
         configured: true,
         created_at: "2026-11-12T00:00:00Z",
@@ -380,9 +408,46 @@ describe("Phase 2 Web & API Hardening Coverage", () => {
     });
 
     const user = userEvent.setup();
-    render(<TelegramIdentitiesWorkspace client={c} />);
+    const { unmount } = render(<TelegramIdentitiesWorkspace client={c} />);
     await screen.findByText("Reader One");
     expect(listIds).toHaveBeenCalledTimes(1);
+
+    // Store Secret dropdown defaults to canonical telegram_session and lists exact canonical secret types
+    const secretTypeSelect = screen.getByLabelText("Credential Type *") as HTMLSelectElement;
+    expect(secretTypeSelect.value).toBe("telegram_session");
+    expect(
+      within(secretTypeSelect)
+        .getAllByRole("option")
+        .map((o) => (o as HTMLOptionElement).value),
+    ).toEqual(["telegram_session", "bot_token", "api_key"]);
+
+    // Register Identity secret dropdown filters by identityType (mtproto_user -> telegram_session, skipping api_key & bot_token)
+    const idSecretSelect = screen.getByLabelText("Secret Reference *") as HTMLSelectElement;
+    expect(idSecretSelect.value).toBe("sec-tg-session");
+    expect(
+      within(idSecretSelect)
+        .getAllByRole("option")
+        .map((o) => (o as HTMLOptionElement).value),
+    ).toEqual(["", "sec-tg-session"]);
+
+    // Toggling radio to bot filters and auto-selects bot_token
+    await user.click(screen.getByLabelText(/bot \(Bot API Publisher\)/i));
+    expect(idSecretSelect.value).toBe("sec-bot-token");
+    expect(
+      within(idSecretSelect)
+        .getAllByRole("option")
+        .map((o) => (o as HTMLOptionElement).value),
+    ).toEqual(["", "sec-bot-token"]);
+
+    // RecordEditor for mtproto_user identity only offers mtproto_user-compatible secrets
+    const editButtons = screen.getAllByRole("button", { name: "Edit Identity" });
+    await user.click(editButtons[0]);
+    const editForm = screen.getByRole("form", { name: "Edit Identity" });
+    expect(
+      within(within(editForm).getByLabelText("Credential Reference"))
+        .getAllByRole("option")
+        .map((o) => (o as HTMLOptionElement).value),
+    ).toEqual(["", "sec-tg-session"]);
 
     await user.click(
       screen.getByRole("button", { name: "Evaluate Capabilities" }),
@@ -396,6 +461,25 @@ describe("Phase 2 Web & API Hardening Coverage", () => {
     expect(
       screen.queryByText(/protected_content_blocked/),
     ).not.toBeInTheDocument();
+    unmount();
+
+    // ConfigReferences for inference-profiles includes canonical api_key and legacy inference_api_key
+    render(
+      <ConfigReferences
+        client={c}
+        family="inference-profiles"
+        json='{"api_secret_reference":""}'
+        onChange={() => {}}
+      />,
+    );
+    const refSelect = await screen.findByLabelText("api_secret_reference");
+    await waitFor(() => {
+      expect(
+        within(refSelect)
+          .getAllByRole("option")
+          .map((o) => (o as HTMLOptionElement).value),
+      ).toEqual(["", "sec-api-key", "sec-legacy-inf"]);
+    });
   });
 
   it("OperationsWorkspace uses image_archive/video_archive step kinds, discards stale filter reads, and guards retry", async () => {

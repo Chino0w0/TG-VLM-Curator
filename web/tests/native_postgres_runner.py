@@ -134,9 +134,11 @@ async def seed_http_and_database(db, vault, base, username, password, evidence):
 
         credential = secrets.token_urlsafe(32)
         SENSITIVE.append(credential)
-        secret = await post("/secrets", {"secret_type": "mtproto_session", "plaintext": credential})
+        secret = await post(
+            "/secrets", {"secret_type": "telegram_session", "plaintext": credential}
+        )
         inference_secret = await post(
-            "/secrets", {"secret_type": "inference_api_key", "plaintext": credential}
+            "/secrets", {"secret_type": "api_key", "plaintext": credential}
         )
         identity = await post(
             "/telegram-identities",
