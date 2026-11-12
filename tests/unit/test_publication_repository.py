@@ -287,7 +287,10 @@ class PublicationRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_claim_persists_random_ids_and_one_attempt_before_returning(self) -> None:
         intent = _intent()
         message = _message()
-        session = _Session(execute_results=[_Result((intent, message, _source(), _destination()))])
+        session = _Session(
+            execute_results=[_Result((intent, message, _source(), _destination()))],
+            scalar_results=[None],
+        )
         repository = SqlAlchemyPublicationRepository(
             _Database(session),  # type: ignore[arg-type]
             id_factory=_IdFactory(LEASE_ID, ATTEMPT_ID),
@@ -324,7 +327,8 @@ class PublicationRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_metadata_only_claim_persists_exactly_one_main_random_id(self) -> None:
         intent = _intent(mode=PublicationMode.METADATA_ONLY)
         session = _Session(
-            execute_results=[_Result((intent, _message(), _source(), _destination()))]
+            execute_results=[_Result((intent, _message(), _source(), _destination()))],
+            scalar_results=[None],
         )
         repository = SqlAlchemyPublicationRepository(
             _Database(session),  # type: ignore[arg-type]
@@ -358,7 +362,8 @@ class PublicationRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         session = _Session(
-            execute_results=[_Result((intent, _message(), _source(), _destination()))]
+            execute_results=[_Result((intent, _message(), _source(), _destination()))],
+            scalar_results=[1],
         )
         repository = SqlAlchemyPublicationRepository(
             _Database(session),  # type: ignore[arg-type]

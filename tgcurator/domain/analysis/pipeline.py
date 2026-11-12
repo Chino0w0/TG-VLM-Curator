@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from tgcurator.shared import DomainValidationError
 
-from .common import VersionStatus, require_json_object, validate_non_blank, validate_positive_int
+from .common import (
+    VersionStatus,
+    VisualCompositionPolicy,
+    require_json_object,
+    validate_non_blank,
+    validate_positive_int,
+)
 from .conditions import validate_run_if
-from .stages import AnalysisStageTemplateVersion
+from .stages import AnalysisStageTemplateVersion, StageRetryPolicy
 
 _ALLOWED_STAGE_OVERRIDES = frozenset(
     {
@@ -197,3 +203,34 @@ def _topological_ids(stages: tuple[Any, ...]) -> tuple[str, ...]:
 
 def _node_id(stage: Any) -> str:
     return stage.stage_id if isinstance(stage, PipelineStage) else stage.node_id
+
+
+def apply_stage_parameter_overrides(
+    stage: AnalysisStageTemplateVersion,
+    overrides: Mapping[str, Any] | None,
+) -> AnalysisStageTemplateVersion:
+    """Apply only the published node's permitted execution overrides, never identity/input scope."""
+    values = require_json_object(overrides or {}, field="stage parameter overrides")
+    unsupported = set(values) - _ALLOWED_STAGE_OVERRIDES
+    if unsupported:
+        raise DomainValidationError(
+            f"unsupported stage parameter overrides: {sorted(unsupported)!r}"
+        )
+    changes: dict[str, Any] = {}
+    for key in ("timeout_seconds", "max_batch_size", "max_concurrency"):
+        if key in values:
+            changes[key] = values[key]
+    if "retry_policy" in values:
+        retry = require_json_object(values["retry_policy"], field="retry policy override")
+        try:
+            changes["retry_policy"] = StageRetryPolicy(**{**asdict(stage.retry_policy), **retry})
+        except TypeError as error:
+            raise DomainValidationError("unsupported retry policy override fields") from error
+    if "visual_composition_policy" in values:
+        try:
+            changes["visual_composition_policy"] = VisualCompositionPolicy(
+                values["visual_composition_policy"]
+            )
+        except (TypeError, ValueError) as error:
+            raise DomainValidationError("invalid visual composition policy override") from error
+    return replace(stage, **changes)
