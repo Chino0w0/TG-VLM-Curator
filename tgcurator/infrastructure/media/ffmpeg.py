@@ -4,7 +4,8 @@ import asyncio
 import json
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -37,15 +38,46 @@ class FFmpegVideoFrameExtractor:
     max_probe_output_bytes: int = 256 * 1024
     max_stderr_bytes: int = 64 * 1024
     max_frame_bytes: int = 32 * 1024 * 1024
+    _process_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _active_processes: set[subprocess.Popen[bytes]] = field(
+        default_factory=set, init=False, repr=False
+    )
+
+    def terminate_active_processes(self) -> int:
+        """Terminate any in-flight ffprobe/ffmpeg subprocesses during daemon shutdown."""
+
+        with self._process_lock:
+            active = list(self._active_processes)
+        terminated = 0
+        for process in active:
+            if process.poll() is not None:
+                continue
+            terminated += 1
+            self._terminate_process(process)
+        return terminated
+
+    def _terminate_process(self, process: subprocess.Popen[bytes]) -> None:
+        try:
+            process.terminate()
+        except OSError:
+            return
+        try:
+            process.wait(timeout=self.terminate_grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=self.terminate_grace_seconds)
+            except OSError:
+                pass
 
     def __post_init__(self) -> None:
-        for field, value in (
+        for field_name, value in (
             ("ffprobe_path", self.ffprobe_path),
             ("ffmpeg_path", self.ffmpeg_path),
         ):
             if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{field} must not be blank")
-        for field, value in (
+                raise ValueError(f"{field_name} must not be blank")
+        for field_name, value in (
             ("timeout_seconds", self.timeout_seconds),
             ("terminate_grace_seconds", self.terminate_grace_seconds),
         ):
@@ -55,14 +87,14 @@ class FFmpegVideoFrameExtractor:
                 or not isfinite(value)
                 or value <= 0
             ):
-                raise ValueError(f"{field} must be a finite positive number")
-        for field, value in (
+                raise ValueError(f"{field_name} must be a finite positive number")
+        for field_name, value in (
             ("max_probe_output_bytes", self.max_probe_output_bytes),
             ("max_stderr_bytes", self.max_stderr_bytes),
             ("max_frame_bytes", self.max_frame_bytes),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{field} must be a positive integer")
+                raise ValueError(f"{field_name} must be a positive integer")
 
     async def probe(self, *, content: bytes) -> VideoProbeMetadata:
         if not isinstance(content, bytes) or not content:
@@ -174,16 +206,19 @@ class FFmpegVideoFrameExtractor:
                 )
             except OSError as error:
                 raise error_type("media executable could not be started") from error
+            with self._process_lock:
+                self._active_processes.add(process)
             try:
                 return_code = process.wait(timeout=self.timeout_seconds)
             except subprocess.TimeoutExpired as error:
-                process.terminate()
-                try:
-                    process.wait(timeout=self.terminate_grace_seconds)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=self.terminate_grace_seconds)
+                self._terminate_process(process)
                 raise FFmpegTimeoutError("media executable exceeded its timeout") from error
+            except BaseException:
+                self._terminate_process(process)
+                raise
+            finally:
+                with self._process_lock:
+                    self._active_processes.discard(process)
             stderr.seek(0)
             stderr.read(self.max_stderr_bytes + 1)
             if return_code != 0:

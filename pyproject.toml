@@ -14,6 +14,8 @@ dependencies = []
 
 [project.scripts]
 tgcurator-bootstrap-admin = "apps.bootstrap_admin:main"
+tgcurator-check-consistency = "apps.worker.consistency_cli:main"
+tgcurator-healthcheck = "apps.healthcheck:main"
 
 [project.optional-dependencies]
 runtime = [

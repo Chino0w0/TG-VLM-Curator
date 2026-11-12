@@ -21,8 +21,8 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M6 | Publication, archive cleanup, and operations | Complete (2026-11-12) |
 | M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Complete (2026-11-12) |
 | M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Complete (2026-11-12) |
-| M9 | React + TypeScript + Vite web administration console | Pending |
-| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Pending |
+| M9 | React + TypeScript + Vite web administration console | Complete (2026-11-12) |
+| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Complete (2026-11-12) |
 
 ## Dependency rule
 
@@ -327,17 +327,35 @@ Acceptance extends the backend gates with strict TypeScript typechecking (`npm r
 Vitest + Testing Library component/workflow verification (`npm test`), and production Vite bundle
 compilation (`npm run build`).
 
-## M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification (pending)
+## M10 - Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification (complete 2026-11-12)
 
 M10 delivers the production container topology, operational maintenance utilities, and closed-loop
 system verification without bundling any inference model service:
 
-- backend and web `Dockerfile` builds plus `docker-compose.yml` orchestrating `postgres`, `redis`,
-  `api`, `web`, `telegram-ingestor`, `scheduler`, `worker-media`, `worker-analysis`,
-  `worker-publish`, and `worker-maintenance` across dedicated persistent volumes;
-- graceful `SIGTERM` handling across all daemons and subprocesses, service-appropriate readiness
-  probes, backup/restore scripts (`backup-postgres`, `backup-media`, `restore-postgres`), and a
-  maintenance storage-consistency scanner verifying `READY` archive blobs and reporting orphan
-  files;
-- end-to-end closed-loop integration and API security invariant suites driven by deterministic
-  `FakeTelegramAdapter` and `FakeInferenceProvider` harnesses.
+- multi-stage `docker/backend.Dockerfile` (non-root Python 3.12 + FFmpeg runtime), `docker/web.Dockerfile`
+  (Node 22 Vite build + Nginx static SPA serving with `/api/`, `/health/`, and `/metrics` reverse
+  proxying via `docker/nginx.conf`), `.dockerignore`, `.env.example`, and `docker-compose.yml`
+  orchestrating the exact ten core services (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`,
+  `scheduler`, `worker-media`, `worker-analysis`, `worker-publish`, `worker-maintenance`), four
+  persistent volumes (`postgres-data`, `redis-data`, `archive-data`, `temp-media`), and read-only
+  file secret `app_master_key`;
+- graceful `SIGTERM` handling across `apps/scheduler/__main__.py`,
+  `apps/telegram_ingestor/__main__.py` (bounded media-group flush + `shutdown()`),
+  `apps/worker/__main__.py` (`--role media|analysis|publish|maintenance|all` plus Celery
+  `worker_shutting_down` hook terminating active `ffprobe`/`ffmpeg` child processes in
+  `FFmpegVideoFrameExtractor`), and service-appropriate readiness probes in `apps/healthcheck.py`
+  (`tgcurator-healthcheck`: PostgreSQL-only for `api`/`ingestor`, PostgreSQL + Redis for
+  `scheduler`/`worker`);
+- operator backup and restore scripts (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
+  `scripts/restore-postgres.sh`) with UTC timestamp + SHA-256 manifests and independent
+  `APP_MASTER_KEY` reminders, plus the framework-independent `StorageConsistencyScanner`
+  (`tgcurator/domain/archive/consistency.py`, `tgcurator/application/maintenance/consistency.py`,
+  `tgcurator/infrastructure/database/consistency_repository.py`, and `apps/worker/consistency_cli.py`
+  / `tgcurator-check-consistency`) auditing `READY` database blobs against local archive files;
+- end-to-end closed-loop integration, resilience, and API security invariant verification in
+  `tests/e2e/test_closed_loop_pipeline.py` driven by deterministic `FakeTelegramAdapter` and
+  `FakeInferenceProvider` harnesses alongside unit tests in `tests/unit/test_consistency_scanner.py`
+  and `tests/unit/test_deployment_topology.py`.
+
+Acceptance passes all formatting, lint, pytest, unit/integration/e2e unittest discovery, compileall,
+pip, dependency-boundary, frontend (`typecheck`, `test`, `build`), and git whitespace gates.

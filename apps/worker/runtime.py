@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,15 +14,47 @@ from tgcurator.application.ports.operations import OperationsTelemetry
 from tgcurator.application.processing import RangeExecutionHistoryIngestion, RangeExecutionWorker
 from tgcurator.application.publishing import PublicationWorker
 from tgcurator.application.routing import RoutingService
+from tgcurator.infrastructure.archive import LocalArchiveStorage
 from tgcurator.infrastructure.database import (
     AsyncDatabase,
     SqlAlchemyAnalysisStageRunRepository,
+    SqlAlchemyArchiveCleanupRepository,
     SqlAlchemyMessagePipelineRepository,
     SqlAlchemyRangeExecutionWorkerRepository,
     SqlAlchemyRoutingRepository,
 )
+from tgcurator.infrastructure.media import FFmpegVideoFrameExtractor
 from tgcurator.infrastructure.observability import OperationsMonitor
 from tgcurator.shared import DomainValidationError
+
+_EXTRACTOR_LOCK = threading.Lock()
+_REGISTERED_EXTRACTORS: dict[int, FFmpegVideoFrameExtractor] = {}
+
+
+def register_media_extractor(extractor: FFmpegVideoFrameExtractor) -> FFmpegVideoFrameExtractor:
+    """Register an FFmpeg extractor so worker SIGTERM hooks can stop active child processes."""
+
+    with _EXTRACTOR_LOCK:
+        _REGISTERED_EXTRACTORS[id(extractor)] = extractor
+    return extractor
+
+
+def terminate_registered_media_extractors() -> int:
+    """Terminate all active ffprobe/ffmpeg child processes across registered extractors."""
+
+    with _EXTRACTOR_LOCK:
+        extractors = list(_REGISTERED_EXTRACTORS.values())
+    return sum(item.terminate_active_processes() for item in extractors)
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalStorageResolver:
+    storage: LocalArchiveStorage
+
+    def resolve(self, *, storage_backend: str) -> LocalArchiveStorage:
+        if storage_backend != "local":
+            raise DomainValidationError(f"unsupported storage_backend: {storage_backend!r}")
+        return self.storage
 
 
 @dataclass(slots=True)
@@ -190,6 +223,16 @@ def create_worker_runtime(
         repository=SqlAlchemyMessagePipelineRepository(database),
         routing_service=RoutingService(repository=SqlAlchemyRoutingRepository(database)),
     )
+    cleanup_worker = (
+        ArchiveCleanupWorker(
+            repository=SqlAlchemyArchiveCleanupRepository(database),
+            storage_resolver=_LocalStorageResolver(
+                storage=LocalArchiveStorage(root=settings.archive_root)
+            ),
+        )
+        if settings.archive_root is not None
+        else None
+    )
     return WorkerRuntime(
         database=database,
         range_execution_worker=RangeExecutionWorker(
@@ -199,6 +242,7 @@ def create_worker_runtime(
             repository=SqlAlchemyAnalysisStageRunRepository(database),
             orchestrator=AnalysisOrchestrator(provider=None),
         ),
+        cleanup_worker=cleanup_worker,
         pipeline_coordinator=pipeline_coordinator,
         telemetry=telemetry if telemetry is not None else OperationsMonitor(),
     )
