@@ -304,6 +304,7 @@ class MessageIngestRepositoryBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 _Result(scalar_values=list(retained)),
                 _Result(),
                 _Result(),
+                _Result(),
                 _Result(scalar_values=[image_asset_id]),
                 _Result(),
                 _Result(),
@@ -321,8 +322,10 @@ class MessageIngestRepositoryBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(expected.original_text, parent_update.params.values())
         self.assertIn(expected.media_count, parent_update.params.values())
         self.assertIn(expected.visual_fingerprint, parent_update.params.values())
-        image_wakeup = session.statements[7].compile(dialect=postgresql.dialect())
-        video_wakeup = session.statements[10].compile(dialect=postgresql.dialect())
+        source_activity = session.statements[5].compile(dialect=postgresql.dialect())
+        self.assertIn("UPDATE source_channels SET", str(source_activity))
+        image_wakeup = session.statements[8].compile(dialect=postgresql.dialect())
+        video_wakeup = session.statements[11].compile(dialect=postgresql.dialect())
         self.assertIn("image_archive", image_wakeup.params.values())
         self.assertIn(image_asset_id, image_wakeup.params.values())
         self.assertIn("video_archive", video_wakeup.params.values())

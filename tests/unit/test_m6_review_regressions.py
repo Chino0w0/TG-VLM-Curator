@@ -273,9 +273,12 @@ def test_protected_fallback_matches_first_execution_during_recovery(
         )
         assert text_request.random_ids == (claim.main_random_ids[0],)
         assert text_request.text == claim.rendered_text
-        if mode is PublicationMode.NATIVE_FORWARD_WITH_SUPPLEMENT:
-            assert publisher.publish_requests[-1].reply_to_message_id == 991
-            assert len(repository.records) == 2
+        assert len(repository.records) == 1
+        assert [
+            request.part
+            for request in publisher.publish_requests
+            if request.operation is PublicationOperation.SEND_TEXT
+        ] == [PublicationPart.MAIN]
     else:
         assert not repository.completed and not repository.records
         assert bool(repository.failures) is (fallback is ProtectedContentFallback.FAIL)

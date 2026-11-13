@@ -1,14 +1,50 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
-if TYPE_CHECKING:
-    from tgcurator.application.media.videos import VideoSamplingProfile
+
+@dataclass(frozen=True, slots=True)
+class VideoSamplingProfile:
+    """Deterministic limits for extracting a compact set of video visual evidence."""
+
+    min_candidate_frames: int = 6
+    max_candidate_frames: int = 24
+    max_representative_frames: int = 6
+    min_temporal_gap_seconds: float = 2.0
+    phash_distance_threshold: int = 8
+    keep_cover: bool = True
+
+    def __post_init__(self) -> None:
+        for field, value in (
+            ("min_candidate_frames", self.min_candidate_frames),
+            ("max_candidate_frames", self.max_candidate_frames),
+            ("max_representative_frames", self.max_representative_frames),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{field} must be a positive integer")
+        if self.min_candidate_frames > self.max_candidate_frames:
+            raise ValueError("min_candidate_frames must not exceed max_candidate_frames")
+        if (
+            not isinstance(self.min_temporal_gap_seconds, (int, float))
+            or isinstance(self.min_temporal_gap_seconds, bool)
+            or not isfinite(self.min_temporal_gap_seconds)
+            or self.min_temporal_gap_seconds <= 0
+        ):
+            raise ValueError("min_temporal_gap_seconds must be a finite positive number")
+        if (
+            not isinstance(self.phash_distance_threshold, int)
+            or isinstance(self.phash_distance_threshold, bool)
+            or not 0 <= self.phash_distance_threshold <= 64
+        ):
+            raise ValueError("phash_distance_threshold must be an integer between 0 and 64")
+        if not isinstance(self.keep_cover, bool):
+            raise ValueError("keep_cover must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +141,67 @@ class NormalizedImageArtifact:
             raise ValueError("SHA-256 values must have 64 hexadecimal characters")
         if len(self.perceptual_hash) != 16:
             raise ValueError("perceptual_hash must have 16 hexadecimal characters")
+
+
+class VisualImageInspectionError(ValueError):
+    """Typed visual-input decode/budget error raised by an ImageProcessor adapter."""
+
+    def __init__(self, error_type: str, *, budget: bool = False) -> None:
+        self.error_type = error_type
+        self.budget = budget
+        super().__init__(error_type)
+
+
+@dataclass(frozen=True, slots=True)
+class VisualImageInspection:
+    content_type: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContactSheetTile:
+    content: bytes
+    source: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedContactSheet:
+    content: bytes
+    content_type: str
+    width: int
+    height: int
+    sources: tuple[dict[str, Any], ...]
+
+
+class VisualImageBackend(Protocol):
+    """Synchronous CPU-bound visual inspection and contact-sheet composition boundary."""
+
+    def inspect_visual_image_sync(
+        self, *, content: bytes, max_pixels: int
+    ) -> VisualImageInspection:
+        """Validate format, dimensions, single-frame invariant, and pixel decode."""
+
+    def render_contact_sheet_sync(
+        self, *, tiles: tuple[ContactSheetTile, ...], cell_size: int
+    ) -> RenderedContactSheet:
+        """Render a bounded multi-tile contact sheet without dropping sources."""
+
+
+_default_visual_image_backend_factory: Callable[[], VisualImageBackend] | None = None
+
+
+def register_default_visual_image_backend(
+    factory: Callable[[], VisualImageBackend],
+) -> None:
+    global _default_visual_image_backend_factory
+    _default_visual_image_backend_factory = factory
+
+
+def get_default_visual_image_backend() -> VisualImageBackend | None:
+    if _default_visual_image_backend_factory is None:
+        return None
+    return _default_visual_image_backend_factory()
 
 
 class ImageProcessor(Protocol):

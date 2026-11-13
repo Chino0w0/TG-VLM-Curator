@@ -28,12 +28,15 @@ from tgcurator.domain.analysis import (
     AnalysisStageTemplateVersion,
     CachePolicy,
     ExecutionMode,
+    ExistingNodeTargetRun,
     InferenceProfileVersion,
     InputManifest,
     LabelBinding,
     LabelDefinitionVersion,
     LabelScope,
     LabelSetVersion,
+    MediaAssetTarget,
+    MessageMediaReadiness,
     PromptTemplateVersion,
     StageCacheKey,
     StageInputPolicy,
@@ -44,6 +47,8 @@ from tgcurator.domain.analysis import (
     VersionStatus,
     VisualCompositionPolicy,
     apply_stage_parameter_overrides,
+    canonical_hash,
+    plan_pipeline_progression,
 )
 from tgcurator.shared import DomainValidationError
 
@@ -386,11 +391,14 @@ class SqlAlchemyAnalysisStageRunRepository:
     async def find_cache_hit(
         self, *, snapshot: AnalysisStageSnapshot, cache_key: StageCacheKey
     ) -> AnalysisCacheHit | None:
+        excluded_ids = tuple(UUID(target.stage_run_id) for target in snapshot.targets) or (
+            UUID(snapshot.claim.stage_run_id),
+        )
         async with self._database.session() as session:
             source = await session.scalar(
                 select(StageRunRecord)
                 .where(
-                    StageRunRecord.id != UUID(snapshot.claim.stage_run_id),
+                    StageRunRecord.id.not_in(excluded_ids),
                     StageRunRecord.status == "succeeded",
                     StageRunRecord.semantic_cache_key == cache_key.value,
                     StageRunRecord.cache_policy == cache_key.policy.value,
@@ -420,6 +428,7 @@ class SqlAlchemyAnalysisStageRunRepository:
         now: datetime,
     ) -> AnalysisCommitResult:
         source_id = UUID(hit.source_stage_run_id)
+        current_stage_ids = {UUID(target.stage_run_id) for target in snapshot.targets}
         async with self._database.session() as session:
             async with session.begin():
                 source = await session.scalar(
@@ -427,12 +436,68 @@ class SqlAlchemyAnalysisStageRunRepository:
                 )
                 if not _exact_cache_source(source=source, cache_key=cache_key):
                     return AnalysisCommitResult(())
+                assert source is not None
+
+                donors_by_target_id: dict[str, StageRunRecord] = {}
+                if len(snapshot.targets) == 1:
+                    if source.input_manifest_id is not None:
+                        source_manifest = await session.get(
+                            InputManifestRecord, source.input_manifest_id
+                        )
+                        if source_manifest is not None and isinstance(
+                            source_manifest.content, Mapping
+                        ):
+                            manifest_targets = source_manifest.content.get("target_ids")
+                            if isinstance(manifest_targets, list) and len(manifest_targets) != 1:
+                                return AnalysisCommitResult(())
+                    donors_by_target_id[snapshot.targets[0].target_id] = source
+                else:
+                    if source.input_manifest_id is None:
+                        return AnalysisCommitResult(())
+                    source_manifest = await session.get(
+                        InputManifestRecord, source.input_manifest_id
+                    )
+                    if source_manifest is None or not isinstance(source_manifest.content, Mapping):
+                        return AnalysisCommitResult(())
+                    donor_target_ids = source_manifest.content.get("target_ids")
+                    if not isinstance(donor_target_ids, list) or len(donor_target_ids) != len(
+                        snapshot.targets
+                    ):
+                        return AnalysisCommitResult(())
+                    sibling_donors = tuple(
+                        await session.scalars(
+                            select(StageRunRecord)
+                            .where(
+                                StageRunRecord.input_manifest_id == source.input_manifest_id,
+                                StageRunRecord.status == "succeeded",
+                                StageRunRecord.semantic_cache_key == cache_key.value,
+                                StageRunRecord.cache_policy == cache_key.policy.value,
+                                StageRunRecord.cache_scope_identity == cache_key.scope_identity,
+                                StageRunRecord.parsed_result.is_not(None),
+                            )
+                            .with_for_update()
+                        )
+                    )
+                    donor_by_tid = {
+                        str(row.target_id): row
+                        for row in sibling_donors
+                        if row.id not in current_stage_ids
+                    }
+                    for idx, current_target in enumerate(snapshot.targets):
+                        expected_donor_tid = str(donor_target_ids[idx])
+                        donor_row = donor_by_tid.get(expected_donor_tid)
+                        if donor_row is None or not _exact_cache_source(
+                            source=donor_row, cache_key=cache_key
+                        ):
+                            return AnalysisCommitResult(())
+                        donors_by_target_id[current_target.target_id] = donor_row
+
                 rows = await self._lock_snapshot_targets(
                     session=session,
                     snapshot=snapshot,
                     now=now,
                 )
-                if not rows:
+                if len(rows) != len(snapshot.targets):
                     return AnalysisCommitResult(())
                 manifest_row = _new_manifest(
                     stage_version_id=UUID(snapshot.stage.version_id),
@@ -440,21 +505,29 @@ class SqlAlchemyAnalysisStageRunRepository:
                     created_at=now,
                 )
                 session.add(manifest_row)
+                donor_stage_ids = tuple({donor.id for donor in donors_by_target_id.values()})
                 source_assignments = tuple(
                     await session.scalars(
                         select(ModelLabelAssignmentRecord).where(
-                            ModelLabelAssignmentRecord.stage_run_id == source_id
+                            ModelLabelAssignmentRecord.stage_run_id.in_(donor_stage_ids)
                         )
                     )
                 )
+                assignments_by_donor: dict[tuple[UUID, UUID], list[ModelLabelAssignmentRecord]] = {}
+                for assignment in source_assignments:
+                    assignments_by_donor.setdefault(
+                        (assignment.stage_run_id, assignment.target_id), []
+                    ).append(assignment)
+
                 committed: list[str] = []
                 negative: list[NegativeGateAssignment] = []
                 for target in snapshot.targets:
                     row = rows.get(target.target_id)
-                    if row is None:
+                    donor = donors_by_target_id.get(target.target_id)
+                    if row is None or donor is None:
                         continue
                     parsed = _rewrite_cached_target(
-                        source.parsed_result or hit.parsed_result,
+                        donor.parsed_result or hit.parsed_result,
                         target_id=target.target_id,
                     )
                     row.status = "succeeded"
@@ -465,11 +538,11 @@ class SqlAlchemyAnalysisStageRunRepository:
                     row.cache_scope_identity = cache_key.scope_identity
                     row.semantic_cache_key = cache_key.value
                     row.result_origin = "cache"
-                    row.reused_from_stage_run_id = source.id
+                    row.reused_from_stage_run_id = donor.id
                     _clear_stage_lease(row=row, now=now, completed=True)
                     committed.append(target.target_id)
                     if snapshot.claim.run_mode != "test":
-                        for assignment in source_assignments:
+                        for assignment in assignments_by_donor.get((donor.id, donor.target_id), ()):
                             copied = _copy_assignment(
                                 source=assignment,
                                 stage_run=row,
@@ -743,17 +816,26 @@ class SqlAlchemyAnalysisStageRunRepository:
                     target_ids=selected,
                 )
                 changed = False
+                primary_id = UUID(snapshot.claim.stage_run_id)
+                retry_policy = getattr(getattr(snapshot, "stage", None), "retry_policy", None)
                 for target_id in target_ids:
                     row = rows.get(target_id)
                     if row is None:
                         continue
+                    row_retry_at = retry_at
+                    if row.id != primary_id and retry_policy is not None:
+                        delay = min(
+                            retry_policy.max_delay_seconds,
+                            retry_policy.base_delay_seconds * (2 ** max(0, row.attempt_count - 1)),
+                        )
+                        row_retry_at = now + timedelta(seconds=delay)
                     await self._retry_or_fail_row(
                         session=session,
                         row=row,
                         code=code,
                         error_type=error_type,
                         retryable=retryable,
-                        retry_at=retry_at,
+                        retry_at=row_retry_at,
                         now=now,
                     )
                     changed = True
@@ -929,6 +1011,37 @@ class SqlAlchemyAnalysisStageRunRepository:
                     run.completed_at = run.completed_at or now
                     run.last_error_code = None
                     run.last_error_type = None
+                elif run.run_mode == "formal" and (
+                    not stages
+                    or any(
+                        getattr(row, "pipeline_stage_node_id", None) is not None for row in stages
+                    )
+                ):
+                    dag_status = await _evaluate_formal_dag_completion_in_session(
+                        session=session,
+                        run=run,
+                        stages=stages,
+                    )
+                    if dag_status == "running":
+                        run.status = "running"
+                        run.completed_at = None
+                        run.last_error_code = None
+                        run.last_error_type = None
+                    elif dag_status == "failed":
+                        run.status = "failed"
+                        run.completed_at = now
+                        run.last_error_code = run.last_error_code or "MEDIA_UNAVAILABLE"
+                        run.last_error_type = run.last_error_type or "AnalysisMediaUnavailable"
+                    elif dag_status == "blocked_negative_gate":
+                        run.status = "blocked_negative_gate"
+                        run.completed_at = run.completed_at or now
+                        run.last_error_code = None
+                        run.last_error_type = None
+                    else:
+                        run.status = "completed"
+                        run.completed_at = now
+                        run.last_error_code = None
+                        run.last_error_type = None
                 else:
                     run.status = "completed"
                     run.completed_at = now
@@ -1437,12 +1550,139 @@ async def _load_media_snapshot(
     media.extend(_image_manifest(image) for image in images)
     media.extend(_video_manifest(video, frames_by_video[video.id]) for video in videos)
     if stage_run.target_kind == "image_asset":
-        identity = (images[0].archive_sha256 or images[0].perceptual_hash) if images else None
+        identity = (images[0].archive_sha256 or images[0].source_sha256) if images else None
     elif stage_run.target_kind == "video_asset":
-        identity = videos[0].source_sha256 if videos else None
+        identity = (
+            _video_content_identity(videos[0], frames_by_video[videos[0].id]) if videos else None
+        )
     else:
-        identity = message.visual_fingerprint
+        identity = _message_visual_content_identity(
+            images=images,
+            videos=videos,
+            frames_by_video=frames_by_video,
+        )
     return tuple(media), identity
+
+
+def _video_content_identity(
+    video: VideoAssetRecord,
+    frames: Sequence[VideoFrameRecord],
+) -> str | None:
+    frame_entries = [
+        [frame.frame_role, frame.frame_index, frame.archive_sha256]
+        for frame in frames
+        if frame.archive_sha256
+    ]
+    if frame_entries:
+        return canonical_hash(
+            {
+                "source_sha256": video.source_sha256,
+                "frames": frame_entries,
+            }
+        )
+    return video.source_sha256
+
+
+def _message_visual_content_identity(
+    *,
+    images: Sequence[ImageAssetRecord],
+    videos: Sequence[VideoAssetRecord],
+    frames_by_video: Mapping[UUID, Sequence[VideoFrameRecord]],
+) -> str | None:
+    image_hashes = [
+        digest
+        for image in images
+        if (digest := (image.archive_sha256 or image.source_sha256)) is not None
+    ]
+    video_hashes = [
+        digest
+        for video in videos
+        if (digest := _video_content_identity(video, frames_by_video.get(video.id, ()))) is not None
+    ]
+    if len(image_hashes) != len(images) or len(video_hashes) != len(videos):
+        return None
+    if not image_hashes and not video_hashes:
+        return None
+    if len(image_hashes) == 1 and not video_hashes:
+        return image_hashes[0]
+    if len(video_hashes) == 1 and not image_hashes:
+        return video_hashes[0]
+    return canonical_hash({"images": image_hashes, "videos": video_hashes})
+
+
+async def _evaluate_formal_dag_completion_in_session(
+    *,
+    session: AsyncSession,
+    run: AnalysisRunRecord,
+    stages: Sequence[StageRunRecord],
+) -> str:
+    from .pipeline_repository import _build_analysis_facts, _load_pipeline_nodes_in_session
+
+    if run.analysis_pipeline_version_id is None:
+        return "completed"
+    message = await session.get(MessageRecord, run.message_id)
+    if message is None:
+        return "completed"
+    nodes = await _load_pipeline_nodes_in_session(
+        session=session,
+        pipeline_uuid=run.analysis_pipeline_version_id,
+    )
+    if not nodes:
+        return "completed"
+    node_keys = {UUID(node.node_id): node.node_key for node in nodes}
+    existing_by_node: dict[str, list[ExistingNodeTargetRun]] = {}
+    for row in stages:
+        node_id = getattr(row, "pipeline_stage_node_id", None)
+        if node_id is None:
+            continue
+        node_key = node_keys.get(node_id)
+        if node_key is not None:
+            existing_by_node.setdefault(node_key, []).append(
+                ExistingNodeTargetRun(
+                    target_kind=row.target_kind,
+                    target_id=str(row.target_id),
+                    status=row.status,
+                )
+            )
+    assignments = tuple(
+        await session.scalars(
+            select(ModelLabelAssignmentRecord).where(
+                ModelLabelAssignmentRecord.analysis_run_id == run.id
+            )
+        )
+    )
+    facts = _build_analysis_facts(message=message, assignments=assignments)
+    images = tuple(
+        await session.scalars(
+            select(ImageAssetRecord)
+            .where(ImageAssetRecord.message_id == message.id)
+            .order_by(ImageAssetRecord.id)
+        )
+    )
+    videos = tuple(
+        await session.scalars(
+            select(VideoAssetRecord)
+            .where(VideoAssetRecord.message_id == message.id)
+            .order_by(VideoAssetRecord.id)
+        )
+    )
+    media = MessageMediaReadiness(
+        tuple(
+            [MediaAssetTarget("image_asset", str(item.id), item.archive_state) for item in images]
+            + [MediaAssetTarget("video_asset", str(item.id), item.archive_state) for item in videos]
+        )
+    )
+    plan = plan_pipeline_progression(
+        message_id=str(message.id),
+        nodes=nodes,
+        existing_runs_by_node={key: tuple(items) for key, items in existing_by_node.items()},
+        media=media,
+        facts=facts,
+        blocked_from_analysis=bool(message.blocked_from_analysis),
+    )
+    if plan.planned_targets:
+        return "running"
+    return plan.run_status.value
 
 
 async def _load_previous_results(

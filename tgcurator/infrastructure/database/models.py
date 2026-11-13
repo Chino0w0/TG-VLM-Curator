@@ -507,6 +507,7 @@ class DurableWakeupRecord(TimestampMixin, Base):
         ),
         UniqueConstraint("queue", "entity_id", name="uq_durable_wakeup_queue_entity"),
         Index("ix_durable_wakeups_due", "status", "next_attempt_at"),
+        Index("ix_durable_wakeups_status_lease", "status", "lease_expires_at"),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -629,6 +630,14 @@ class MessageRecord(TimestampMixin, Base):
             "ix_messages_visual_fingerprint",
             "visual_fingerprint",
             postgresql_where=text("visual_fingerprint IS NOT NULL"),
+        ),
+        Index(
+            "ix_messages_dedup_candidates",
+            "published_at",
+            "id",
+            postgresql_where=text(
+                "media_count > 0 AND duplicate_status = 'unique' AND processing_status <> 'failed'"
+            ),
         ),
         Index(
             "uq_messages_source_regular",
@@ -2175,6 +2184,16 @@ class StageRunRecord(TimestampMixin, Base):
             "semantic_cache_key",
             postgresql_where=text("status = 'succeeded' AND semantic_cache_key IS NOT NULL"),
         ),
+        Index(
+            "ix_stage_runs_batch_colease",
+            "analysis_stage_template_version_id",
+            "pipeline_stage_node_id",
+            "target_kind",
+            "status",
+            "created_at",
+        ),
+        Index("ix_stage_runs_message_status", "message_id", "status"),
+        Index("ix_stage_runs_target_status", "target_id", "status"),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -2283,6 +2302,7 @@ class ModelLabelAssignmentRecord(CreatedAtMixin, Base):
         ),
         Index("ix_model_assignments_message", "message_id", "target_scope"),
         Index("ix_model_assignments_target", "target_id", "activated"),
+        Index("ix_model_assignments_analysis_run", "analysis_run_id"),
     )
 
     id: Mapped[UUIDPrimaryKey]
@@ -2371,6 +2391,14 @@ class ManualLabelAssignmentRecord(CreatedAtMixin, Base):
             "ix_manual_labels_target_label",
             "target_id",
             "label_definition_version_id",
+            "created_at",
+        ),
+        Index(
+            "ix_manual_labels_target_key_created",
+            "message_id",
+            "target_scope",
+            "target_id",
+            "label_key",
             "created_at",
         ),
     )
@@ -3139,3 +3167,25 @@ class MediaProcessingProfileVersionRecord(TimestampMixin, Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ServiceHeartbeatRecord(Base):
+    """Durable cross-container liveness heartbeat reported by background daemons."""
+
+    __tablename__ = "service_heartbeats"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(service_name)) > 0",
+            name="service_heartbeat_name_not_blank",
+        ),
+    )
+
+    service_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    database_ready: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    broker_ready: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )

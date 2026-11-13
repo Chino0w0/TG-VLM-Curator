@@ -131,7 +131,13 @@ class TelethonReadGateway:
 
     async def newest_message(self, *, source_channel_id: str) -> LatestMessageBoundary | None:
         peer = await self.source_peer_resolver.resolve_peer(source_channel_id=source_channel_id)
+        first_service_id: int | None = None
         async for raw_message in self.client.iter_messages(peer, limit=1):
+            if _is_service_message(raw_message):
+                raw_id = getattr(raw_message, "id", None)
+                if isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id > 0:
+                    first_service_id = raw_id
+                break
             message = self.message_mapper.map(
                 source_channel_id=source_channel_id, message=raw_message
             )
@@ -139,6 +145,19 @@ class TelethonReadGateway:
                 message_id=message.telegram_message_id,
                 published_at=message.published_at,
             )
+        if first_service_id is not None:
+            async for raw_message in self.client.iter_messages(
+                peer, max_id=first_service_id, limit=50
+            ):
+                if _is_service_message(raw_message):
+                    continue
+                message = self.message_mapper.map(
+                    source_channel_id=source_channel_id, message=raw_message
+                )
+                return LatestMessageBoundary(
+                    message_id=message.telegram_message_id,
+                    published_at=message.published_at,
+                )
         return None
 
     async def fetch_history(
@@ -161,6 +180,8 @@ class TelethonReadGateway:
             reverse=True,
             limit=None,
         ):
+            if _is_service_message(raw_message):
+                continue
             message = self.message_mapper.map(
                 source_channel_id=source_channel_id, message=raw_message
             )
@@ -186,3 +207,7 @@ class TelethonReadGateway:
             raise DomainValidationError(
                 "from_message_id_exclusive must be less than to_message_id_inclusive"
             )
+
+
+def _is_service_message(raw_message: Any) -> bool:
+    return getattr(raw_message, "action", None) is not None
