@@ -23,6 +23,10 @@ _SAFE_AUDIT_KEYS: frozenset[str] = frozenset(
         "prompt_tokens",
         "completion_tokens",
         "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
         "lease_token_cleared",
     }
 )
@@ -30,6 +34,7 @@ _SENSITIVE_AUDIT_SUBSTRINGS: tuple[str, ...] = (
     "password",
     "passwd",
     "plaintext",
+    "secret",
     "secret_value",
     "secret_plaintext",
     "api_key",
@@ -56,8 +61,10 @@ _SENSITIVE_AUDIT_SUBSTRINGS: tuple[str, ...] = (
     "master_key",
 )
 _BEARER_VALUE_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/@\s]+@)")
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|api[_-]?key|api[_-]?hash|bot[_-]?token|authorization|cookie|session_string)"
+    r"(?i)\b(password|passwd|secret|api[_-]?key|api[_-]?hash|bot[_-]?token|token|authorization|cookie|session_string)"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
 
@@ -97,6 +104,8 @@ def sanitize_audit_value(value: Any, *, field_name: str | None = None) -> Any:
         return str(value)
     if isinstance(value, str):
         scrubbed = _BEARER_VALUE_RE.sub(lambda m: m.group(1) + AUDIT_REDACTED, value)
+        scrubbed = _URL_USERINFO_RE.sub(lambda m: m.group(1) + AUDIT_REDACTED + "@", scrubbed)
+        scrubbed = _TELEGRAM_BOT_TOKEN_RE.sub(AUDIT_REDACTED, scrubbed)
         return _CREDENTIAL_ASSIGNMENT_RE.sub(
             lambda m: m.group(1) + m.group(2) + AUDIT_REDACTED,
             scrubbed,

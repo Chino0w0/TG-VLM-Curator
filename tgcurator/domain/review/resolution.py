@@ -19,25 +19,31 @@ def resolve_label_namespaces(
 
     latest_manual: dict[tuple[str, str, str], ManualLabelEvent] = {}
     for event in sorted(manual_events, key=lambda item: (item.created_at, item.event_id)):
-        latest_manual[event.identity] = event
+        latest_manual[(event.target_scope, event.target_id, event.label_key)] = event
 
-    manual_by_identity = {
-        identity: event.as_label_value()
-        for identity, event in latest_manual.items()
+    manual_values = [
+        event.as_label_value()
+        for event in latest_manual.values()
         if event.operation is ManualLabelOperation.SET
-    }
+    ]
     effective_by_identity = dict(model_by_identity)
-    for identity, event in latest_manual.items():
+    for (target_scope, target_id, label_key), event in latest_manual.items():
         if event.operation is ManualLabelOperation.SET:
-            effective_by_identity[identity] = event.as_label_value()
-        else:
-            effective_by_identity.pop(identity, None)
-            if identity in model_by_identity:
-                effective_by_identity[identity] = model_by_identity[identity]
+            matching_keys = [
+                ident
+                for ident, value in effective_by_identity.items()
+                if value.target_scope == target_scope
+                and value.target_id == target_id
+                and value.label_key == label_key
+            ]
+            for ident in matching_keys:
+                effective_by_identity.pop(ident, None)
+            value = event.as_label_value()
+            effective_by_identity[value.identity] = value
 
     return ResolvedLabelNamespaces(
         model=_ordered(model_by_identity.values()),
-        manual=_ordered(manual_by_identity.values()),
+        manual=_ordered(manual_values),
         effective=_ordered(effective_by_identity.values()),
     )
 

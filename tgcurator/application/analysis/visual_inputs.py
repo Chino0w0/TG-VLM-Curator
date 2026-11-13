@@ -5,16 +5,18 @@ import base64
 import binascii
 import hashlib
 import math
-import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Any
-
-from PIL import Image, ImageDraw, ImageOps
 
 from tgcurator.application.ports.analysis import InferenceImage
 from tgcurator.application.ports.cleanup import ArchiveStorageResolver
+from tgcurator.application.ports.media import (
+    ContactSheetTile,
+    VisualImageBackend,
+    VisualImageInspectionError,
+    get_default_visual_image_backend,
+)
 from tgcurator.domain.analysis import AnalysisErrorCode, VisualCompositionPolicy
 
 from .input_composer import AnalysisInputError, AnalysisTargetInput
@@ -61,9 +63,15 @@ class ArchiveVisualInputResolver:
         *,
         storage_resolver: ArchiveStorageResolver | None,
         limits: VisualInputLimits | None = None,
+        visual_backend: VisualImageBackend | None = None,
     ) -> None:
         self._storage_resolver = storage_resolver
         self.limits = limits or VisualInputLimits()
+        self._visual_backend = visual_backend
+
+    @property
+    def visual_backend(self) -> VisualImageBackend | None:
+        return self._visual_backend
 
     async def resolve(
         self,
@@ -72,6 +80,7 @@ class ArchiveVisualInputResolver:
         descriptors = _sources(targets)
         if len(descriptors) > self.limits.max_source_images:
             _fail("VisualSourceBudgetExceeded", budget=True)
+        backend = _require_visual_backend(self._visual_backend)
         images: list[InferenceImage] = []
         total = 0
         for identity, descriptor in descriptors:
@@ -84,7 +93,7 @@ class ArchiveVisualInputResolver:
             if expected is not None and expected != digest:
                 _fail("VisualArchiveHashMismatch")
             content_type, width, height = await asyncio.to_thread(
-                _inspect_image, content, self.limits
+                _inspect_image, content, self.limits, backend
             )
             source = {
                 **identity,
@@ -158,12 +167,91 @@ class ArchiveVisualInputResolver:
         return content
 
 
+_SUPPORTED_PROBE_CONTENT_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
+
+
+def probe_visual_descriptors(
+    targets: tuple[AnalysisTargetInput, ...],
+    *,
+    policy: VisualCompositionPolicy,
+    max_images: int,
+    limits: VisualInputLimits,
+) -> tuple[InferenceImage, ...] | None:
+    """Build metadata-only visual descriptors without opening archive blobs when raw/adaptive."""
+
+    descriptors = _sources(targets)
+    if not descriptors or len(descriptors) > limits.max_source_images:
+        return None
+    if policy is VisualCompositionPolicy.CONTACT_SHEET:
+        return None
+    if policy not in {VisualCompositionPolicy.RAW, VisualCompositionPolicy.ADAPTIVE}:
+        return None
+    if len(descriptors) > max_images:
+        return None
+
+    probed: list[InferenceImage] = []
+    total_bytes = 0
+    for identity, descriptor in descriptors:
+        digest = descriptor.get("archive_sha256")
+        size = (
+            descriptor.get("archive_size_bytes")
+            if descriptor.get("archive_size_bytes") is not None
+            else descriptor.get("size_bytes")
+        )
+        width = descriptor.get("width")
+        height = descriptor.get("height")
+        content_type = descriptor.get("content_type")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > limits.max_source_bytes
+            or not isinstance(width, int)
+            or isinstance(width, bool)
+            or width <= 0
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or height <= 0
+            or width * height > limits.max_pixels
+            or content_type not in _SUPPORTED_PROBE_CONTENT_TYPES
+        ):
+            return None
+        total_bytes += size
+        if total_bytes > limits.max_total_bytes:
+            return None
+        source = {
+            **identity,
+            "source_index": len(probed),
+            "sha256": digest,
+            "width": width,
+            "height": height,
+            "region": [0, 0, width, height],
+        }
+        probed.append(
+            InferenceImage(
+                content=b"",
+                content_type=content_type,
+                sha256=digest,
+                width=width,
+                height=height,
+                sources=(source,),
+                composition="raw",
+                size_bytes=size,
+            )
+        )
+    return tuple(probed)
+
+
 def compose_visual_inputs(
     images: tuple[InferenceImage, ...],
     *,
     policy: VisualCompositionPolicy,
     max_images: int,
     limits: VisualInputLimits,
+    visual_backend: VisualImageBackend | None = None,
 ) -> tuple[InferenceImage, ...]:
     if not images:
         _fail("RequiredMediaUnavailable")
@@ -180,8 +268,9 @@ def compose_visual_inputs(
     required = math.ceil(len(images) / limits.sheet_max_tiles)
     if required > max_images:
         _fail("VisualImageBudgetExceeded", budget=True)
+    backend = _require_visual_backend(visual_backend)
     sheets = tuple(
-        _contact_sheet(images[start : start + limits.sheet_max_tiles], limits)
+        _contact_sheet(images[start : start + limits.sheet_max_tiles], limits, backend)
         for start in range(0, len(images), limits.sheet_max_tiles)
     )
     if sum(len(image.content) for image in sheets) > limits.max_total_bytes:
@@ -252,28 +341,22 @@ def _sources(
     return result
 
 
-def _inspect_image(content: bytes, limits: VisualInputLimits) -> tuple[str, int, int]:
+def _require_visual_backend(backend: VisualImageBackend | None) -> VisualImageBackend:
+    resolved = backend or get_default_visual_image_backend()
+    if resolved is None:
+        _fail("VisualImageBackendUnavailable")
+    assert resolved is not None
+    return resolved
+
+
+def _inspect_image(
+    content: bytes, limits: VisualInputLimits, backend: VisualImageBackend
+) -> tuple[str, int, int]:
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(BytesIO(content)) as image:
-                mime = {
-                    "JPEG": "image/jpeg",
-                    "PNG": "image/png",
-                    "WEBP": "image/webp",
-                    "GIF": "image/gif",
-                }.get(image.format or "")
-                if mime is None:
-                    _fail("VisualImageFormatUnsupported")
-                if image.width * image.height > limits.max_pixels:
-                    _fail("VisualPixelBudgetExceeded", budget=True)
-                if getattr(image, "n_frames", 1) != 1:
-                    _fail("AnimatedVisualRequiresFrames")
-                width, height = image.size
-                image.verify()
-            with Image.open(BytesIO(content)) as image:
-                image.load()
-        return mime, width, height
+        inspected = backend.inspect_visual_image_sync(content=content, max_pixels=limits.max_pixels)
+        return inspected.content_type, inspected.width, inspected.height
+    except VisualImageInspectionError as error:
+        _fail(error.error_type, budget=error.budget)
     except AnalysisInputError:
         raise
     except Exception as error:
@@ -284,34 +367,20 @@ def _inspect_image(content: bytes, limits: VisualInputLimits) -> tuple[str, int,
         ) from error
 
 
-def _contact_sheet(images: tuple[InferenceImage, ...], limits: VisualInputLimits) -> InferenceImage:
-    cell, footer = limits.sheet_cell_size, 24
-    columns = math.ceil(math.sqrt(len(images)))
-    rows = math.ceil(len(images) / columns)
-    canvas = Image.new("RGB", (columns * cell, rows * (cell + footer)), "white")
-    draw = ImageDraw.Draw(canvas)
-    sources = []
-    for index, part in enumerate(images):
-        left, top = (index % columns) * cell, (index // columns) * (cell + footer)
-        with Image.open(BytesIO(part.content)) as original:
-            tile = ImageOps.exif_transpose(original).convert("RGB")
-            tile.thumbnail((cell, cell), Image.Resampling.LANCZOS)
-            x, y = left + (cell - tile.width) // 2, top + (cell - tile.height) // 2
-            canvas.paste(tile, (x, y))
-            source = dict(part.sources[0])
-            source["region"] = [x, y, x + tile.width, y + tile.height]
-            sources.append(source)
-            draw.text((left + 4, top + cell + 4), f"source {source['source_index']}", fill="black")
-    output = BytesIO()
-    canvas.save(output, format="JPEG", quality=90, optimize=False, progressive=False)
-    content = output.getvalue()
+def _contact_sheet(
+    images: tuple[InferenceImage, ...],
+    limits: VisualInputLimits,
+    backend: VisualImageBackend,
+) -> InferenceImage:
+    tiles = tuple(ContactSheetTile(content=part.content, source=part.sources[0]) for part in images)
+    rendered = backend.render_contact_sheet_sync(tiles=tiles, cell_size=limits.sheet_cell_size)
     return InferenceImage(
-        content=content,
-        content_type="image/jpeg",
-        sha256=hashlib.sha256(content).hexdigest(),
-        width=canvas.width,
-        height=canvas.height,
-        sources=tuple(sources),
+        content=rendered.content,
+        content_type=rendered.content_type,
+        sha256=hashlib.sha256(rendered.content).hexdigest(),
+        width=rendered.width,
+        height=rendered.height,
+        sources=rendered.sources,
         composition="contact_sheet",
     )
 

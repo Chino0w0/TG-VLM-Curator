@@ -29,7 +29,7 @@ class FFmpegFrameExtractionError(FFmpegMediaError):
     pass
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True, eq=False)
 class FFmpegVideoFrameExtractor:
     ffprobe_path: str = "ffprobe"
     ffmpeg_path: str = "ffmpeg"
@@ -100,10 +100,23 @@ class FFmpegVideoFrameExtractor:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
 
+    def _terminate_process_set(self, processes: set[subprocess.Popen[bytes]]) -> None:
+        with self._process_lock:
+            snapshot = list(processes)
+        for process in snapshot:
+            if process.poll() is not None:
+                continue
+            self._terminate_process(process)
+
     async def probe(self, *, content: bytes) -> VideoProbeMetadata:
         if not isinstance(content, bytes) or not content:
             raise FFmpegProbeError("video content must not be empty")
-        return await asyncio.to_thread(self._probe_sync, content)
+        call_processes: set[subprocess.Popen[bytes]] = set()
+        try:
+            return await asyncio.to_thread(self._probe_sync, content, call_processes)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self._terminate_process_set, call_processes)
+            raise
 
     async def probe_duration(self, *, content: bytes) -> float:
         return (await self.probe(content=content)).duration_seconds
@@ -118,9 +131,56 @@ class FFmpegVideoFrameExtractor:
             or timestamp_seconds < 0
         ):
             raise FFmpegFrameExtractionError("timestamp_seconds must be finite and non-negative")
-        return await asyncio.to_thread(self._extract_sync, content, float(timestamp_seconds))
+        call_processes: set[subprocess.Popen[bytes]] = set()
+        try:
+            return await asyncio.to_thread(
+                self._extract_sync, content, float(timestamp_seconds), call_processes
+            )
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self._terminate_process_set, call_processes)
+            raise
 
-    def _probe_sync(self, content: bytes) -> VideoProbeMetadata:
+    async def extract_frames(
+        self,
+        *,
+        content: bytes,
+        timestamps: tuple[float, ...],
+        duration_seconds: float | None = None,
+    ) -> tuple[bytes, ...]:
+        if not isinstance(content, bytes) or not content:
+            raise FFmpegFrameExtractionError("video content must not be empty")
+        normalized_timestamps: list[float] = []
+        for ts in timestamps:
+            if (
+                not isinstance(ts, (int, float))
+                or isinstance(ts, bool)
+                or not isfinite(ts)
+                or ts < 0
+            ):
+                raise FFmpegFrameExtractionError(
+                    "timestamp_seconds must be finite and non-negative"
+                )
+            normalized_timestamps.append(float(ts))
+        if not normalized_timestamps:
+            return ()
+        call_processes: set[subprocess.Popen[bytes]] = set()
+        try:
+            return await asyncio.to_thread(
+                self._extract_frames_sync,
+                content,
+                tuple(normalized_timestamps),
+                duration_seconds,
+                call_processes,
+            )
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self._terminate_process_set, call_processes)
+            raise
+
+    def _probe_sync(
+        self,
+        content: bytes,
+        call_processes: set[subprocess.Popen[bytes]] | None = None,
+    ) -> VideoProbeMetadata:
         with tempfile.TemporaryDirectory(
             prefix="tgcurator-ffprobe-", dir=self.temp_dir
         ) as directory:
@@ -134,20 +194,24 @@ class FFmpegVideoFrameExtractor:
                     "-select_streams",
                     "v:0",
                     "-show_entries",
-                    "stream=width,height:format=duration,format_name",
+                    "stream=width,height,duration:format=duration,format_name",
                     "-of",
                     "json",
                     str(source),
                 ],
                 stdout_limit=self.max_probe_output_bytes,
                 error_type=FFmpegProbeError,
+                call_processes=call_processes,
             )
             try:
                 payload: dict[str, Any] = json.loads(completed.decode("utf-8"))
                 format_payload = payload.get("format") or {}
                 streams = payload.get("streams") or []
                 stream = streams[0] if streams else {}
-                duration = float(format_payload["duration"])
+                raw_duration = format_payload.get("duration")
+                if raw_duration in (None, "", "N/A"):
+                    raw_duration = stream.get("duration")
+                duration = float(raw_duration)  # type: ignore[arg-type]
                 width = int(stream["width"]) if stream.get("width") is not None else None
                 height = int(stream["height"]) if stream.get("height") is not None else None
                 format_name = str(format_payload.get("format_name") or "").split(",", 1)[0]
@@ -161,20 +225,98 @@ class FFmpegVideoFrameExtractor:
                 content_type=content_type,
             )
 
-    def _extract_sync(self, content: bytes, timestamp_seconds: float) -> bytes:
+    def _extract_sync(
+        self,
+        content: bytes,
+        timestamp_seconds: float,
+        call_processes: set[subprocess.Popen[bytes]] | None = None,
+    ) -> bytes:
         with tempfile.TemporaryDirectory(
             prefix="tgcurator-ffmpeg-", dir=self.temp_dir
         ) as directory:
             source = Path(directory) / "source.video"
             frame = Path(directory) / "frame.png"
             source.write_bytes(content)
+            return self._extract_frame_from_source(
+                source=source,
+                frame=frame,
+                timestamp_seconds=timestamp_seconds,
+                duration_seconds=None,
+                call_processes=call_processes,
+            )
+
+    def _extract_frames_sync(
+        self,
+        content: bytes,
+        timestamps: tuple[float, ...],
+        duration_seconds: float | None,
+        call_processes: set[subprocess.Popen[bytes]] | None = None,
+    ) -> tuple[bytes, ...]:
+        with tempfile.TemporaryDirectory(
+            prefix="tgcurator-ffmpeg-", dir=self.temp_dir
+        ) as directory:
+            source = Path(directory) / "source.video"
+            source.write_bytes(content)
+            outputs: list[bytes] = []
+            for index, timestamp_seconds in enumerate(timestamps):
+                frame = Path(directory) / f"frame_{index}.png"
+                outputs.append(
+                    self._extract_frame_from_source(
+                        source=source,
+                        frame=frame,
+                        timestamp_seconds=timestamp_seconds,
+                        duration_seconds=duration_seconds,
+                        call_processes=call_processes,
+                    )
+                )
+                try:
+                    frame.unlink()
+                except FileNotFoundError:
+                    pass
+            return tuple(outputs)
+
+    def _extract_frame_from_source(
+        self,
+        *,
+        source: Path,
+        frame: Path,
+        timestamp_seconds: float,
+        duration_seconds: float | None,
+        call_processes: set[subprocess.Popen[bytes]] | None,
+    ) -> bytes:
+        seek_seconds = timestamp_seconds
+        if (
+            duration_seconds is not None
+            and duration_seconds > 0
+            and timestamp_seconds >= duration_seconds
+        ):
+            seek_seconds = max(0.0, duration_seconds - min(0.1, duration_seconds * 0.05))
+        self._run(
+            [
+                self.ffmpeg_path,
+                "-v",
+                "error",
+                "-ss",
+                f"{seek_seconds:.6f}",
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-y",
+                str(frame),
+            ],
+            stdout_limit=self.max_probe_output_bytes,
+            error_type=FFmpegFrameExtractionError,
+            call_processes=call_processes,
+        )
+        if timestamp_seconds > 0 and (not frame.exists() or frame.stat().st_size == 0):
             self._run(
                 [
                     self.ffmpeg_path,
                     "-v",
                     "error",
-                    "-ss",
-                    f"{timestamp_seconds:.6f}",
+                    "-sseof",
+                    "-0.1",
                     "-i",
                     str(source),
                     "-frames:v",
@@ -184,17 +326,18 @@ class FFmpegVideoFrameExtractor:
                 ],
                 stdout_limit=self.max_probe_output_bytes,
                 error_type=FFmpegFrameExtractionError,
+                call_processes=call_processes,
             )
-            try:
-                size = frame.stat().st_size
-            except FileNotFoundError as error:
-                raise FFmpegFrameExtractionError("FFmpeg did not produce a frame") from error
-            if size <= 0 or size > self.max_frame_bytes:
-                raise FFmpegFrameExtractionError("FFmpeg frame output exceeded safe bounds")
-            result = frame.read_bytes()
-            if len(result) != size:
-                raise FFmpegFrameExtractionError("FFmpeg frame output could not be read completely")
-            return result
+        try:
+            size = frame.stat().st_size
+        except FileNotFoundError as error:
+            raise FFmpegFrameExtractionError("FFmpeg did not produce a frame") from error
+        if size <= 0 or size > self.max_frame_bytes:
+            raise FFmpegFrameExtractionError("FFmpeg frame output exceeded safe bounds")
+        result = frame.read_bytes()
+        if len(result) != size:
+            raise FFmpegFrameExtractionError("FFmpeg frame output could not be read completely")
+        return result
 
     def _run(
         self,
@@ -202,6 +345,7 @@ class FFmpegVideoFrameExtractor:
         *,
         stdout_limit: int,
         error_type: type[FFmpegMediaError],
+        call_processes: set[subprocess.Popen[bytes]] | None = None,
     ) -> bytes:
         with (
             tempfile.TemporaryFile(dir=self.temp_dir) as stdout,
@@ -219,6 +363,8 @@ class FFmpegVideoFrameExtractor:
                 raise error_type("media executable could not be started") from error
             with self._process_lock:
                 self._active_processes.add(process)
+                if call_processes is not None:
+                    call_processes.add(process)
             try:
                 return_code = process.wait(timeout=self.timeout_seconds)
             except subprocess.TimeoutExpired as error:
@@ -230,6 +376,8 @@ class FFmpegVideoFrameExtractor:
             finally:
                 with self._process_lock:
                     self._active_processes.discard(process)
+                    if call_processes is not None:
+                        call_processes.discard(process)
             stderr.seek(0)
             stderr.read(self.max_stderr_bytes + 1)
             if return_code != 0:

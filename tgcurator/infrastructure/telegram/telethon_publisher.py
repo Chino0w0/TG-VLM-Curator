@@ -77,9 +77,47 @@ class TelethonPublisher:
 
     async def _execute(self, *, request: TelegramPublishRequest) -> TelegramPublishResult:
         try:
-            client = await self._client_resolver.resolve_client(identity_id=request.identity_id)
-            raw_request = await self._build_request(client=client, request=request)
-            response = await client(raw_request)
+            publish_client = await self._client_resolver.resolve_client(
+                identity_id=request.identity_id
+            )
+            read_client = publish_client
+            force_reupload = bool(getattr(publish_client, "is_bot", False))
+            if (
+                request.operation is PublicationOperation.COPY_WITH_CAPTION
+                and request.source_read_identity_id is not None
+                and request.source_read_identity_id != request.identity_id
+            ):
+                read_client = await self._client_resolver.resolve_client(
+                    identity_id=request.source_read_identity_id
+                )
+                force_reupload = True
+
+            raw_request = await self._build_request(
+                publish_client=publish_client,
+                read_client=read_client,
+                request=request,
+                force_reupload=force_reupload,
+            )
+            try:
+                response = await publish_client(raw_request)
+            except Exception as send_error:
+                if (
+                    request.operation is PublicationOperation.COPY_WITH_CAPTION
+                    and not force_reupload
+                    and {base.__name__ for base in type(send_error).__mro__}
+                    & _REUPLOAD_FALLBACK_ERRORS
+                    and hasattr(read_client, "download_media")
+                    and hasattr(publish_client, "upload_file")
+                ):
+                    raw_request = await self._build_request(
+                        publish_client=publish_client,
+                        read_client=read_client,
+                        request=request,
+                        force_reupload=True,
+                    )
+                    response = await publish_client(raw_request)
+                else:
+                    raise
             return TelegramPublishResult(
                 remote_message_ids=_response_message_ids(
                     response=response,
@@ -94,8 +132,10 @@ class TelethonPublisher:
     @staticmethod
     async def _build_request(
         *,
-        client: TelethonPublishClient,
+        publish_client: TelethonPublishClient,
+        read_client: TelethonPublishClient,
         request: TelegramPublishRequest,
+        force_reupload: bool = False,
     ) -> Any:
         functions, types, utils = _telethon_components()
         if request.operation is PublicationOperation.NATIVE_FORWARD:
@@ -119,18 +159,38 @@ class TelethonPublisher:
                 reply_to=reply_to,
             )
 
-        source_messages = await _source_messages(client=client, request=request)
-        input_media: list[Any] = []
+        source_messages = await _source_messages(client=read_client, request=request)
         for message in source_messages:
-            if getattr(message, "noforwards", False):
+            if _is_message_protected(message):
                 raise TelegramProtectedContent("SourceMessageProtected")
-            media = getattr(message, "media", None)
-            if media is None:
-                raise TelegramMediaUnavailable("SourceMessageMediaUnavailable")
-            try:
-                input_media.append(utils.get_input_media(media))
-            except (AttributeError, TypeError, ValueError) as error:
-                raise TelegramMediaUnavailable("SourceMessageMediaUnavailable") from error
+
+        if all(getattr(message, "media", None) is None for message in source_messages):
+            if len(source_messages) == 1 and request.text:
+                return functions.messages.SendMessageRequest(
+                    peer=request.destination_peer_id,
+                    message=request.text,
+                    random_id=request.random_ids[0],
+                    reply_to=reply_to,
+                )
+            raise TelegramMediaUnavailable("SourceMessageMediaUnavailable")
+
+        input_media: list[Any] = []
+        if force_reupload:
+            input_media = await _reupload_input_media(
+                read_client=read_client,
+                publish_client=publish_client,
+                source_messages=source_messages,
+                types=types,
+            )
+        else:
+            for message in source_messages:
+                media = getattr(message, "media", None)
+                if media is None:
+                    raise TelegramMediaUnavailable("SourceMessageMediaUnavailable")
+                try:
+                    input_media.append(utils.get_input_media(media))
+                except (AttributeError, TypeError, ValueError) as error:
+                    raise TelegramMediaUnavailable("SourceMessageMediaUnavailable") from error
 
         if len(input_media) == 1:
             return functions.messages.SendMediaRequest(
@@ -151,6 +211,81 @@ class TelethonPublisher:
                 for index, media in enumerate(input_media)
             ],
         )
+
+
+def _is_message_protected(message: Any) -> bool:
+    return bool(
+        getattr(message, "noforwards", False)
+        or getattr(getattr(message, "chat", None), "noforwards", False)
+    )
+
+
+async def _reupload_input_media(
+    *,
+    read_client: Any,
+    publish_client: Any,
+    source_messages: tuple[Any, ...],
+    types: Any,
+) -> list[Any]:
+    download_fn = getattr(read_client, "download_media", None)
+    upload_fn = getattr(publish_client, "upload_file", None)
+    if download_fn is None or upload_fn is None:
+        raise TelegramMediaUnavailable("SourceMessageMediaUnavailable")
+
+    input_media: list[Any] = []
+    for index, message in enumerate(source_messages):
+        media = getattr(message, "media", None)
+        if media is None:
+            raise TelegramMediaUnavailable("SourceMessageMediaUnavailable")
+        media_bytes = await download_fn(message, file=bytes)
+        if not isinstance(media_bytes, (bytes, bytearray)) or not media_bytes:
+            raise TelegramMediaUnavailable("SourceMessageMediaUnavailable")
+        raw_bytes = bytes(media_bytes)
+        msg_id = getattr(message, "id", index)
+        is_photo = (
+            isinstance(media, (types.MessageMediaPhoto, types.InputMediaPhoto))
+            or getattr(media, "photo", None) is not None
+        )
+        if is_photo:
+            uploaded = await upload_fn(raw_bytes, file_name=f"photo_{msg_id}.jpg")
+            if isinstance(uploaded, (types.InputMediaPhoto, types.InputMediaUploadedPhoto)):
+                input_media.append(uploaded)
+            else:
+                input_media.append(types.InputMediaUploadedPhoto(file=uploaded))
+            continue
+
+        doc = getattr(media, "document", None)
+        mime_type = getattr(doc, "mime_type", None) or "application/octet-stream"
+        attributes = list(getattr(doc, "attributes", None) or [])
+        file_name = next(
+            (str(name) for attr in attributes if (name := getattr(attr, "file_name", None))),
+            None,
+        )
+        if not file_name:
+            if mime_type.startswith("video/"):
+                ext = ".mp4"
+            elif mime_type == "image/webp":
+                ext = ".webp"
+            elif mime_type == "image/jpeg":
+                ext = ".jpg"
+            elif mime_type == "image/png":
+                ext = ".png"
+            else:
+                ext = ".bin"
+            file_name = f"media_{msg_id}{ext}"
+            attributes.append(types.DocumentAttributeFilename(file_name=file_name))
+        uploaded = await upload_fn(raw_bytes, file_name=file_name)
+        if isinstance(uploaded, (types.InputMediaDocument, types.InputMediaUploadedDocument)):
+            input_media.append(uploaded)
+        else:
+            input_media.append(
+                types.InputMediaUploadedDocument(
+                    file=uploaded,
+                    mime_type=mime_type,
+                    attributes=attributes,
+                )
+            )
+    return input_media
 
 
 async def _source_messages(
@@ -281,6 +416,7 @@ _SESSION_ERRORS = {
     "UserDeactivatedError",
 }
 _PERMISSION_ERRORS = {
+    "BotMethodInvalidError",
     "ChannelPrivateError",
     "ChatAdminRequiredError",
     "ChatForbiddenError",
@@ -296,5 +432,11 @@ _MEDIA_ERRORS = {
     "MediaInvalidError",
     "MessageIdInvalidError",
     "MessageIdsEmptyError",
+    "PhotoInvalidError",
+}
+_REUPLOAD_FALLBACK_ERRORS = {
+    "DocumentInvalidError",
+    "FileReferenceExpiredError",
+    "MediaInvalidError",
     "PhotoInvalidError",
 }

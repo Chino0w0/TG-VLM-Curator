@@ -136,7 +136,14 @@ class ConfiguredTelegramClientPool:
                 self._clients.pop(identity_id, None)
             client = None
             try:
-                plaintext = await self.vault.resolve(secret_id=secret_id)
+                expected_secret_type = "bot_token" if identity_type == "bot" else "telegram_session"
+                try:
+                    plaintext = await self.vault.resolve(
+                        secret_id=secret_id,
+                        expected_secret_type=expected_secret_type,
+                    )
+                except TypeError:
+                    plaintext = await self.vault.resolve(secret_id=secret_id)
                 credentials = TelegramCredentials.from_secret(
                     plaintext=plaintext, identity_type=identity_type, settings=self.settings
                 )
