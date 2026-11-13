@@ -17,6 +17,7 @@ from tgcurator.domain.audit import sanitize_audit_payload
 from .errors import AdminAuthenticationError, AdminCsrfError
 
 SESSION_COOKIE_NAME = "tgcurator_session"
+SESSION_TOUCH_INTERVAL = timedelta(seconds=60)
 
 
 class AdminSessionService:
@@ -29,6 +30,7 @@ class AdminSessionService:
         password_hasher: PasswordHasher,
         csrf_secret: bytes,
         session_ttl: timedelta = timedelta(hours=12),
+        touch_interval: timedelta = SESSION_TOUCH_INTERVAL,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
     ) -> None:
@@ -36,12 +38,20 @@ class AdminSessionService:
             raise ValueError("csrf_secret must contain at least 16 bytes")
         if session_ttl <= timedelta(0):
             raise ValueError("session_ttl must be positive")
+        if touch_interval < timedelta(0):
+            raise ValueError("touch_interval must be non-negative")
         self._repository = repository
         self._password_hasher = password_hasher
         self._csrf_secret = csrf_secret
         self._session_ttl = session_ttl
+        self._touch_interval = touch_interval
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or uuid4
+        self._dummy_password_hash = self._password_hasher.hash("tgcurator-dummy-timing-guard")
+
+    @property
+    def session_ttl(self) -> timedelta:
+        return self._session_ttl
 
     async def login(
         self,
@@ -51,17 +61,44 @@ class AdminSessionService:
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> tuple[str, AuthenticatedAdmin]:
+        now = self._clock()
         normalized_username = username.strip() if isinstance(username, str) else ""
-        if not normalized_username or not isinstance(password, str) or not password:
+        candidate_password = password if isinstance(password, str) else ""
+        if not normalized_username or not candidate_password:
+            self._password_hasher.verify(
+                self._dummy_password_hash,
+                candidate_password or "invalid-empty-password",
+            )
+            await self._record_failed_login(
+                actor_admin_user_id=None,
+                username=normalized_username or None,
+                ip_address=ip_address,
+                reason="missing_credentials",
+                now=now,
+            )
             raise AdminAuthenticationError("invalid administrator credentials")
 
         account = await self._repository.find_active_admin_by_username(username=normalized_username)
         if account is None or not account.is_active:
+            self._password_hasher.verify(self._dummy_password_hash, candidate_password)
+            await self._record_failed_login(
+                actor_admin_user_id=account.user_id if account is not None else None,
+                username=normalized_username,
+                ip_address=ip_address,
+                reason="unknown_or_inactive_user",
+                now=now,
+            )
             raise AdminAuthenticationError("invalid administrator credentials")
-        if not self._password_hasher.verify(account.password_hash, password):
+        if not self._password_hasher.verify(account.password_hash, candidate_password):
+            await self._record_failed_login(
+                actor_admin_user_id=account.user_id,
+                username=account.username,
+                ip_address=ip_address,
+                reason="invalid_password",
+                now=now,
+            )
             raise AdminAuthenticationError("invalid administrator credentials")
 
-        now = self._clock()
         expires_at = now + self._session_ttl
         session_id = str(self._id_factory())
         raw_session_token = secrets.token_urlsafe(32)
@@ -121,7 +158,8 @@ class AdminSessionService:
         if not secrets.compare_digest(_sha256_hex(csrf_token), state.csrf_token_hash):
             raise AdminAuthenticationError("authentication session integrity check failed")
 
-        await self._repository.touch_session(session_id=state.session_id, now=now)
+        if (now - state.last_seen_at) >= self._touch_interval:
+            await self._repository.touch_session(session_id=state.session_id, now=now)
         return AuthenticatedAdmin(
             session_id=state.session_id,
             user_id=state.admin_user_id,
@@ -148,6 +186,30 @@ class AdminSessionService:
             entity_type="admin_session",
             entity_id=admin.session_id,
             payload={"username": admin.username},
+            now=now,
+        )
+
+    async def _record_failed_login(
+        self,
+        *,
+        actor_admin_user_id: str | None,
+        username: str | None,
+        ip_address: str | None,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        await self._repository.record_audit(
+            actor_admin_user_id=actor_admin_user_id,
+            event_type="admin.login_failed",
+            entity_type="admin_session",
+            entity_id=None,
+            payload=sanitize_audit_payload(
+                {
+                    "username": _truncate(username, 128),
+                    "ip_address": _truncate(ip_address, 128),
+                    "reason": reason,
+                }
+            ),
             now=now,
         )
 

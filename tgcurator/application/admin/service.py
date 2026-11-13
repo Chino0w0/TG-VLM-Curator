@@ -16,7 +16,13 @@ from tgcurator.domain.audit import sanitize_audit_payload
 from tgcurator.domain.telegram import TelegramCapabilityResolver
 
 from .auth import AdminSessionService
-from .config_validation import SUPPORTED_CONFIG_FAMILIES
+from .config_validation import (
+    SUPPORTED_CONFIG_FAMILIES,
+    env_allow_local_inference,
+    validate_inference_base_url,
+    validate_secret_type_for_identity,
+    validate_secret_type_for_inference,
+)
 from .errors import (
     AdminConflictError,
     AdminNotFoundError,
@@ -319,6 +325,7 @@ class AdminApplicationService:
         capability_resolver: TelegramCapabilityResolver | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
+        allow_local_inference: bool | None = None,
     ) -> None:
         self.sessions = sessions
         self._secrets = secrets
@@ -327,6 +334,11 @@ class AdminApplicationService:
         self._capabilities = capability_resolver or TelegramCapabilityResolver()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or uuid4
+        self._allow_local_inference = (
+            env_allow_local_inference(default=False)
+            if allow_local_inference is None
+            else allow_local_inference
+        )
 
     # --- Secrets (strictly write-only) ---
 
@@ -439,8 +451,13 @@ class AdminApplicationService:
         enabled: bool = True,
     ) -> dict[str, Any]:
         secret_uid = _parse_uuid(secret_id, field="secret_id")
-        if await self._secrets.status(secret_id=secret_uid) is None:
+        secret_status = await self._secrets.status(secret_id=secret_uid)
+        if secret_status is None:
             raise AdminValidationError("referenced secret_id does not exist")
+        validate_secret_type_for_identity(
+            identity_type=identity_type,
+            secret_type=secret_status.secret_type,
+        )
         now = self._clock()
         created = await self._backend.create_identity(
             name=name,
@@ -468,10 +485,30 @@ class AdminApplicationService:
         changes: Mapping[str, Any],
     ) -> dict[str, Any]:
         _parse_uuid(identity_id, field="identity_id")
-        if "secret_id" in changes and changes["secret_id"] is not None:
-            secret_uid = _parse_uuid(str(changes["secret_id"]), field="secret_id")
-            if await self._secrets.status(secret_id=secret_uid) is None:
+        if not isinstance(changes, Mapping):
+            raise AdminValidationError("identity update payload must be an object")
+        if "secret_id" in changes or "identity_type" in changes:
+            existing = await self._backend.get_identity(identity_id=identity_id)
+            if existing is None:
+                raise AdminNotFoundError("telegram identity does not exist")
+            if "secret_id" in changes and changes["secret_id"] is None:
+                raise AdminValidationError("secret_id must be a valid UUID")
+            eff_secret_raw = (
+                str(changes["secret_id"]) if "secret_id" in changes else str(existing["secret_id"])
+            )
+            eff_identity_type = (
+                str(changes["identity_type"])
+                if "identity_type" in changes and changes["identity_type"] is not None
+                else str(existing["identity_type"])
+            )
+            secret_uid = _parse_uuid(eff_secret_raw, field="secret_id")
+            secret_status = await self._secrets.status(secret_id=secret_uid)
+            if secret_status is None:
                 raise AdminValidationError("referenced secret_id does not exist")
+            validate_secret_type_for_identity(
+                identity_type=eff_identity_type,
+                secret_type=secret_status.secret_type,
+            )
         now = self._clock()
         before, after = await self._backend.update_identity(
             identity_id=identity_id,
@@ -713,6 +750,13 @@ class AdminApplicationService:
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
         _validate_family(family)
+        if not isinstance(payload, Mapping):
+            raise AdminValidationError("configuration payload must be an object")
+        initial_version = payload.get("initial_version")
+        if family == "inference-profiles" and initial_version is not None:
+            if not isinstance(initial_version, Mapping):
+                raise AdminValidationError("initial_version must be an object")
+            await self._validate_inference_profile_secret_and_url(initial_version)
         now = self._clock()
         created = await self._backend.create_config_entity(
             family=family,
@@ -739,6 +783,8 @@ class AdminApplicationService:
     ) -> dict[str, Any]:
         _validate_family(family)
         _parse_uuid(entity_id, field="entity_id")
+        if family == "inference-profiles":
+            await self._validate_inference_profile_secret_and_url(content)
         now = self._clock()
         version = await self._backend.create_config_version(
             family=family,
@@ -768,6 +814,8 @@ class AdminApplicationService:
         _validate_family(family)
         _parse_uuid(entity_id, field="entity_id")
         _parse_uuid(version_id, field="version_id")
+        if family == "inference-profiles":
+            await self._validate_inference_profile_secret_and_url(content)
         now = self._clock()
         updated = await self._backend.update_config_version(
             family=family,
@@ -798,6 +846,16 @@ class AdminApplicationService:
         _validate_family(family)
         _parse_uuid(entity_id, field="entity_id")
         _parse_uuid(version_id, field="version_id")
+        if family == "inference-profiles":
+            entity = await self._backend.get_config_entity(family=family, entity_id=entity_id)
+            if entity is None:
+                raise AdminNotFoundError(f"{family} entity does not exist")
+            target_ver = next(
+                (v for v in entity.get("versions", ()) if v.get("id") == version_id),
+                None,
+            )
+            if target_ver is not None and isinstance(target_ver.get("content"), Mapping):
+                await self._validate_inference_profile_secret_and_url(target_ver["content"])
         now = self._clock()
         published = await self._backend.publish_config_version(
             family=family,
@@ -1214,6 +1272,26 @@ class AdminApplicationService:
     async def render_metrics(self) -> str:
         snapshot = await self._backend.collect_metrics_snapshot(now=self._clock())
         return render_prometheus_metrics(snapshot)
+
+    async def _validate_inference_profile_secret_and_url(
+        self,
+        content: Mapping[str, Any],
+    ) -> None:
+        if not isinstance(content, Mapping):
+            raise AdminValidationError("inference profile content must be an object")
+        validate_inference_base_url(
+            str(content.get("base_url", "")),
+            allow_local=self._allow_local_inference,
+        )
+        secret_ref = content.get("api_secret_reference")
+        secret_uid = _parse_uuid(
+            str(secret_ref) if secret_ref is not None else "",
+            field="api_secret_reference",
+        )
+        secret_status = await self._secrets.status(secret_id=secret_uid)
+        if secret_status is None:
+            raise AdminValidationError("referenced api_secret_reference does not exist")
+        validate_secret_type_for_inference(secret_type=secret_status.secret_type)
 
     def _enrich_identity(self, item: Mapping[str, Any]) -> dict[str, Any]:
         cap_set = self._capabilities.resolve(

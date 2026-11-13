@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Protocol
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -58,6 +59,32 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.database = resolved_database
     app.state.admin_service = admin_service
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation_error(
+        _request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        sanitized_errors = [
+            {
+                "type": str(err.get("type", "validation_error")),
+                "loc": [
+                    str(part) if not isinstance(part, int) else part for part in err.get("loc", ())
+                ],
+                "msg": str(err.get("msg", "Invalid request input")),
+            }
+            for err in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": sanitized_errors,
+                "error": {
+                    "code": "validation_error",
+                    "message": "Request payload validation failed",
+                },
+            },
+        )
 
     @app.exception_handler(AdminError)
     async def handle_admin_error(_request: Request, exc: AdminError) -> JSONResponse:
