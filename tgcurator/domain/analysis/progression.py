@@ -80,6 +80,12 @@ class MessageMediaReadiness:
         return any(asset.archive_state == "failed" for asset in self.assets)
 
     @property
+    def any_unavailable(self) -> bool:
+        return any(
+            asset.archive_state in {"failed", "deleting", "deleted"} for asset in self.assets
+        )
+
+    @property
     def any_pending_archive(self) -> bool:
         return any(
             asset.archive_state in {"pending", "processing", "retry_wait"} for asset in self.assets
@@ -228,7 +234,7 @@ def plan_pipeline_progression(
             continue
 
         if requires_media and media.has_media:
-            if media.any_failed:
+            if media.any_unavailable:
                 resolutions[node.node_key] = "failed"
                 continue
             if media.any_pending_archive:

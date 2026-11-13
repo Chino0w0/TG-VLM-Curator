@@ -8,46 +8,9 @@ from tgcurator.application.ports.media import (
     ImageProcessor,
     NormalizedImageArtifact,
     VideoFrameExtractor,
+    VideoSamplingProfile,
 )
 from tgcurator.shared import DomainValidationError
-
-
-@dataclass(frozen=True, slots=True)
-class VideoSamplingProfile:
-    """Deterministic limits for extracting a compact set of video visual evidence."""
-
-    min_candidate_frames: int = 6
-    max_candidate_frames: int = 24
-    max_representative_frames: int = 6
-    min_temporal_gap_seconds: float = 2.0
-    phash_distance_threshold: int = 8
-    keep_cover: bool = True
-
-    def __post_init__(self) -> None:
-        for field, value in (
-            ("min_candidate_frames", self.min_candidate_frames),
-            ("max_candidate_frames", self.max_candidate_frames),
-            ("max_representative_frames", self.max_representative_frames),
-        ):
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{field} must be a positive integer")
-        if self.min_candidate_frames > self.max_candidate_frames:
-            raise ValueError("min_candidate_frames must not exceed max_candidate_frames")
-        if (
-            not isinstance(self.min_temporal_gap_seconds, (int, float))
-            or isinstance(self.min_temporal_gap_seconds, bool)
-            or not isfinite(self.min_temporal_gap_seconds)
-            or self.min_temporal_gap_seconds <= 0
-        ):
-            raise ValueError("min_temporal_gap_seconds must be a finite positive number")
-        if (
-            not isinstance(self.phash_distance_threshold, int)
-            or isinstance(self.phash_distance_threshold, bool)
-            or not 0 <= self.phash_distance_threshold <= 64
-        ):
-            raise ValueError("phash_distance_threshold must be an integer between 0 and 64")
-        if not isinstance(self.keep_cover, bool):
-            raise ValueError("keep_cover must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,13 +149,30 @@ class VideoFrameSamplingService:
         if duration_seconds is None:
             duration_seconds = await self.frame_extractor.probe_duration(content=content)
         _validate_duration(duration_seconds)
-        evidence: list[VideoFrameEvidence] = []
-        for timestamp_seconds in candidate_timestamps(
+        timestamps = candidate_timestamps(
             duration_seconds=duration_seconds, profile=sampling_profile
-        ):
-            frame_content = await self.frame_extractor.extract_frame(
-                content=content, timestamp_seconds=timestamp_seconds
+        )
+        batch_extract = getattr(self.frame_extractor, "extract_frames", None)
+        if callable(batch_extract):
+            raw_frames = await batch_extract(
+                content=content,
+                timestamps=timestamps,
+                duration_seconds=duration_seconds,
             )
+            if len(raw_frames) != len(timestamps):
+                raise RuntimeError("video frame extractor returned mismatched frame count")
+            pairs = tuple(zip(timestamps, raw_frames, strict=True))
+        else:
+            extracted: list[tuple[float, bytes]] = []
+            for timestamp_seconds in timestamps:
+                frame_content = await self.frame_extractor.extract_frame(
+                    content=content, timestamp_seconds=timestamp_seconds
+                )
+                extracted.append((timestamp_seconds, frame_content))
+            pairs = tuple(extracted)
+
+        evidence: list[VideoFrameEvidence] = []
+        for timestamp_seconds, frame_content in pairs:
             if not isinstance(frame_content, bytes) or not frame_content:
                 raise RuntimeError("video frame extractor returned empty frame content")
             evidence.append(

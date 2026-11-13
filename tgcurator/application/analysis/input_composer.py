@@ -64,6 +64,8 @@ class ComposedAnalysisInput:
     input_manifest: InputManifest
     cache_scope_identity: str | None
     visual_inputs: tuple[InferenceImage, ...] = ()
+    cache_manifest_hash: str | None = None
+    cache_schema_hash: str | None = None
 
 
 class AnalysisInputComposer:
@@ -77,11 +79,17 @@ class AnalysisInputComposer:
         schema: StructuredOutputSchema,
         source_channel_context: Mapping[str, Any] | None = None,
         visual_inputs: tuple[InferenceImage, ...] = (),
+        allow_metadata_probe: bool = False,
     ) -> ComposedAnalysisInput:
         if not isinstance(stage, AnalysisStageTemplateVersion):
             raise DomainValidationError("stage must be an AnalysisStageTemplateVersion")
         _validate_targets(stage=stage, targets=targets)
-        _validate_visual_inputs(stage=stage, targets=targets, visual_inputs=visual_inputs)
+        _validate_visual_inputs(
+            stage=stage,
+            targets=targets,
+            visual_inputs=visual_inputs,
+            allow_metadata_probe=allow_metadata_probe,
+        )
         visual_manifest = [image.manifest_record(i) for i, image in enumerate(visual_inputs)]
         context = dict(source_channel_context or {})
         prompt_values: dict[str, Any] = {}
@@ -127,6 +135,17 @@ class AnalysisInputComposer:
                 inputs=manifest_inputs,
                 provider_parameters=stage.inference_profile.sampling_parameters,
             )
+            scope_identity = _cache_scope_identity(
+                stage=stage,
+                targets=targets,
+                visual_inputs=visual_inputs,
+            )
+            cache_manifest_hash, cache_schema_hash = _cache_projection_hashes(
+                stage=stage,
+                targets=targets,
+                manifest=manifest,
+                schema=schema,
+            )
         except DomainValidationError as error:
             raise AnalysisInputError(
                 code=AnalysisErrorCode.INPUT_BUILD_ERROR,
@@ -135,8 +154,10 @@ class AnalysisInputComposer:
         return ComposedAnalysisInput(
             rendered_prompt=rendered,
             input_manifest=manifest,
-            cache_scope_identity=_cache_scope_identity(stage.cache_policy, targets),
+            cache_scope_identity=scope_identity,
             visual_inputs=visual_inputs,
+            cache_manifest_hash=cache_manifest_hash,
+            cache_schema_hash=cache_schema_hash,
         )
 
 
@@ -216,28 +237,235 @@ def _manifest_inputs(
     return result
 
 
-def _cache_scope_identity(
-    policy: CachePolicy, targets: tuple[AnalysisTargetInput, ...]
+def _is_sha256_hex(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
+def _media_item_content_hash(item: Mapping[str, Any]) -> str | None:
+    archive_sha = item.get("archive_sha256")
+    if _is_sha256_hex(archive_sha):
+        return str(archive_sha)
+    frames = item.get("frames")
+    frame_hashes: list[list[Any]] = []
+    if isinstance(frames, (list, tuple)):
+        for frame in frames:
+            if isinstance(frame, Mapping) and _is_sha256_hex(frame.get("archive_sha256")):
+                frame_hashes.append(
+                    [
+                        frame.get("frame_role"),
+                        frame.get("frame_index"),
+                        frame.get("archive_sha256"),
+                    ]
+                )
+    source_sha = item.get("source_sha256")
+    if frame_hashes:
+        return canonical_hash(
+            {
+                "source_sha256": source_sha if _is_sha256_hex(source_sha) else None,
+                "frames": frame_hashes,
+            }
+        )
+    if _is_sha256_hex(source_sha):
+        return str(source_sha)
+    return None
+
+
+def _target_content_sha256(
+    *,
+    target: AnalysisTargetInput,
+    visual_inputs: tuple[InferenceImage, ...],
 ) -> str | None:
+    media_hashes = [
+        digest for item in target.media if (digest := _media_item_content_hash(item)) is not None
+    ]
+    if len(media_hashes) == 1 and len(target.media) == 1:
+        return media_hashes[0]
+    if media_hashes and len(media_hashes) == len(target.media):
+        return canonical_hash(media_hashes)
+
+    resolved_sources = [
+        source.get("sha256")
+        for image in visual_inputs
+        for source in image.sources
+        if source.get("target_id") == target.target_id and _is_sha256_hex(source.get("sha256"))
+    ]
+    if len(resolved_sources) == 1:
+        return str(resolved_sources[0])
+    if resolved_sources:
+        return canonical_hash(resolved_sources)
+
+    if _is_sha256_hex(target.visual_identity):
+        return str(target.visual_identity)
+    return None
+
+
+def _cache_scope_identity(
+    *,
+    stage: AnalysisStageTemplateVersion,
+    targets: tuple[AnalysisTargetInput, ...],
+    visual_inputs: tuple[InferenceImage, ...],
+) -> str | None:
+    policy = stage.cache_policy
     if policy is CachePolicy.NONE:
         return None
     if policy is CachePolicy.MESSAGE:
         identities = [target.message_id for target in targets]
     elif policy is CachePolicy.MESSAGE_VISUAL:
-        if any(not target.visual_identity for target in targets):
-            raise AnalysisInputError(
-                code=AnalysisErrorCode.INPUT_BUILD_ERROR,
-                error_type="MissingVisualCacheIdentity",
-            )
-        identities = [str(target.visual_identity) for target in targets]
+        identities = []
+        for target in targets:
+            digest = _target_content_sha256(target=target, visual_inputs=visual_inputs)
+            if digest is None:
+                raise AnalysisInputError(
+                    code=AnalysisErrorCode.INPUT_BUILD_ERROR,
+                    error_type="MissingVisualCacheIdentity",
+                )
+            identities.append(digest)
     else:
         if any(target.asset_id is None for target in targets):
             raise AnalysisInputError(
                 code=AnalysisErrorCode.INPUT_BUILD_ERROR,
                 error_type="MissingAssetCacheIdentity",
             )
-        identities = [str(target.asset_id) for target in targets]
+        identities = []
+        for target in targets:
+            digest = _target_content_sha256(target=target, visual_inputs=visual_inputs)
+            if digest is None:
+                if stage.input_policy.media:
+                    raise AnalysisInputError(
+                        code=AnalysisErrorCode.INPUT_BUILD_ERROR,
+                        error_type="MissingAssetCacheIdentity",
+                    )
+                digest = str(target.asset_id)
+            identities.append(digest)
     return identities[0] if len(identities) == 1 else canonical_hash(identities)
+
+
+def _cache_projection_hashes(
+    *,
+    stage: AnalysisStageTemplateVersion,
+    targets: tuple[AnalysisTargetInput, ...],
+    manifest: InputManifest,
+    schema: StructuredOutputSchema,
+) -> tuple[str, str]:
+    if stage.cache_policy not in {CachePolicy.ASSET, CachePolicy.MESSAGE_VISUAL}:
+        return manifest.input_manifest_hash, schema.schema_hash
+
+    target_map = {target.target_id: f"$target_{idx}" for idx, target in enumerate(targets)}
+    message_map: dict[str, str] = {}
+    asset_map: dict[str, str] = {}
+    for idx, target in enumerate(targets):
+        message_map.setdefault(target.message_id, f"$message_{idx}")
+        if target.asset_id is not None:
+            asset_map.setdefault(target.asset_id, f"$asset_{idx}")
+        for m_idx, item in enumerate(target.media):
+            raw_asset_id = item.get("asset_id")
+            if isinstance(raw_asset_id, str) and raw_asset_id:
+                asset_map.setdefault(raw_asset_id, f"$media_{idx}_{m_idx}")
+
+    normalized_targets = tuple(
+        AnalysisTargetInput(
+            target_id=target_map[target.target_id],
+            message_id=message_map[target.message_id],
+            asset_id=asset_map[target.asset_id] if target.asset_id is not None else None,
+            text=target.text,
+            telegram_metadata=target.telegram_metadata,
+            media=tuple(
+                {
+                    **dict(item),
+                    **(
+                        {"asset_id": asset_map[str(item["asset_id"])]}
+                        if isinstance(item.get("asset_id"), str)
+                        and str(item["asset_id"]) in asset_map
+                        else {}
+                    ),
+                }
+                for item in target.media
+            ),
+            previous_results=target.previous_results,
+            visual_identity=target.visual_identity,
+        )
+        for target in targets
+    )
+
+    schema_doc = json.loads(schema.canonical_json)
+    props = schema_doc.get("properties", {})
+    if "results" in props and isinstance(props["results"], dict):
+        items_schema = props["results"].get("items", {})
+        item_props = items_schema.get("properties", {})
+        for field_name in ("message_id", "asset_id"):
+            if field_name in item_props and isinstance(item_props[field_name], dict):
+                item_props[field_name] = {
+                    **item_props[field_name],
+                    "enum": [target.target_id for target in normalized_targets],
+                }
+    cache_schema_hash = canonical_hash(schema_doc)
+
+    manifest_doc = manifest.content
+    manifest_doc["target_ids"] = [target.target_id for target in normalized_targets]
+    manifest_doc["structured_output_schema_hash"] = cache_schema_hash
+    raw_inputs = manifest_doc.get("inputs", {})
+    context = raw_inputs.get("source_channel_context", {})
+    rebuilt_inputs = _manifest_inputs(
+        stage=stage,
+        targets=normalized_targets,
+        context=context if isinstance(context, Mapping) else {},
+    )
+    raw_visual = raw_inputs.get("visual_inputs", [])
+    normalized_visual: list[dict[str, Any]] = []
+    if isinstance(raw_visual, list):
+        for entry in raw_visual:
+            if not isinstance(entry, Mapping):
+                continue
+            sources_out: list[dict[str, Any]] = []
+            for src in entry.get("sources", []):
+                if not isinstance(src, Mapping):
+                    continue
+                src_copy = dict(src)
+                if str(src_copy.get("target_id", "")) in target_map:
+                    src_copy["target_id"] = target_map[str(src_copy["target_id"])]
+                if str(src_copy.get("message_id", "")) in message_map:
+                    src_copy["message_id"] = message_map[str(src_copy["message_id"])]
+                if str(src_copy.get("asset_id", "")) in asset_map:
+                    src_copy["asset_id"] = asset_map[str(src_copy["asset_id"])]
+                sources_out.append(src_copy)
+            normalized_visual.append({**dict(entry), "sources": sources_out})
+
+    prompt_values: dict[str, Any] = {}
+    if "label_definitions" in stage.prompt.declared_variables:
+        prompt_values["label_definitions"] = stage.label_set.prompt_definitions()
+    if "message_text" in stage.prompt.declared_variables:
+        prompt_values["message_text"] = _message_text(stage.execution_mode, normalized_targets)
+    if "asset_manifest" in stage.prompt.declared_variables:
+        prompt_values["asset_manifest"] = _asset_manifest(normalized_targets)
+    if "previous_results" in stage.prompt.declared_variables:
+        prompt_values["previous_results"] = {
+            target.target_id: dict(target.previous_results or {}) for target in normalized_targets
+        }
+    if "source_channel_context" in stage.prompt.declared_variables:
+        prompt_values["source_channel_context"] = (
+            dict(context) if isinstance(context, Mapping) else {}
+        )
+    rendered = stage.prompt.render(prompt_values)
+    user_prompt = rendered.user_prompt
+    if normalized_visual:
+        user_prompt = (
+            user_prompt + "\nVisual input map (image indices are zero-based; "
+            "region is [left, top, right, bottom] in sent-image pixels):\n"
+            + json.dumps(normalized_visual, ensure_ascii=False, sort_keys=True)
+        )
+    rebuilt_inputs["media_required"] = stage.input_policy.media
+    rebuilt_inputs["visual_policy"] = stage.visual_composition_policy.value
+    rebuilt_inputs["visual_inputs"] = normalized_visual
+    rebuilt_inputs["rendered_prompt"] = {
+        "system": rendered.system_prompt,
+        "user": user_prompt,
+    }
+    manifest_doc["inputs"] = rebuilt_inputs
+    return canonical_hash(manifest_doc), cache_schema_hash
 
 
 def _safe_media(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -284,6 +512,7 @@ def _validate_visual_inputs(
     stage: AnalysisStageTemplateVersion,
     targets: tuple[AnalysisTargetInput, ...],
     visual_inputs: tuple[InferenceImage, ...],
+    allow_metadata_probe: bool = False,
 ) -> None:
     if not stage.input_policy.media:
         if visual_inputs:
@@ -327,6 +556,15 @@ def _validate_visual_inputs(
             error_type="VisualSourceMappingIncomplete",
             retryable=True,
         )
+    if allow_metadata_probe:
+        for image in visual_inputs:
+            if not _is_sha256_hex(image.sha256) or (image.size_bytes or 0) <= 0:
+                raise AnalysisInputError(
+                    code=AnalysisErrorCode.INPUT_BUILD_ERROR,
+                    error_type="VisualPayloadInvalid",
+                    retryable=True,
+                )
+        return
     for image in visual_inputs:
         if not image.content or hashlib.sha256(image.content).hexdigest() != image.sha256:
             raise AnalysisInputError(

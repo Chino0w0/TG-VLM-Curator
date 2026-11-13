@@ -6,9 +6,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from tgcurator.application.media.archive_wakeups import (
     IMAGE_ARCHIVE_QUEUE,
@@ -872,6 +873,13 @@ class SqlAlchemyMessagePipelineRepository:
             if visual_fingerprint is not None:
                 for row in await session.scalars(
                     select(MessageRecord)
+                    .options(
+                        load_only(
+                            MessageRecord.id,
+                            MessageRecord.published_at,
+                            MessageRecord.visual_fingerprint,
+                        )
+                    )
                     .where(
                         MessageRecord.id != msg_uuid,
                         MessageRecord.visual_fingerprint == visual_fingerprint,
@@ -892,6 +900,13 @@ class SqlAlchemyMessagePipelineRepository:
 
             for row in await session.scalars(
                 select(MessageRecord)
+                .options(
+                    load_only(
+                        MessageRecord.id,
+                        MessageRecord.published_at,
+                        MessageRecord.visual_fingerprint,
+                    )
+                )
                 .where(
                     MessageRecord.id != msg_uuid,
                     MessageRecord.media_count > 0,
@@ -915,29 +930,56 @@ class SqlAlchemyMessagePipelineRepository:
             cand_ids = tuple(rows_by_id)
             img_phashes_by_msg: dict[UUID, list[str | None]] = defaultdict(list)
             for img in await session.scalars(
-                select(ImageAssetRecord).where(ImageAssetRecord.message_id.in_(cand_ids))
+                select(ImageAssetRecord)
+                .options(
+                    load_only(
+                        ImageAssetRecord.id,
+                        ImageAssetRecord.message_id,
+                        ImageAssetRecord.perceptual_hash,
+                        ImageAssetRecord.source_phash,
+                    )
+                )
+                .where(ImageAssetRecord.message_id.in_(cand_ids))
+                .order_by(ImageAssetRecord.id)
             ):
                 img_phashes_by_msg[img.message_id].append(img.perceptual_hash or img.source_phash)
 
             vids_by_msg: dict[UUID, list[VideoAssetRecord]] = defaultdict(list)
             vid_ids: list[UUID] = []
             for vid in await session.scalars(
-                select(VideoAssetRecord).where(VideoAssetRecord.message_id.in_(cand_ids))
+                select(VideoAssetRecord)
+                .options(
+                    load_only(
+                        VideoAssetRecord.id,
+                        VideoAssetRecord.message_id,
+                        VideoAssetRecord.source_cover_phash,
+                    )
+                )
+                .where(VideoAssetRecord.message_id.in_(cand_ids))
+                .order_by(VideoAssetRecord.id)
             ):
                 vids_by_msg[vid.message_id].append(vid)
                 vid_ids.append(vid.id)
 
             cover_by_vid: dict[UUID, str | None] = {}
             if vid_ids:
-                for frame in await session.scalars(
+                for vf in await session.scalars(
                     select(VideoFrameRecord)
+                    .options(
+                        load_only(
+                            VideoFrameRecord.id,
+                            VideoFrameRecord.video_asset_id,
+                            VideoFrameRecord.perceptual_hash,
+                            VideoFrameRecord.frame_index,
+                        )
+                    )
                     .where(
                         VideoFrameRecord.video_asset_id.in_(tuple(vid_ids)),
                         VideoFrameRecord.frame_role == "cover",
                     )
                     .order_by(VideoFrameRecord.frame_index)
                 ):
-                    cover_by_vid.setdefault(frame.video_asset_id, frame.perceptual_hash)
+                    cover_by_vid.setdefault(vf.video_asset_id, vf.perceptual_hash)
 
             candidates: list[VisualCandidate] = []
             for row_id, row in rows_by_id.items():
@@ -953,7 +995,7 @@ class SqlAlchemyMessagePipelineRepository:
                     continue
                 candidates.append(
                     VisualCandidate(
-                        message_id=str(row.id),
+                        message_id=str(row_id),
                         visual_fingerprint=effective_fp,
                         visual_tokens=tokens,
                         published_at=row.published_at,
@@ -1010,16 +1052,22 @@ class SqlAlchemyMessagePipelineRepository:
                 else:
                     msg.canonical_message_id = None
                     msg.duplicate_distance = None
+                    await session.execute(
+                        delete(DuplicateMatchRecord).where(
+                            DuplicateMatchRecord.message_id == msg_uuid
+                        )
+                    )
                 msg.updated_at = now
 
     async def mark_message_processing(self, *, message_id: str, now: datetime) -> None:
         ensure_aware(now, field="now")
+        msg_uuid = UUID(message_id)
         async with self._database.session() as session:
             async with session.begin():
-                await session.execute(
+                res = await session.execute(
                     update(MessageRecord)
                     .where(
-                        MessageRecord.id == UUID(message_id),
+                        MessageRecord.id == msg_uuid,
                         MessageRecord.processing_status.in_(("ingested", "processed")),
                     )
                     .values(
@@ -1033,6 +1081,12 @@ class SqlAlchemyMessagePipelineRepository:
                         updated_at=now,
                     )
                 )
+                if (res.rowcount or 0) > 0:
+                    await session.execute(
+                        delete(DuplicateMatchRecord).where(
+                            DuplicateMatchRecord.message_id == msg_uuid
+                        )
+                    )
 
     async def mark_message_processed(
         self,
@@ -1199,6 +1253,22 @@ class SqlAlchemyMessagePipelineRepository:
                             MessageRecord.blocked_from_analysis.is_(False),
                             or_(
                                 and_(
+                                    ImageAssetRecord.archive_state == "pending",
+                                    exists(
+                                        select(DurableWakeupRecord.id).where(
+                                            DurableWakeupRecord.queue == IMAGE_ARCHIVE_QUEUE,
+                                            DurableWakeupRecord.entity_id == ImageAssetRecord.id,
+                                            or_(
+                                                DurableWakeupRecord.status == "completed",
+                                                and_(
+                                                    DurableWakeupRecord.status == "leased",
+                                                    DurableWakeupRecord.lease_expires_at <= now,
+                                                ),
+                                            ),
+                                        )
+                                    ),
+                                ),
+                                and_(
                                     ImageAssetRecord.archive_state == "retry_wait",
                                     ImageAssetRecord.archive_next_retry_at <= now,
                                 ),
@@ -1231,6 +1301,22 @@ class SqlAlchemyMessagePipelineRepository:
                             VideoAssetRecord.source_telegram_message_id.is_not(None),
                             MessageRecord.blocked_from_analysis.is_(False),
                             or_(
+                                and_(
+                                    VideoAssetRecord.archive_state == "pending",
+                                    exists(
+                                        select(DurableWakeupRecord.id).where(
+                                            DurableWakeupRecord.queue == VIDEO_ARCHIVE_QUEUE,
+                                            DurableWakeupRecord.entity_id == VideoAssetRecord.id,
+                                            or_(
+                                                DurableWakeupRecord.status == "completed",
+                                                and_(
+                                                    DurableWakeupRecord.status == "leased",
+                                                    DurableWakeupRecord.lease_expires_at <= now,
+                                                ),
+                                            ),
+                                        )
+                                    ),
+                                ),
                                 and_(
                                     VideoAssetRecord.archive_state == "retry_wait",
                                     VideoAssetRecord.archive_next_retry_at <= now,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select, update
@@ -24,6 +25,7 @@ from .models import (
     ImageAssetRecord,
     MessagePartRecord,
     MessageRecord,
+    SourceChannel,
     VideoAssetRecord,
 )
 from .session import AsyncDatabase
@@ -136,21 +138,60 @@ def message_parts_for_parent_statement(*, message_id: UUID):
     )
 
 
-def message_parent_update_statement(*, message_id: UUID, message: NormalizedTelegramMessage):
+def message_parent_update_statement(
+    *,
+    message_id: UUID,
+    message: NormalizedTelegramMessage,
+    preserve_processed_change_flag: bool = False,
+):
     """Replace only the current source snapshot while retaining processing/lifecycle history."""
 
+    values: dict[str, object] = {
+        "telegram_message_ids": list(message.telegram_message_ids),
+        "primary_telegram_message_id": message.primary_telegram_message_id,
+        "published_at": message.published_at,
+        "edited_at": message.edited_at,
+        "original_text": message.original_text,
+        "telegram_metadata": dict(message.telegram_metadata),
+        "media_count": message.media_count,
+        "visual_fingerprint": message.visual_fingerprint,
+    }
+    if preserve_processed_change_flag:
+        values["source_changed_after_processing"] = or_(
+            MessageRecord.source_changed_after_processing,
+            and_(
+                MessageRecord.processing_status == "processed",
+                or_(
+                    MessageRecord.original_text.is_distinct_from(message.original_text),
+                    MessageRecord.media_count != message.media_count,
+                    MessageRecord.edited_at.is_distinct_from(message.edited_at),
+                    MessageRecord.visual_fingerprint.is_distinct_from(message.visual_fingerprint),
+                ),
+            ),
+        )
+    return update(MessageRecord).where(MessageRecord.id == message_id).values(**values)
+
+
+def source_channel_activity_update_statement(
+    *,
+    source_channel_id: UUID,
+    published_at: datetime,
+    latest_telegram_message_id: int,
+):
+    """Monotonically advance source activity timestamp and latest observed Telegram message ID."""
+
     return (
-        update(MessageRecord)
-        .where(MessageRecord.id == message_id)
+        update(SourceChannel)
+        .where(SourceChannel.id == source_channel_id)
         .values(
-            telegram_message_ids=list(message.telegram_message_ids),
-            primary_telegram_message_id=message.primary_telegram_message_id,
-            published_at=message.published_at,
-            edited_at=message.edited_at,
-            original_text=message.original_text,
-            telegram_metadata=dict(message.telegram_metadata),
-            media_count=message.media_count,
-            visual_fingerprint=message.visual_fingerprint,
+            last_activity_at=func.greatest(
+                func.coalesce(SourceChannel.last_activity_at, published_at),
+                published_at,
+            ),
+            latest_seen_message_id=func.greatest(
+                func.coalesce(SourceChannel.latest_seen_message_id, latest_telegram_message_id),
+                latest_telegram_message_id,
+            ),
         )
     )
 
@@ -408,7 +449,18 @@ class SqlAlchemyTelegramMessageIngestRepository:
                     parts=retained_parts,
                 )
                 await session.execute(
-                    message_parent_update_statement(message_id=message_id, message=recomputed)
+                    message_parent_update_statement(
+                        message_id=message_id,
+                        message=recomputed,
+                        preserve_processed_change_flag=True,
+                    )
+                )
+                await session.execute(
+                    source_channel_activity_update_statement(
+                        source_channel_id=UUID(recomputed.source_channel_id),
+                        published_at=recomputed.published_at,
+                        latest_telegram_message_id=max(recomputed.telegram_message_ids),
+                    )
                 )
 
                 await synchronize_archive_assets(

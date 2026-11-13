@@ -1,13 +1,12 @@
-import { publishedVersion } from "../api/config";
 import { useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
-  ConfigEntity,
   DashboardSummary,
   ProcessingRange,
   WorkspaceKey,
 } from "../api/types";
 import { ResponsiveTable } from "../components/ResponsiveTable";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 B";
@@ -25,30 +24,33 @@ export function DashboardWorkspace({
   client,
   onNavigate,
 }: DashboardWorkspaceProps) {
+  const reads = useRequestGeneration();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [ranges, setRanges] = useState<ProcessingRange[]>([]);
-  const [inferenceProfiles, setInferenceProfiles] = useState<ConfigEntity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
+    const request = reads.next();
     setLoading(true);
     setError(null);
     try {
-      const [sumData, rangeData, infData] = await Promise.all([
+      const [sumData, rangeData] = await Promise.all([
         client.getDashboardSummary(),
         client.listProcessingRanges(),
-        client.listConfigEntities("inference-profiles"),
       ]);
+      if (!reads.isCurrent(request)) return;
       setSummary(sumData);
       setRanges(rangeData);
-      setInferenceProfiles(infData);
     } catch (err) {
+      if (!reads.isCurrent(request)) return;
       setError(err instanceof Error ? err.message : "Failed to load dashboard.");
     } finally {
-      setLoading(false);
+      if (reads.isCurrent(request)) {
+        setLoading(false);
+      }
     }
-  }, [client]);
+  }, [client, reads]);
 
   useEffect(() => {
     void loadData();
@@ -166,15 +168,13 @@ export function DashboardWorkspace({
             </div>
 
             <div className="panel">
-              <h2>External Inference Profiles</h2>
-              <div className="stat-value">{inferenceProfiles.length}</div>
+              <h2>Analysis &amp; External Inference</h2>
+              <div className="stat-value">
+                {summary.source_channels.active_profiles}
+              </div>
               <p className="stat-meta">
-                Published:{" "}
-                {
-                  inferenceProfiles.filter((item) => Boolean(publishedVersion(item)))
-                    .length
-                }{" "}
-                (external HTTP VLM/LLM endpoints; never bundled in Compose)
+                Active Channel Profiles (external HTTP VLM/LLM endpoints; never
+                bundled in Compose)
               </p>
               <button
                 type="button"

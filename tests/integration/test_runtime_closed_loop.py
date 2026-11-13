@@ -41,7 +41,21 @@ from apps.worker import runtime as worker_module
 from tgcurator.domain.analysis.common import canonical_hash
 from tgcurator.infrastructure.database import models as m
 
-EVIDENCE = Path(__file__).resolve().parents[2] / ".git/fix-2026-11-12/runtime"
+
+def _resolve_evidence_dir(root: Path) -> Path:
+    configured = os.environ.get("TGCURATOR_EVIDENCE_DIR")
+    if configured and configured.strip():
+        return Path(configured.strip()).resolve()
+    dot_git = root / ".git"
+    if dot_git.is_file():
+        header = dot_git.read_text(encoding="utf-8").strip()
+        if header.startswith("gitdir:"):
+            git_dir = (root / header.partition(":")[2].strip()).resolve()
+            return git_dir / "fix-2026-11-12/runtime"
+    return dot_git / "fix-2026-11-12/runtime"
+
+
+EVIDENCE = _resolve_evidence_dir(Path(__file__).resolve().parents[2])
 
 
 @pytest.mark.parametrize("end_mode", ["fixed", "latest"])

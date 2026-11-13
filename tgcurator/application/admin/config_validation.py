@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import os
 import re
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
+from uuid import UUID
 
 from tgcurator.domain.analysis import (
     AnalysisPipelineVersion,
@@ -47,8 +51,140 @@ SUPPORTED_CONFIG_FAMILIES: frozenset[str] = frozenset(
     }
 )
 
+INFERENCE_SECRET_TYPES: frozenset[str] = frozenset({"api_key", "inference_api_key"})
+MTPROTO_SECRET_TYPES: frozenset[str] = frozenset(
+    {"telegram_session", "telethon_session", "mtproto_session"}
+)
+BOT_SECRET_TYPES: frozenset[str] = frozenset({"bot_token"})
+
 _INTERPOLATION_RE = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}")
 _FORBIDDEN_TEMPLATE_MARKERS = ("{%", "%}", "{#", "#}")
+_SENSITIVE_QUERY_KEYS = (
+    "secret",
+    "password",
+    "apikey",
+    "authorization",
+    "token",
+    "credential",
+    "signature",
+    "key",
+)
+_CLOUD_METADATA_HOSTS = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata.goog",
+        "metadata",
+        "instance-data",
+        "metadata.azure.internal",
+        "metadata.tencentyun.com",
+    }
+)
+_LOCAL_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "host.docker.internal",
+        "gateway.docker.internal",
+    }
+)
+_AWS_IMDS_IPV6 = ipaddress.ip_network("fd00:ec2::/32")
+_ALIBABA_METADATA_IP = ipaddress.ip_address("100.100.100.200")
+_ORACLE_METADATA_IP = ipaddress.ip_address("192.0.0.192")
+
+
+def env_allow_local_inference(*, default: bool = False) -> bool:
+    raw = os.environ.get("TGCURATOR_ALLOW_LOCAL_INFERENCE")
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def validate_secret_type_for_identity(*, identity_type: str, secret_type: str) -> None:
+    normalized_identity = identity_type.strip() if isinstance(identity_type, str) else ""
+    normalized_secret = secret_type.strip() if isinstance(secret_type, str) else ""
+    if normalized_identity == "mtproto_user":
+        if normalized_secret not in MTPROTO_SECRET_TYPES:
+            raise AdminValidationError("mtproto_user identity requires a telegram_session secret")
+    elif normalized_identity == "bot":
+        if normalized_secret not in BOT_SECRET_TYPES:
+            raise AdminValidationError("bot identity requires a bot_token secret")
+    else:
+        raise AdminValidationError("identity_type must be mtproto_user or bot")
+
+
+def validate_secret_type_for_inference(*, secret_type: str) -> None:
+    normalized_secret = secret_type.strip() if isinstance(secret_type, str) else ""
+    if normalized_secret not in INFERENCE_SECRET_TYPES:
+        raise AdminValidationError("inference profile requires an api_key secret")
+
+
+def validate_inference_base_url(base_url: str, *, allow_local: bool | None = None) -> str:
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise AdminValidationError("inference base_url must not be blank")
+    normalized = base_url.strip().rstrip("/")
+    try:
+        parsed = urlsplit(normalized)
+    except ValueError as exc:
+        raise AdminValidationError("inference base_url must be a valid HTTP(S) URL") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise AdminValidationError("inference base_url must be an absolute HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise AdminValidationError("inference base_url must not embed credentials")
+    if parsed.fragment:
+        raise AdminValidationError("inference base_url must not include a URL fragment")
+    for key, _ in parse_qsl(parsed.query, keep_blank_values=True):
+        cleaned = re.sub(r"[^a-z0-9]", "", key.lower())
+        if any(fragment in cleaned for fragment in _SENSITIVE_QUERY_KEYS):
+            raise AdminValidationError(
+                "inference base_url must not embed credential query parameters"
+            )
+
+    host = parsed.hostname.rstrip(".").lower()
+    if host in _CLOUD_METADATA_HOSTS or host.endswith(".metadata.google.internal"):
+        raise AdminValidationError(
+            "inference base_url cannot target cloud metadata or link-local endpoints"
+        )
+
+    resolved_allow_local = (
+        env_allow_local_inference(default=False) if allow_local is None else allow_local
+    )
+
+    try:
+        ip_raw = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError as exc:
+        if not resolved_allow_local and (host in _LOCAL_HOSTNAMES or host.endswith(".localhost")):
+            raise AdminValidationError(
+                "inference base_url cannot target local hosts unless local inference is enabled"
+            ) from exc
+        return normalized
+
+    ip = (
+        ip_raw.ipv4_mapped
+        if isinstance(ip_raw, ipaddress.IPv6Address) and ip_raw.ipv4_mapped
+        else ip_raw
+    )
+    if (
+        ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_multicast
+        or ip == _ALIBABA_METADATA_IP
+        or ip == _ORACLE_METADATA_IP
+        or (isinstance(ip_raw, ipaddress.IPv6Address) and ip_raw in _AWS_IMDS_IPV6)
+    ):
+        raise AdminValidationError(
+            "inference base_url cannot target cloud metadata, link-local, or unspecified addresses"
+        )
+
+    if not resolved_allow_local and (ip.is_loopback or ip.is_private or ip.is_reserved):
+        raise AdminValidationError(
+            "inference base_url cannot target loopback or private IP addresses "
+            "unless local inference is enabled"
+        )
+    return normalized
 
 
 def canonical_content_hash(payload: Mapping[str, Any]) -> str:
@@ -83,6 +219,8 @@ def build_label_definition_domain(
     state: str,
     content: Mapping[str, Any],
 ) -> LabelDefinitionVersion:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("label definition content must be an object")
     try:
         return LabelDefinitionVersion(
             version_id=version_id,
@@ -108,6 +246,8 @@ def build_prompt_template_domain(
     state: str,
     content: Mapping[str, Any],
 ) -> PromptTemplateVersion:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("prompt template content must be an object")
     raw_vars = content.get("declared_variables", [])
     if not isinstance(raw_vars, (list, tuple)):
         raise AdminValidationError("declared_variables must be a list of strings")
@@ -132,20 +272,27 @@ def build_inference_profile_domain(
     version_number: int,
     state: str,
     content: Mapping[str, Any],
+    allow_local: bool | None = None,
 ) -> InferenceProfileVersion:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("inference profile content must be an object")
     raw_caps = content.get("capabilities", ["text"])
     if not isinstance(raw_caps, (list, tuple)):
         raise AdminValidationError("capabilities must be a list of strings")
     sampling = content.get("sampling_parameters", {})
     if not isinstance(sampling, Mapping):
         raise AdminValidationError("sampling_parameters must be an object")
+    validated_base_url = validate_inference_base_url(
+        str(content.get("base_url", "")),
+        allow_local=allow_local,
+    )
     try:
         return InferenceProfileVersion(
             version_id=version_id,
             inference_profile_id=entity_id,
             version_number=version_number,
             provider_adapter=str(content.get("provider_adapter", "openai_compatible")),
-            base_url=str(content.get("base_url", "")),
+            base_url=validated_base_url,
             model_name=str(content.get("model_name", "")),
             api_secret_reference=str(content.get("api_secret_reference", "")),
             capabilities=tuple(str(item) for item in raw_caps),
@@ -171,6 +318,8 @@ def build_label_set_domain(
     resolve_label_def: Callable[[str], LabelDefinitionVersion],
     require_published_refs: bool = False,
 ) -> LabelSetVersion:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("label set content must be an object")
     raw_bindings = content.get("bindings", [])
     if not isinstance(raw_bindings, (list, tuple)) or not raw_bindings:
         raise AdminValidationError("label set bindings must be a non-empty list")
@@ -221,6 +370,8 @@ def build_stage_template_domain(
     resolve_inference_profile: Callable[[str], InferenceProfileVersion],
     require_published_refs: bool = False,
 ) -> AnalysisStageTemplateVersion:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("analysis stage content must be an object")
     prompt_vid = str(content.get("prompt_template_version_id", "")).strip()
     label_set_vid = str(content.get("label_set_version_id", "")).strip()
     profile_vid = str(content.get("inference_profile_version_id", "")).strip()
@@ -313,6 +464,8 @@ def build_pipeline_domain(
     resolve_stage: Callable[[str], AnalysisStageTemplateVersion],
     require_published_refs: bool = False,
 ) -> AnalysisPipelineVersion:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("analysis pipeline content must be an object")
     raw_nodes = content.get("nodes", [])
     if not isinstance(raw_nodes, (list, tuple)) or not raw_nodes:
         raise AdminValidationError("pipeline nodes must be a non-empty list")
@@ -359,9 +512,13 @@ def validate_routing_policy_content(
     content: Mapping[str, Any],
     *,
     destination_exists: Callable[[str], bool] | None = None,
+    identity_exists: Callable[[str], bool] | None = None,
+    template_exists: Callable[[str], bool] | None = None,
     template_is_published: Callable[[str], bool] | None = None,
     require_published_refs: bool = False,
 ) -> None:
+    if not isinstance(content, Mapping):
+        raise AdminValidationError("routing policy content must be an object")
     raw_rules = content.get("rules", [])
     if not isinstance(raw_rules, (list, tuple)):
         raise AdminValidationError("routing policy rules must be a list")
@@ -385,8 +542,19 @@ def validate_routing_policy_content(
             dest_id = str(action.get("destination_channel_id", "")).strip()
             if not dest_id:
                 raise AdminValidationError("routing action destination_channel_id is required")
+            _require_uuid(dest_id, field="destination_channel_id")
             if destination_exists is not None and not destination_exists(dest_id):
                 raise AdminValidationError(f"destination channel {dest_id} does not exist")
+            pub_identity_id = action.get("publish_identity_id")
+            if pub_identity_id is not None:
+                if not isinstance(pub_identity_id, str) or not pub_identity_id.strip():
+                    raise AdminValidationError(
+                        "routing action publish_identity_id must be a valid UUID"
+                    )
+                cleaned_pub_id = pub_identity_id.strip()
+                _require_uuid(cleaned_pub_id, field="publish_identity_id")
+                if identity_exists is not None and not identity_exists(cleaned_pub_id):
+                    raise AdminValidationError(f"telegram identity {cleaned_pub_id} does not exist")
             try:
                 mode = PublicationMode(str(action.get("publication_mode", "")))
             except ValueError as exc:
@@ -407,13 +575,20 @@ def validate_routing_policy_content(
                     raise AdminValidationError(
                         f"{mode.value} action requires rendering_template_version_id"
                     )
+                cleaned_template_vid = template_vid.strip()
+                _require_uuid(cleaned_template_vid, field="rendering_template_version_id")
+                if template_exists is not None and not template_exists(cleaned_template_vid):
+                    raise AdminValidationError(
+                        f"rendering template version {cleaned_template_vid} does not exist"
+                    )
                 if (
                     require_published_refs
                     and template_is_published is not None
-                    and not template_is_published(template_vid.strip())
+                    and not template_is_published(cleaned_template_vid)
                 ):
                     raise AdminValidationError(
-                        f"referenced rendering template version {template_vid} must be published"
+                        f"referenced rendering template version {cleaned_template_vid} "
+                        "must be published"
                     )
 
 
@@ -436,6 +611,13 @@ def validate_source_profile_content(content: Mapping[str, Any]) -> SourceChannel
         return SourceChannelProfileConfig.from_content(content)
     except DomainValidationError as exc:
         raise AdminValidationError(str(exc)) from exc
+
+
+def _require_uuid(value: str, *, field: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise AdminValidationError(f"{field} must be a valid UUID") from exc
 
 
 def _to_version_status(state: str) -> VersionStatus:

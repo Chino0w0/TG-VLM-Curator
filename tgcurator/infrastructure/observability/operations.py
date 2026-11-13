@@ -163,7 +163,7 @@ class OperationsMonitor:
             raise DomainValidationError("broker_ready must be a boolean")
         with self._lock:
             if state.last_heartbeat_at is not None and at < state.last_heartbeat_at:
-                raise DomainValidationError("heartbeat timestamps must be monotonic")
+                at = state.last_heartbeat_at
             state.last_heartbeat_at = at
             state.database_ready = database_ready
             state.broker_ready = broker_ready

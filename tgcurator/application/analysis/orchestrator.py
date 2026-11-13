@@ -13,9 +13,11 @@ from tgcurator.application.ports.analysis import (
     InferenceResponse,
 )
 from tgcurator.application.ports.cleanup import ArchiveStorageResolver
+from tgcurator.application.ports.media import VisualImageBackend
 from tgcurator.domain.analysis import (
     AnalysisErrorCode,
     AnalysisStageTemplateVersion,
+    CachePolicy,
     StageCacheKey,
     StageCacheKeyBuilder,
     StructuredOutputSchema,
@@ -27,7 +29,12 @@ from tgcurator.domain.analysis import (
 from tgcurator.shared import DomainValidationError
 
 from .input_composer import AnalysisInputComposer, AnalysisInputError, AnalysisTargetInput
-from .visual_inputs import ArchiveVisualInputResolver, VisualInputLimits, compose_visual_inputs
+from .visual_inputs import (
+    ArchiveVisualInputResolver,
+    VisualInputLimits,
+    compose_visual_inputs,
+    probe_visual_descriptors,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +90,13 @@ class AnalysisOrchestrator:
         cache_key_builder: StageCacheKeyBuilder | None = None,
         storage_resolver: ArchiveStorageResolver | None = None,
         visual_input_limits: VisualInputLimits | None = None,
+        visual_backend: VisualImageBackend | None = None,
     ) -> None:
         self._provider = provider
         self._visual_resolver = ArchiveVisualInputResolver(
             storage_resolver=storage_resolver,
             limits=visual_input_limits,
+            visual_backend=visual_backend,
         )
         self._schema_builder = schema_builder or StructuredOutputSchemaBuilder()
         self._input_composer = input_composer or AnalysisInputComposer()
@@ -111,6 +120,7 @@ class AnalysisOrchestrator:
                 policy=stage.visual_composition_policy,
                 max_images=stage.inference_profile.max_images,
                 limits=self._visual_resolver.limits,
+                visual_backend=self._visual_resolver.visual_backend,
             )
         return self.prepare(
             stage=stage,
@@ -118,6 +128,41 @@ class AnalysisOrchestrator:
             source_channel_context=source_channel_context,
             attempt=attempt,
             visual_inputs=visual_inputs,
+        )
+
+    def prepare_cache_probe(
+        self,
+        *,
+        stage: AnalysisStageTemplateVersion,
+        targets: tuple[AnalysisTargetInput, ...],
+        source_channel_context: Mapping[str, Any] | None = None,
+        attempt: int = 1,
+    ) -> PreparedAnalysisCall | None:
+        if stage.cache_policy is CachePolicy.NONE:
+            return None
+        if not stage.input_policy.media:
+            return self.prepare(
+                stage=stage,
+                targets=targets,
+                source_channel_context=source_channel_context,
+                attempt=attempt,
+                visual_inputs=(),
+            )
+        probed = probe_visual_descriptors(
+            targets,
+            policy=stage.visual_composition_policy,
+            max_images=stage.inference_profile.max_images,
+            limits=self._visual_resolver.limits,
+        )
+        if probed is None:
+            return None
+        return self._prepare_internal(
+            stage=stage,
+            targets=targets,
+            source_channel_context=source_channel_context,
+            attempt=attempt,
+            visual_inputs=probed,
+            allow_metadata_probe=True,
         )
 
     def prepare(
@@ -128,6 +173,25 @@ class AnalysisOrchestrator:
         source_channel_context: Mapping[str, Any] | None = None,
         attempt: int = 1,
         visual_inputs: tuple[InferenceImage, ...] = (),
+    ) -> PreparedAnalysisCall:
+        return self._prepare_internal(
+            stage=stage,
+            targets=targets,
+            source_channel_context=source_channel_context,
+            attempt=attempt,
+            visual_inputs=visual_inputs,
+            allow_metadata_probe=False,
+        )
+
+    def _prepare_internal(
+        self,
+        *,
+        stage: AnalysisStageTemplateVersion,
+        targets: tuple[AnalysisTargetInput, ...],
+        source_channel_context: Mapping[str, Any] | None,
+        attempt: int,
+        visual_inputs: tuple[InferenceImage, ...],
+        allow_metadata_probe: bool,
     ) -> PreparedAnalysisCall:
         schema = self._schema_builder.build(
             stage_template_version_id=stage.version_id,
@@ -142,6 +206,7 @@ class AnalysisOrchestrator:
             schema=schema,
             source_channel_context=source_channel_context,
             visual_inputs=visual_inputs,
+            allow_metadata_probe=allow_metadata_probe,
         )
         cache_key = self._cache_key_builder.build(
             policy=stage.cache_policy,
@@ -149,9 +214,11 @@ class AnalysisOrchestrator:
             stage_template_version_id=stage.version_id,
             prompt_version_id=stage.prompt.version_id,
             label_set_version_id=stage.label_set.version_id,
-            structured_output_schema_hash=schema.schema_hash,
+            structured_output_schema_hash=composed.cache_schema_hash or schema.schema_hash,
             inference_profile_version_id=stage.inference_profile.version_id,
-            input_manifest_hash=composed.input_manifest.input_manifest_hash,
+            input_manifest_hash=(
+                composed.cache_manifest_hash or composed.input_manifest.input_manifest_hash
+            ),
         )
         return PreparedAnalysisCall(
             schema=schema,

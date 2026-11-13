@@ -5,13 +5,36 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BASH = "D:/Program Files/Git/bin/bash.exe" if os.name == "nt" else shutil.which("bash")
+
+
+def _resolve_bash() -> str | None:
+    configured = os.environ.get("GIT_BASH")
+    if configured and Path(configured).is_file():
+        return configured
+    if os.name == "nt":
+        for candidate in (
+            "C:/Program Files/Git/bin/bash.exe",
+            "D:/Program Files/Git/bin/bash.exe",
+            "C:/Program Files (x86)/Git/bin/bash.exe",
+            "D:/Program Files (x86)/Git/bin/bash.exe",
+        ):
+            if Path(candidate).is_file():
+                return candidate
+        found = shutil.which("bash")
+        if found and "system32" not in found.lower():
+            return found
+        return None
+    return shutil.which("bash")
+
+
+BASH = _resolve_bash()
 
 
 @unittest.skipUnless(BASH and Path(BASH).exists(), "Bash required")
@@ -29,6 +52,7 @@ printf '%s\n' "$*" >> "$CALL_LOG"
 if [[ -n "${FAIL_MATCH:-}" && "$*" == *"$FAIL_MATCH"* ]]; then exit 7; fi
 case "$*" in
   *"ps --status running --services"*) printf '%s\n' "${RUNNING:-postgres}" ;;
+  *"ps --status restarting --services"*) printf '%s\n' "${RESTARTING:-}" ;;
   *pg_dump*) printf 'DUMP' ;;
   *"tar -czf"*) printf 'ARCHIVE' ;;
   *consistency_cli*) printf '{"consistent":true}'; exit "${SCAN_EXIT:-0}" ;;
@@ -41,6 +65,7 @@ esac
         self.env = dict(
             os.environ,
             PATH=str(self.work) + os.pathsep + os.environ["PATH"],
+            PYTHON_BIN=Path(sys.executable).as_posix(),
             CALL_LOG=self.log.as_posix(),
             COMPOSE_PROJECT_NAME="unit-ops",
             BACKUP_DIR=(self.work / "backups").as_posix(),
@@ -131,8 +156,25 @@ esac
 
     def test_restore_propagates_scanner_failure(self) -> None:
         self.env["SCAN_EXIT"] = "2"
-        self.assertEqual(self.restore().returncode, 2)
+        result = self.restore()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Consistency scan failed (exit 2)", result.stderr)
         self.assertTrue((self.work / "report.json").exists())
+
+    def test_restarting_writers_are_rejected(self) -> None:
+        self.env["RESTARTING"] = "worker-analysis"
+        result = self.restore()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("worker-analysis", result.stderr)
+        self.assertNotIn("pg_restore", self.calls())
+
+    def test_uppercase_and_crlf_checksum_sidecar_is_accepted(self) -> None:
+        digest = hashlib.sha256(self.dump.read_bytes()).hexdigest().upper()
+        Path(str(self.dump) + ".sha256").write_bytes(
+            (digest + " *" + self.dump.name + "\r\n").encode("ascii")
+        )
+        result = self.restore()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dump_failure_is_nonzero(self) -> None:
         self.env["FAIL_MATCH"] = "pg_dump"

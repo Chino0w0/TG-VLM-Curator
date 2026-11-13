@@ -1,7 +1,32 @@
 // Real Chrome + real local HTTP routes/services. Only fault/delay and serializer replay routes are intercepted.
 const fs = require('fs'), path = require('path'), assert = require('node:assert/strict');
-const {chromium} = require(process.env.PLAYWRIGHT_CORE || 'E:/AgentProject/SCAU-QAassist-CIE/node_modules/playwright-core');
-const evidence = path.resolve(process.argv[2] || '.git/fix-2026-11-12/pr30');
+function loadPlaywrightCore() {
+  const target = process.env.PLAYWRIGHT_CORE || 'playwright-core';
+  try {
+    return require(target);
+  } catch (err) {
+    throw new Error(`Unable to load '${target}'. Install playwright-core or set PLAYWRIGHT_CORE=/path/to/playwright-core. Original error: ${err.message}`);
+  }
+}
+function resolveGitCommonDir(repoRoot) {
+  const dotGit = path.join(repoRoot, '.git');
+  if (fs.existsSync(dotGit) && fs.statSync(dotGit).isFile()) {
+    const content = fs.readFileSync(dotGit, 'utf8').trim();
+    if (content.startsWith('gitdir:')) {
+      const rawGitDir = content.slice('gitdir:'.length).trim();
+      const gitDir = path.resolve(repoRoot, rawGitDir);
+      const commonDirFile = path.join(gitDir, 'commondir');
+      if (fs.existsSync(commonDirFile)) {
+        return path.resolve(gitDir, fs.readFileSync(commonDirFile, 'utf8').trim());
+      }
+      return gitDir;
+    }
+  }
+  return dotGit;
+}
+const {chromium} = loadPlaywrightCore();
+const repoRoot = path.resolve(__dirname, '../..');
+const evidence = path.resolve(process.argv[2] || path.join(resolveGitCommonDir(repoRoot), 'fix-2026-11-12/pr30'));
 const base = process.env.TEST_BASE_URL || 'http://127.0.0.1:18731';
 assert.equal(new URL(base).hostname, '127.0.0.1', 'Browser regression only permits an explicitly local server');
 const fixture = JSON.parse(fs.readFileSync(path.join(evidence,'fixture.json'),'utf8'));

@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import quote
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,6 +18,28 @@ class Settings(BaseSettings):
     database_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("TGCURATOR_DATABASE_URL", "DATABASE_URL"),
+    )
+    postgres_user: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TGCURATOR_POSTGRES_USER", "POSTGRES_USER"),
+    )
+    postgres_password: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TGCURATOR_POSTGRES_PASSWORD", "POSTGRES_PASSWORD"),
+    )
+    postgres_host: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TGCURATOR_POSTGRES_HOST", "POSTGRES_HOST"),
+    )
+    postgres_port: int = Field(
+        default=5432,
+        ge=1,
+        le=65535,
+        validation_alias=AliasChoices("TGCURATOR_POSTGRES_PORT", "POSTGRES_PORT"),
+    )
+    postgres_db: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TGCURATOR_POSTGRES_DB", "POSTGRES_DB"),
     )
     celery_broker_url: SecretStr | None = None
     app_master_key: SecretStr | None = Field(
@@ -70,7 +93,7 @@ class Settings(BaseSettings):
     def normalize_log_level(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
 
-    @field_validator("database_url")
+    @field_validator("database_url", "postgres_user", "postgres_host", "postgres_db")
     @classmethod
     def normalize_database_url(cls, value: str | None) -> str | None:
         if value is None:
@@ -78,8 +101,33 @@ class Settings(BaseSettings):
         normalized = value.strip()
         return normalized or None
 
+    @field_validator("postgres_password", mode="before")
+    @classmethod
+    def normalize_optional_postgres_password(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("postgres_port", mode="before")
+    @classmethod
+    def normalize_postgres_port(cls, value: object) -> object:
+        return 5432 if isinstance(value, str) and not value.strip() else value
+
     @model_validator(mode="after")
     def load_master_key_file(self) -> Self:
+        if (
+            self.database_url is None
+            and self.postgres_user is not None
+            and self.postgres_password is not None
+            and self.postgres_db is not None
+        ):
+            host = self.postgres_host or "localhost"
+            formatted_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+            encoded_user = quote(self.postgres_user, safe="")
+            encoded_password = quote(self.postgres_password.get_secret_value(), safe="")
+            encoded_db = quote(self.postgres_db, safe="")
+            self.database_url = (
+                f"postgresql+asyncpg://{encoded_user}:{encoded_password}"
+                f"@{formatted_host}:{self.postgres_port}/{encoded_db}"
+            )
         if self.app_master_key is not None and self.app_master_key_file is not None:
             raise ValueError("configure APP_MASTER_KEY or APP_MASTER_KEY_FILE, not both")
         if self.app_master_key_file is not None:

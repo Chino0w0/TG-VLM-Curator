@@ -102,7 +102,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
 
       <div className="panel">
         <h2 id="audit-search-heading">Filter Audit Events</h2>
-        <search aria-labelledby="audit-search-heading">
+        <div role="search" aria-labelledby="audit-search-heading">
           <form onSubmit={handleSearchSubmit}>
             <div className="form-grid">
               <div className="field">
@@ -152,6 +152,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
                 type="button"
                 className="btn"
                 onClick={() => {
+                  reads.invalidate();
                   setEntityType("");
                   setEntityId("");
                   setEventType("");
@@ -168,7 +169,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
               </button>
             </div>
           </form>
-        </search>
+        </div>
       </div>
 
       <div className="panel">
@@ -218,6 +219,8 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
             "Actor",
             "Redacted Snapshot",
           ]}
+          loading={historyLoading}
+          emptyMessage="No audit events match the current filters."
         >
           {items.map((ev) => (
             <tr key={ev.id}>
@@ -227,7 +230,7 @@ export function AuditLogWorkspace({ client }: AuditLogWorkspaceProps) {
               </td>
               <td data-label="Entity" className="mono">
                 {ev.entity_type}
-                {ev.entity_id ? `:${ev.entity_id.slice(0, 8)}` : ""}
+                {ev.entity_id ? `:${ev.entity_id}` : ""}
               </td>
               <td data-label="Actor" className="mono">
                 {ev.actor_admin_user_id ?? "system"}

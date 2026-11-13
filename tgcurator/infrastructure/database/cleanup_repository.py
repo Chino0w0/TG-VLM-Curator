@@ -30,6 +30,7 @@ from .models import (
     ArchiveCleanupItemRecord,
     ArchiveCleanupJobRecord,
     AuditEvent,
+    DuplicateMatchRecord,
     DurableWakeupRecord,
     ImageAssetRecord,
     LabelDefinitionVersionRecord,
@@ -46,8 +47,12 @@ from .session import AsyncDatabase
 CLEANUP_QUEUE = "maintenance"
 CLEANUP_TASK_NAME = "tgcurator.archive_cleanup"
 _ACTIVE_PUBLICATION_STATUSES = ("pending", "sending", "partial", "retry_wait")
+_ACTIVE_STAGE_STATUSES = ("pending", "running", "retry_wait")
+_ACTIVE_RUN_STATUSES = ("pending", "running")
+_ACTIVE_MESSAGE_STATUSES = ("ingested", "processing")
 _TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
 _ACTIVE_WAKEUP_STATUSES = ("pending", "leased")
+_DEFAULT_JOB_LEASE = timedelta(minutes=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +97,9 @@ def _is_latest_manual(manual: Any):
     return ~exists(
         select(newer.id).where(
             newer.message_id == manual.message_id,
+            newer.target_scope == manual.target_scope,
             newer.target_id == manual.target_id,
-            newer.label_definition_version_id == manual.label_definition_version_id,
+            newer.label_key == manual.label_key,
             or_(
                 newer.created_at > manual.created_at,
                 and_(newer.created_at == manual.created_at, newer.id > manual.id),
@@ -157,9 +163,9 @@ def _effective_label_exists(*, asset_id: Any, cleanup_filter: ArchiveCleanupFilt
         ~exists(
             select(current_manual.id).where(
                 current_manual.message_id == ModelLabelAssignmentRecord.message_id,
+                current_manual.target_scope == ModelLabelAssignmentRecord.target_scope,
                 current_manual.target_id == ModelLabelAssignmentRecord.target_id,
-                current_manual.label_definition_version_id
-                == ModelLabelAssignmentRecord.label_definition_version_id,
+                current_manual.label_key == ModelLabelAssignmentRecord.label_key,
                 current_manual.operation == "set",
                 _is_latest_manual(current_manual),
             )
@@ -182,6 +188,7 @@ def _effective_label_exists(*, asset_id: Any, cleanup_filter: ArchiveCleanupFilt
 def _duplicate_predicate(statuses: tuple[str, ...]):
     other = aliased(MessageRecord)
     earlier = aliased(MessageRecord)
+    canonical_child = aliased(MessageRecord)
     has_other = exists(
         select(other.id).where(
             other.visual_fingerprint == MessageRecord.visual_fingerprint,
@@ -200,17 +207,59 @@ def _duplicate_predicate(statuses: tuple[str, ...]):
             ),
         )
     )
+    has_canonical_child = or_(
+        exists(
+            select(canonical_child.id).where(
+                canonical_child.canonical_message_id == MessageRecord.id
+            )
+        ),
+        exists(
+            select(DuplicateMatchRecord.id).where(
+                DuplicateMatchRecord.canonical_message_id == MessageRecord.id
+            )
+        ),
+    )
+    is_marked_duplicate = or_(
+        MessageRecord.duplicate_status.in_(("duplicate_skipped", "duplicate_reclassify")),
+        MessageRecord.canonical_message_id.is_not(None),
+        exists(
+            select(DuplicateMatchRecord.id).where(
+                DuplicateMatchRecord.message_id == MessageRecord.id
+            )
+        ),
+        and_(MessageRecord.visual_fingerprint.is_not(None), has_earlier),
+    )
+    is_marked_canonical = and_(
+        ~is_marked_duplicate,
+        or_(
+            has_canonical_child,
+            and_(MessageRecord.visual_fingerprint.is_not(None), has_other, ~has_earlier),
+        ),
+    )
     predicates = []
     if "unknown" in statuses:
-        predicates.append(MessageRecord.visual_fingerprint.is_(None))
-    if "unique" in statuses:
-        predicates.append(and_(MessageRecord.visual_fingerprint.is_not(None), ~has_other))
-    if "canonical" in statuses:
         predicates.append(
-            and_(MessageRecord.visual_fingerprint.is_not(None), has_other, ~has_earlier)
+            and_(
+                MessageRecord.duplicate_status == "unchecked",
+                MessageRecord.canonical_message_id.is_(None),
+                MessageRecord.visual_fingerprint.is_(None),
+            )
         )
+    if "unique" in statuses:
+        predicates.append(
+            and_(
+                ~is_marked_duplicate,
+                ~is_marked_canonical,
+                or_(
+                    MessageRecord.duplicate_status == "unique",
+                    MessageRecord.visual_fingerprint.is_not(None),
+                ),
+            )
+        )
+    if "canonical" in statuses:
+        predicates.append(is_marked_canonical)
     if "duplicate" in statuses:
-        predicates.append(and_(MessageRecord.visual_fingerprint.is_not(None), has_earlier))
+        predicates.append(is_marked_duplicate)
     return or_(*predicates) if predicates else literal(True)
 
 
@@ -429,10 +478,23 @@ def cleanup_asset_in_use_statement(*, asset_kind: str, asset_id: UUID, message_i
         StageRunRecord.target_kind == "message",
         StageRunRecord.message_id == message_id,
     )
-    running_analysis = exists(
+    active_stage = exists(
         select(StageRunRecord.id).where(
-            StageRunRecord.status == "running",
+            StageRunRecord.status.in_(_ACTIVE_STAGE_STATUSES),
             or_(media_use, message_use),
+        )
+    )
+    active_analysis_run = exists(
+        select(AnalysisRunRecord.id).where(
+            AnalysisRunRecord.message_id == message_id,
+            AnalysisRunRecord.status.in_(_ACTIVE_RUN_STATUSES),
+        )
+    )
+    active_message = exists(
+        select(MessageRecord.id).where(
+            MessageRecord.id == message_id,
+            MessageRecord.processing_status.in_(_ACTIVE_MESSAGE_STATUSES),
+            MessageRecord.blocked_from_analysis.is_(False),
         )
     )
     active_publication = exists(
@@ -441,7 +503,7 @@ def cleanup_asset_in_use_statement(*, asset_kind: str, asset_id: UUID, message_i
             PublicationIntentRecord.status.in_(_ACTIVE_PUBLICATION_STATUSES),
         )
     )
-    return select(or_(running_analysis, active_publication))
+    return select(or_(active_stage, active_analysis_run, active_message, active_publication))
 
 
 class SqlAlchemyArchiveCleanupRepository:
@@ -702,6 +764,7 @@ class SqlAlchemyArchiveCleanupRepository:
                 job = await self._locked_active_job(session=session, claim=claim, now=now)
                 if job is None:
                     return None
+                _renew_job_lease(job=job, now=now)
 
                 replay = await session.scalar(
                     select(ArchiveCleanupItemRecord)
@@ -787,6 +850,7 @@ class SqlAlchemyArchiveCleanupRepository:
                 job = await self._locked_active_job(session=session, claim=claim, now=now)
                 if job is None:
                     return False
+                _renew_job_lease(job=job, now=now)
                 record = await session.scalar(
                     select(ArchiveCleanupItemRecord)
                     .where(
@@ -923,6 +987,13 @@ class SqlAlchemyArchiveCleanupRepository:
                         item_record.last_error_type = error_name
                         item_record.last_failure_at = now
                         item_record.updated_at = now
+                    await self._restore_deleting_assets(
+                        session=session,
+                        job_id=job.id,
+                        now=now,
+                        error_code=code,
+                        error_type=error_name,
+                    )
                     await self._set_wakeup_terminal(session=session, entity_id=job.id, now=now)
                 return True
 
@@ -1115,7 +1186,95 @@ class SqlAlchemyArchiveCleanupRepository:
         job.last_failure_at = now
         job.completed_at = now
         job.updated_at = now
+        await self._restore_deleting_assets(
+            session=session,
+            job_id=job.id,
+            now=now,
+            error_code="CLEANUP_ATTEMPTS_EXHAUSTED",
+            error_type="CleanupAttemptsExhausted",
+        )
         await self._set_wakeup_terminal(session=session, entity_id=job.id, now=now)
+
+    @staticmethod
+    async def _restore_deleting_assets(
+        *,
+        session: Any,
+        job_id: UUID,
+        now: datetime,
+        error_code: str,
+        error_type: str,
+    ) -> None:
+        await session.execute(
+            update(ImageAssetRecord)
+            .where(
+                ImageAssetRecord.cleanup_job_id == job_id,
+                ImageAssetRecord.archive_state == "deleting",
+            )
+            .values(
+                archive_state="ready",
+                cleanup_job_id=None,
+                previous_archive_size=None,
+                archive_deleted_at=None,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(VideoFrameRecord)
+            .where(
+                VideoFrameRecord.cleanup_job_id == job_id,
+                VideoFrameRecord.archive_state == "deleting",
+            )
+            .values(
+                archive_state="ready",
+                cleanup_job_id=None,
+                previous_archive_size=None,
+                archive_deleted_at=None,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(VideoAssetRecord)
+            .where(
+                VideoAssetRecord.cleanup_job_id == job_id,
+                VideoAssetRecord.archive_state == "deleting",
+            )
+            .values(
+                archive_state="ready",
+                cleanup_job_id=None,
+                previous_archive_size=None,
+                archive_deleted_at=None,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(ArchiveCleanupItemRecord)
+            .where(
+                ArchiveCleanupItemRecord.cleanup_job_id == job_id,
+                ArchiveCleanupItemRecord.status == "deleting",
+            )
+            .values(
+                status="failed",
+                deletion_token=None,
+                last_error_code=error_code,
+                last_error_type=error_type,
+                last_failure_at=now,
+                updated_at=now,
+            )
+        )
+
+
+def _renew_job_lease(*, job: ArchiveCleanupJobRecord, now: datetime) -> None:
+    window = _DEFAULT_JOB_LEASE
+    if (
+        job.lease_expires_at is not None
+        and job.updated_at is not None
+        and job.lease_expires_at > job.updated_at
+    ):
+        window = max(_DEFAULT_JOB_LEASE, job.lease_expires_at - job.updated_at)
+    proposed = now + window
+    if job.lease_expires_at is None or proposed > job.lease_expires_at:
+        job.lease_expires_at = proposed
+    job.updated_at = now
 
 
 def _candidate_from_row(row: Any) -> _CleanupCandidate:

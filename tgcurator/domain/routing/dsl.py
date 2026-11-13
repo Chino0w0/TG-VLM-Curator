@@ -290,6 +290,9 @@ def _compare(actual: Any, operator: str, expected: Any, *, numeric_only: bool) -
             }[operator]
         return _UNKNOWN
     if operator in {"eq", "neq"}:
+        if _is_number(actual) and _is_number(expected):
+            equal = actual == expected
+            return equal if operator == "eq" else not equal
         if type(actual) is not type(expected):
             return _UNKNOWN
         equal = actual == expected
@@ -297,7 +300,9 @@ def _compare(actual: Any, operator: str, expected: Any, *, numeric_only: bool) -
     if operator == "in":
         if not isinstance(expected, (list, tuple, set, frozenset)):
             return _UNKNOWN
-        return actual in expected
+        if _is_number(actual):
+            return any(_is_number(item) and actual == item for item in expected)
+        return any(type(actual) is type(item) and actual == item for item in expected)
     if operator == "contains":
         if isinstance(actual, str):
             return actual.find(expected) >= 0 if isinstance(expected, str) else _UNKNOWN

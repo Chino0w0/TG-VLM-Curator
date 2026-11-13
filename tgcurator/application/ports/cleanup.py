@@ -15,6 +15,11 @@ from .contracts import ArchiveStorage
 
 _ARCHIVE_SCOPES = frozenset({"global", "media"})
 _DUPLICATE_STATUSES = frozenset({"unknown", "unique", "canonical", "duplicate"})
+_DUPLICATE_STATUS_ALIASES = {
+    "duplicate_skipped": "duplicate",
+    "duplicate_reclassify": "duplicate",
+    "duplicate_analyzed": "duplicate",
+}
 _MEDIA_TYPES = frozenset({"image", "video"})
 _PROCESSING_STATUSES = frozenset({"ingested", "processing", "processed", "failed"})
 _REVIEW_STATUSES = frozenset({"unreviewed", "in_review", "reviewed", "needs_attention"})
@@ -30,13 +35,19 @@ def _uuid(value: str, *, field: str) -> str:
 
 
 def _normalized_values(
-    values: tuple[str, ...], *, field: str, allowed: frozenset[str] | None = None
+    values: tuple[str, ...],
+    *,
+    field: str,
+    allowed: frozenset[str] | None = None,
+    aliases: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     normalized: set[str] = set()
     for value in values:
         if not isinstance(value, str) or not value.strip():
             raise DomainValidationError(f"{field} must contain non-blank strings")
         item = value.strip().lower() if allowed is not None else value.strip()
+        if aliases is not None:
+            item = aliases.get(item, item)
         if allowed is not None and item not in allowed:
             raise DomainValidationError(f"{field} contains unsupported value: {value!r}")
         normalized.add(item)
@@ -179,6 +190,7 @@ class ArchiveCleanupFilter:
                 self.duplicate_statuses,
                 field="duplicate_statuses",
                 allowed=_DUPLICATE_STATUSES,
+                aliases=_DUPLICATE_STATUS_ALIASES,
             ),
         )
         object.__setattr__(

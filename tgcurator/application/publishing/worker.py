@@ -17,6 +17,7 @@ from tgcurator.application.ports.publishing import (
 )
 from tgcurator.domain.publishing import (
     ProtectedContentFallback,
+    PublicationMode,
     PublicationOperation,
     PublicationPart,
     publication_plan,
@@ -56,6 +57,7 @@ class PublicationWorker:
 
         completed_parts = set(claim.completed_parts)
         main_remote_message_ids = claim.main_remote_message_ids
+        degraded_metadata_only = claim.main_degraded_to_text
         try:
             if claim.in_flight_part is not None and claim.in_flight_operation is not None:
                 execution = await self._execute_part(
@@ -83,9 +85,14 @@ class PublicationWorker:
                 completed_parts.add(claim.in_flight_part)
                 if claim.in_flight_part is PublicationPart.MAIN:
                     main_remote_message_ids = result.remote_message_ids
+                    if (
+                        claim.mode is PublicationMode.NATIVE_FORWARD_WITH_SUPPLEMENT
+                        and operation is PublicationOperation.SEND_TEXT
+                    ):
+                        degraded_metadata_only = True
 
             plan = publication_plan(claim.mode)
-            while step := plan.next_step(completed_parts):
+            while not degraded_metadata_only and (step := plan.next_step(completed_parts)):
                 operation = step.operation
                 if not await self.repository.begin_part(
                     claim=claim,
@@ -118,6 +125,11 @@ class PublicationWorker:
                 completed_parts.add(step.part)
                 if step.part is PublicationPart.MAIN:
                     main_remote_message_ids = published.remote_message_ids
+                    if (
+                        claim.mode is PublicationMode.NATIVE_FORWARD_WITH_SUPPLEMENT
+                        and operation is PublicationOperation.SEND_TEXT
+                    ):
+                        degraded_metadata_only = True
 
             completed = await self.repository.complete(claim=claim, now=now)
             if completed and self.telemetry is not None:
@@ -350,6 +362,7 @@ class PublicationWorker:
             random_ids=random_ids,
             text=text,
             reply_to_message_id=reply_to_message_id,
+            source_read_identity_id=claim.source_read_identity_id,
         )
 
 
