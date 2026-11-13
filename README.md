@@ -5,27 +5,38 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 
 ## Current implementation status
 
-M0–M9 implementations are merged. The remediation merges are M6 / #27
-`99696fa2`, M7 / #28 `28c3e6fd`, M8 / #29 `b0e955f4`, and M9 / #30 `0007be1e`.
-M10 / #31 delivers the production composition roots, visual-input preparation and
-operational verification. Code head `8fc2737` passed all GitHub CI jobs
-(python, web and deployment): PR run `43212224146`, push run `43212215720`.
-The final documentation head must pass the same checks before exact-SHA merge;
-the actual merge commit is recorded on PR #31.
+M0–M10 implementations are merged on `main` (M6 / #27 `99696fa2`, M7 / #28 `28c3e6fd`,
+M8 / #29 `b0e955f4`, M9 / #30 `0007be1e`, and M10 / #31 `f6ac697`, whose code head
+`8fc2737` passed GitHub CI PR run `43212224146` and push run `43212215720`). On top of
+`f6ac697`, local `main` integrates the four post-M10 full-stack hardening branches
+(`fix/final-core-hardening` `24bd8ed`, `fix/final-admin-api-hardening` `8f71f06`,
+`fix/final-web-hardening` `8b702a6`, `fix/final-ops-runtime-hardening` `18620b5`) plus
+two integration commits (`1290c20` and `c5456dc`), reaching verified code head
+`c5456dc` (`c5456dc3756d62b3385aa19de7d69b5ae3e18a71`, local `main`, not yet pushed to
+`origin`).
 
-The local suite passed 596 tests with 2 deprecation warnings and no errors,
-failures or skips (281.56 seconds). This includes 31 native PostgreSQL/runtime
-integration cases and the independent worker OS-process restart; 17 additional
-migration tests render offline SQL. GitHub Linux/Python3.12 with SQLAlchemy2.1.8
-passed 596 tests with 1 dependency warning (127.86 seconds). Native PostgreSQL
-Chrome regression passed all 17 groups, frontend Vitest passed 24 tests, and the
-recorded npm audit reported zero vulnerabilities. The full isolated ten-service
-Docker exercise passed locally and in GitHub CI.
+At local code head `c5456dc`, `pytest -ra -W error` passed **648 tests with 0 errors,
+0 failures, 0 skips, and 0 warnings** (`236.62` seconds). This includes **40** live
+native PostgreSQL 16 / Redis 7 integration cases (`M6=6`, `M7=6`, `M8=8`,
+`media_profile=6`, `post_m10_core_postgres=6`, `post_m10_admin_http_postgres=3`,
+`runtime_closed_loop=3`, `telegram_revocation=1`, and `worker_process_restart=1`) plus
+**18** offline Alembic SQL rendering tests (including post-M10 migration
+`b9c3e5f7a106`). Native PostgreSQL 16 headless Chrome regression
+(`web/tests/native_postgres_runner.py`) passed all **17/17** groups (`errors=[]`,
+`database_removed=true`), frontend `typecheck` and Vitest passed **33/33** tests with
+**0 stderr warnings**, `vite build` emitted lazy-loaded workspace chunks (`240.49 kB`
+entry + 12 workspace chunks), and `npm audit --json` reported **0 vulnerabilities**.
+Static and packaging checks (`ruff` across `289` files, `pip check`, `compileall`, and
+`bash -n scripts/*.sh`) and the full isolated ten-service Docker Compose TLS + FFmpeg
+cancellation + graceful `SIGTERM` + PG16/media/independent-key DR & consistency drill
+(`scripts/check-deployment.py`, exit `0` in `147.32` seconds, `0` leaked smoke images)
+all passed locally.
 
-These are real local PostgreSQL16, Redis/Celery, Docker, HTTP and browser results.
-Telegram and inference remain controlled external fixtures, not live credentials,
-real channel deliveries, provider compatibility or model-quality acceptance. Full
-finding-by-finding evidence and remaining gates are in
+These are real local PostgreSQL 16, Redis 7 / Celery, Docker Compose, HTTP, and headless
+Chrome results. Telegram and external VLM/LLM inference remain controlled fixtures — not
+live account credentials, real channel deliveries, external provider compatibility,
+model-quality acceptance, or remote GitHub Actions verification on the unpushed local
+`main` head. Historical finding-by-finding M6–M10 remediation evidence is preserved in
 [the remediation delivery report](docs/reviews/2026-11-12-remediation-status.md).
 
 M0 provides deterministic, framework-independent rules for message visual identity,
@@ -266,8 +277,10 @@ Health endpoints:
 
 Production serves HTTPS through nginx on port 443. Provide an operator-managed trusted
 certificate/full chain and matching private key in `.env`; both are mounted read-only.
-HTTP port 80 redirects to HTTPS. Production Secure cookies remain enabled. The database,
-Redis and API are internal-only; the API does not trust caller-supplied proxy headers.
+HTTP port 80 redirects (`308`) to `https://${TGCURATOR_SERVER_NAME:-localhost}` (never
+reflecting spoofed caller `Host` headers). Production Secure cookies remain enabled. The
+database, Redis and API are internal-only; the API does not trust caller-supplied proxy
+headers, and public nginx blocks `/metrics` with `404`.
 
 Follow [HTTPS deployment and recovery](docs/operations/deployment.md) for file permissions,
 certificate renewal, staged migrations/bootstrap, explicit project selection, maintenance
@@ -308,8 +321,8 @@ wrong-key rejection, and failing/clean archive consistency scans.
 python -m pip install -e '.[runtime,dev]'
 python -m ruff format --check .
 python -m ruff check .
-python -m pytest -ra
-python -m compileall -q apps tgcurator migrations tests
+python -m pytest -ra -W error
+python -m compileall -q apps tgcurator migrations tests scripts
 python -m pip check
 cd web && npm ci && npm run typecheck && npm test && npm run build
 ```

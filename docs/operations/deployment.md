@@ -1,12 +1,12 @@
 # HTTPS 部署与灾难恢复
 
-本说明面向 Docker Engine 与 Compose v2。生产保持 `TGCURATOR_ENVIRONMENT=production`，会话 Cookie 必须为 Secure、HttpOnly、SameSite=Lax。只有 nginx 的 80/443 发布到宿主；PostgreSQL、Redis 和 API 不发布端口。80 除健康检查外均 308 重定向至 HTTPS，443 在 nginx 终止 TLS。API 显式禁用代理头信任，应用记录的客户端地址是容器代理地址；真实客户端地址以 nginx 日志为准，不信任用户提供的 X-Forwarded-For。公开入口不代理 `/metrics`，监控应从受控内部网络访问 API。
+本说明面向 Docker Engine 与 Compose v2。生产保持 `TGCURATOR_ENVIRONMENT=production`，会话 Cookie 必须为 Secure、HttpOnly、SameSite=Lax。只有 nginx 的 80/443 发布到宿主；PostgreSQL、Redis 和 API 不发布端口。80 除 `/nginx-health` 健康检查外均按显式配置的 `TGCURATOR_SERVER_NAME`（默认 `localhost`，绝不反射请求头中的伪造 `Host`）执行 308 重定向至 HTTPS，443 在 nginx 终止 TLS 并附带 HSTS、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin` 与静态资源 gzip/缓存策略。API 显式禁用代理头信任，应用记录的客户端地址是容器代理地址；真实客户端地址以 nginx 日志为准，不信任用户提供的 X-Forwarded-For。公开入口显式阻断 `/metrics`（返回 `404`），监控应从受控内部网络访问 API。
 
 ## 操作员前提与首次启动
 
-操作员必须准备与访问域名匹配、客户端信任、未过期的证书完整链及对应私钥。设置 `.env` 中 `TGCURATOR_TLS_CERT_HOST_PATH` 和 `TGCURATOR_TLS_KEY_HOST_PATH`；文件必须真实存在，Compose 禁止自动创建同名目录，以只读挂载交给 nginx。没有公网域名不影响本地隔离验证，但自签测试证书不代表生产信任。证书续期后执行 `docker compose exec web nginx -t` 并重新创建 web，使替换后的 bind 文件生效。避免打印私钥、主密钥、密码或未脱敏的 `docker compose config`。
+操作员必须准备与访问域名匹配、客户端信任、未过期的证书完整链及对应私钥。设置 `.env` 中 `TGCURATOR_SERVER_NAME`（与证书域名一致）、`TGCURATOR_TLS_CERT_HOST_PATH` 和 `TGCURATOR_TLS_KEY_HOST_PATH`；证书与私钥文件必须真实存在，Compose 禁止自动创建同名目录，以只读挂载交给 nginx。没有公网域名不影响本地隔离验证，但自签测试证书不代表生产信任。证书续期后执行 `docker compose exec web nginx -t` 并重新创建 web，使替换后的 bind 文件生效。避免打印私钥、主密钥、密码或未脱敏的 `docker compose config`。
 
-复制 `.env.example` 为 `.env`，选择明确的 `COMPOSE_PROJECT_NAME`，填写强随机 PostgreSQL 密码（建议十六进制，避免 URL 特殊字符），将 `.env`、主密钥与证书目录限制为受控操作员可访问。主密钥为 base64 编码的随机 32 字节，绝不写入 Git、数据库或备份包。Docker 的文件 secret 需要容器 UID 10001 能读取；Linux 上可将主密钥归属 UID 10001、权限 0400，并以 0700 的宿主父目录保护路径，不能用 root:root 0400 使非 root 应用无法读取。Windows 使用 ACL 限制宿主目录，并验证 Docker Desktop 的实际挂载读取能力。
+复制 `.env.example` 为 `.env`，选择明确的 `COMPOSE_PROJECT_NAME`，填写强随机 `POSTGRES_PASSWORD`（`Settings` 在未显式覆盖 `TGCURATOR_DATABASE_URL` 时会对 `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_HOST`/`POSTGRES_PORT`/`POSTGRES_DB` 自动做安全百分号编码，支持特殊字符密码），将 `.env`、主密钥与证书目录限制为受控操作员可访问。7 个后端 Python 服务共用 `${COMPOSE_PROJECT_NAME:-tgcurator}-backend:local` 镜像并启用 `no-new-privileges:true` 与 `json-file`（`20m` x `5`）日志轮转。主密钥为 base64 编码的随机 32 字节，绝不写入 Git、数据库或备份包。Docker 的文件 secret 需要容器 UID 10001 能读取；Linux 上可将主密钥归属 UID 10001、权限 0400，并以 0700 的宿主父目录保护路径，不能用 root:root 0400 使非 root 应用无法读取。Windows 使用 ACL 限制宿主目录，并验证 Docker Desktop 的实际挂载读取能力。
 
 ```bash
 cp .env.example .env
@@ -28,7 +28,7 @@ docker compose --env-file "$COMPOSE_ENV_FILE" up -d --build --wait
 
 运维脚本在宿主 Bash 执行，依赖 Docker Compose、Python 3、sha256sum、tar、mktemp；Windows 使用 Git Bash 并先安装 Python。所有脚本强制要求显式导出 `COMPOSE_PROJECT_NAME`，通过 `COMPOSE_ENV_FILE` 指定配置，不会把 `.env` 当 shell 执行。自定义单一 Compose 文件可设置 `COMPOSE_FILE`。不要将多个路径拼接到这个变量。
 
-备份期间停止所有应用写入方，并维持整个数据库、媒体备份的一致维护窗口。脚本拒绝存在运行中的应用服务；PG 和 Redis 可以保持启动。也必须停止外部写入客户端；脚本无法识别 Compose 外的数据库连接。备份不是跨存储在线快照。
+备份期间停止所有应用写入方，并维持整个数据库、媒体备份的一致维护窗口。脚本同时检查 `running` 与 `restarting` 状态，拒绝存在运行中或重启退避中的应用服务；PG 和 Redis 可以保持启动。也必须停止外部写入客户端；脚本无法识别 Compose 外的数据库连接。备份不是跨存储在线快照。
 
 ```bash
 export COMPOSE_PROJECT_NAME=tgcurator
@@ -58,7 +58,7 @@ RESTORE_REPORT=./restore-consistency.json bash scripts/restore-postgres.sh \
 
 `--yes-restore` 只作为旧别名兼容，新命令统一使用 `--confirm-restore`。脚本先验证两份 SHA256、媒体路径和成员类型，再检查维护窗口及空媒体卷。数据库在单个事务中 `pg_restore --clean --if-exists --exit-on-error`，SQL 失败回滚并退出；媒体恢复失败时数据库可能已完成恢复，必须保持应用停止，调查后重新准备隔离目标，不自动删除或覆盖已有媒体卷。恢复不启动任何业务 worker。
 
-随后强制运行真实数据库的 `apps.worker.consistency_cli --verify-sha256 --json`，报告持久化到 `RESTORE_REPORT`，缺失、损坏或孤儿媒体使脚本返回非零。扫描器检查数据库与媒体关系，不能证明所有加密凭据可解密。正式切换前必须额外用独立主密钥验证至少一条恢复后的加密 Secret、管理员登录、业务记录及关键媒体，并人工处置差异。不要通过关闭一致性扫描或忽略退出码宣布恢复成功。生产切换、DNS 修改及生产旧卷删除均需单独授权。
+随后强制运行真实数据库的 `apps.worker.consistency_cli --verify-sha256 --json`，报告持久化到 `RESTORE_REPORT`；缺失、损坏或孤儿媒体使脚本向 `stderr` 打印失败退出码与 `RESTORE_REPORT` 定位路径并返回非零。扫描器检查数据库与媒体关系，不能证明所有加密凭据可解密。正式切换前必须额外用独立主密钥验证至少一条恢复后的加密 Secret、管理员登录、业务记录及关键媒体，并人工处置差异。不要通过关闭一致性扫描或忽略退出码宣布恢复成功。生产切换、DNS 修改及生产旧卷删除均需单独授权。
 
 ## 可重复本地 TLS 与恢复演练
 
