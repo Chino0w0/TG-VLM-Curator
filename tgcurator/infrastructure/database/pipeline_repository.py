@@ -1252,7 +1252,22 @@ class SqlAlchemyMessagePipelineRepository:
                             ImageAssetRecord.source_telegram_message_id.is_not(None),
                             MessageRecord.blocked_from_analysis.is_(False),
                             or_(
-                                ImageAssetRecord.archive_state == "pending",
+                                and_(
+                                    ImageAssetRecord.archive_state == "pending",
+                                    exists(
+                                        select(DurableWakeupRecord.id).where(
+                                            DurableWakeupRecord.queue == IMAGE_ARCHIVE_QUEUE,
+                                            DurableWakeupRecord.entity_id == ImageAssetRecord.id,
+                                            or_(
+                                                DurableWakeupRecord.status == "completed",
+                                                and_(
+                                                    DurableWakeupRecord.status == "leased",
+                                                    DurableWakeupRecord.lease_expires_at <= now,
+                                                ),
+                                            ),
+                                        )
+                                    ),
+                                ),
                                 and_(
                                     ImageAssetRecord.archive_state == "retry_wait",
                                     ImageAssetRecord.archive_next_retry_at <= now,
@@ -1286,7 +1301,22 @@ class SqlAlchemyMessagePipelineRepository:
                             VideoAssetRecord.source_telegram_message_id.is_not(None),
                             MessageRecord.blocked_from_analysis.is_(False),
                             or_(
-                                VideoAssetRecord.archive_state == "pending",
+                                and_(
+                                    VideoAssetRecord.archive_state == "pending",
+                                    exists(
+                                        select(DurableWakeupRecord.id).where(
+                                            DurableWakeupRecord.queue == VIDEO_ARCHIVE_QUEUE,
+                                            DurableWakeupRecord.entity_id == VideoAssetRecord.id,
+                                            or_(
+                                                DurableWakeupRecord.status == "completed",
+                                                and_(
+                                                    DurableWakeupRecord.status == "leased",
+                                                    DurableWakeupRecord.lease_expires_at <= now,
+                                                ),
+                                            ),
+                                        )
+                                    ),
+                                ),
                                 and_(
                                     VideoAssetRecord.archive_state == "retry_wait",
                                     VideoAssetRecord.archive_next_retry_at <= now,

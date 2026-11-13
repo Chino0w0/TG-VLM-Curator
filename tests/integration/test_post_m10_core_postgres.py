@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -686,7 +686,8 @@ def test_ingest_activity_cursors_lifecycle_deferral_consistency_and_wakeup_repai
                     assert row.source_changed_after_processing is True
 
                 # Lifecycle edit with defer_media_wakeups=True creates pending media rows
-                # without wakeups; repair_wakeups reconstructs both pending image & video wakeups.
+                # without wakeups; repair_wakeups must preserve deferral until authorized, and
+                # reconstruct pending media wakeups once an authorized wakeup was completed/lost.
                 assert await lifecycle_repo.record_edit(
                     source_channel_id=source_str,
                     telegram_message_id=20,
@@ -710,6 +711,27 @@ def test_ingest_activity_cursors_lifecycle_deferral_consistency_and_wakeup_repai
                 async with db.session() as session:
                     wakeups_before = tuple(await session.scalars(select(DurableWakeupRecord)))
                     assert wakeups_before == ()
+
+                deferred_report = await pipeline_repo.repair_wakeups(now=NOW + timedelta(minutes=6))
+                assert deferred_report.repaired_image_archives == 0
+                assert deferred_report.repaired_video_archives == 0
+
+                assert (
+                    await pipeline_repo.ensure_media_archive_wakeups(
+                        message_id=str(msg_20_id),
+                        now=NOW + timedelta(minutes=6),
+                    )
+                    == 2
+                )
+                async with db.session() as session:
+                    async with session.begin():
+                        await session.execute(
+                            update(DurableWakeupRecord).values(
+                                status="completed",
+                                completed_at=NOW + timedelta(minutes=6),
+                                updated_at=NOW + timedelta(minutes=6),
+                            )
+                        )
 
                 report = await pipeline_repo.repair_wakeups(now=NOW + timedelta(minutes=6))
                 assert report.repaired_image_archives == 1
