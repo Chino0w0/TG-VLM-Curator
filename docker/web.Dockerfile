@@ -13,6 +13,7 @@ FROM nginx:1.27-alpine
 
 COPY docker/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /web/dist /usr/share/nginx/html
+RUN chmod -R a+rX /usr/share/nginx/html
 
 EXPOSE 80 443
 

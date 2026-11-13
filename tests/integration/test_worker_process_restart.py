@@ -34,8 +34,22 @@ from apps.scheduler.runtime import create_scheduler_runtime
 from apps.worker.runtime import create_worker_runtime
 from tgcurator.infrastructure.database import models as m
 
+
+def _resolve_evidence_dir(root: Path) -> Path:
+    configured = os.environ.get("TGCURATOR_EVIDENCE_DIR")
+    if configured and configured.strip():
+        return Path(configured.strip()).resolve()
+    dot_git = root / ".git"
+    if dot_git.is_file():
+        header = dot_git.read_text(encoding="utf-8").strip()
+        if header.startswith("gitdir:"):
+            git_dir = (root / header.partition(":")[2].strip()).resolve()
+            return git_dir / "fix-2026-11-12/runtime"
+    return dot_git / "fix-2026-11-12/runtime"
+
+
 ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE = ROOT / ".git/fix-2026-11-12/runtime"
+EVIDENCE = _resolve_evidence_dir(ROOT)
 
 
 def read_events(path):

@@ -18,8 +18,21 @@ fi
 source "$(dirname "$0")/backup-common.sh"
 verify_checksum "$DUMP_FILE"
 verify_checksum "$MEDIA_FILE"
+resolve_python() {
+  local candidate
+  for candidate in "${PYTHON_BIN:-}" python3 python; do
+    [[ -n "$candidate" ]] || continue
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys, tarfile" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo 'Python 3 interpreter required for archive validation' >&2
+  exit 2
+}
+PYTHON_CMD="$(resolve_python)"
 # Reject path traversal and links before touching either durable store.
-python - "$MEDIA_FILE" <<'PY'
+"$PYTHON_CMD" - "$MEDIA_FILE" <<'PY'
 import sys, tarfile
 from pathlib import PurePosixPath
 with tarfile.open(sys.argv[1], 'r:gz') as archive:
@@ -37,5 +50,10 @@ compose run --rm -T --no-deps archive-tools sh -eu -c 'tar -xzf - -C /archive; c
 # The separately recovered master key must already be mounted. Do not copy keys into backups.
 # This read-only scanner is mandatory; discrepancies or missing dependencies fail the command.
 REPORT="${RESTORE_REPORT:-./restore-consistency.json}"
-compose run --rm -T --no-deps --entrypoint python api -m apps.worker.consistency_cli --archive-root /var/lib/tgcurator/archive --verify-sha256 --json > "$REPORT"
+SCAN_RC=0
+compose run --rm -T --no-deps --entrypoint python api -m apps.worker.consistency_cli --archive-root /var/lib/tgcurator/archive --verify-sha256 --json > "$REPORT" || SCAN_RC=$?
+if [[ "$SCAN_RC" -ne 0 ]]; then
+  printf '[restore-postgres] Consistency scan failed (exit %s); inspect report: %s\n' "$SCAN_RC" "$REPORT" >&2
+  exit "$SCAN_RC"
+fi
 printf '[restore-postgres] Complete; review consistency report: %s\n' "$REPORT"
