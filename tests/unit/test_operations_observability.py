@@ -129,12 +129,14 @@ class OperationsMonitorTests(unittest.TestCase):
             monitor.worker_health(now=datetime(2026, 9, 16, 12, 0))
 
         monitor.heartbeat_worker(at=NOW, database_ready=True, broker_ready=True)
-        with self.assertRaisesRegex(DomainValidationError, "monotonic"):
-            monitor.heartbeat_worker(
-                at=NOW - timedelta(seconds=1),
-                database_ready=True,
-                broker_ready=True,
-            )
+        monitor.heartbeat_worker(
+            at=NOW - timedelta(seconds=1),
+            database_ready=True,
+            broker_ready=False,
+        )
+        clamped = monitor.worker_health(now=NOW)
+        self.assertEqual(clamped.last_heartbeat_at, NOW)
+        self.assertFalse(clamped.broker_ready)
 
     def test_backlog_statement_and_repository_count_pending_partial_and_due_work(self) -> None:
         statement = operations_backlog_statement(now=NOW)

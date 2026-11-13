@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -28,10 +29,36 @@ class OpenAICompatibleInferenceProvider:
         secret_resolver: InferenceSecretResolver,
         transport: httpx.AsyncBaseTransport | None = None,
         user_agent: str = "tg-vlm-curator/0.1",
+        max_connections: int = 100,
+        max_keepalive_connections: int = 20,
     ) -> None:
         self._secret_resolver = secret_resolver
         self._transport = transport
         self._user_agent = user_agent
+        self._limits = httpx.Limits(
+            max_connections=max_connections,
+            max_keepalive_connections=max_keepalive_connections,
+        )
+        self._client: httpx.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client.is_closed or self._client_loop is not loop:
+            self._client = httpx.AsyncClient(
+                transport=self._transport,
+                follow_redirects=False,
+                limits=self._limits,
+            )
+            self._client_loop = loop
+        return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        self._client_loop = None
+        if client is not None and not client.is_closed:
+            await client.aclose()
 
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
         if request.profile.provider_adapter != "openai_compatible":
@@ -67,16 +94,17 @@ class OpenAICompatibleInferenceProvider:
         endpoint = f"{request.profile.base_url}/chat/completions"
         started = monotonic()
         try:
-            async with httpx.AsyncClient(
-                transport=self._transport,
-                timeout=httpx.Timeout(request.timeout_seconds),
+            client = self._get_client()
+            response = await client.post(
+                endpoint,
+                json=body,
                 headers={
                     "Authorization": f"Bearer {secret}",
                     "Content-Type": "application/json",
                     "User-Agent": self._user_agent,
                 },
-            ) as client:
-                response = await client.post(endpoint, json=body)
+                timeout=httpx.Timeout(request.timeout_seconds),
+            )
         except httpx.TimeoutException as error:
             raise InferenceProviderFailure(
                 code=AnalysisErrorCode.TIMEOUT,

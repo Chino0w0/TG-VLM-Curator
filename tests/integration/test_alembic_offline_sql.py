@@ -15,6 +15,7 @@ M5_REVISION = "d7b3f9a1e6c2"
 M6_REVISION = "e6d4a8b2c951"
 M7_REVISION = "f1a7c3d9e204"
 M8_REVISION = "a8b2d4e1f305"
+POST_M10_REVISION = "b9c3e5f7a106"
 VALID_DATABASE_URL = "postgresql+asyncpg://curator:curator@localhost:5432/tgcurator"
 
 
@@ -704,6 +705,30 @@ class AlembicOfflineSqlTests(unittest.TestCase):
         )
         self.assertNotEqual(sync_result.returncode, 0)
         self.assertIn("PostgreSQL through asyncpg only", sync_result.stderr)
+
+    def test_post_m10_upgrade_and_downgrade_render_clean_postgresql_ddl(self) -> None:
+        up = self.run_alembic("upgrade", f"{M8_REVISION}:{POST_M10_REVISION}", "--sql")
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertIn("CREATE TABLE service_heartbeats", up.stdout)
+        self.assertIn("trg_audit_events_append_only", up.stdout)
+        self.assertIn("trg_publish_records_append_only", up.stdout)
+        self.assertIn("DELETE FROM duplicate_matches WHERE message_id = NEW.id;", up.stdout)
+        for index_name in (
+            "ix_durable_wakeups_status_lease",
+            "ix_messages_dedup_candidates",
+            "ix_stage_runs_batch_colease",
+            "ix_stage_runs_message_status",
+            "ix_stage_runs_target_status",
+            "ix_model_assignments_analysis_run",
+            "ix_manual_labels_target_key_created",
+        ):
+            self.assertIn(index_name, up.stdout)
+
+        down = self.run_alembic("downgrade", f"{POST_M10_REVISION}:{M8_REVISION}", "--sql")
+        self.assertEqual(down.returncode, 0, down.stderr)
+        self.assertIn("DROP TRIGGER trg_publish_records_append_only", down.stdout)
+        self.assertIn("DROP TRIGGER trg_audit_events_append_only", down.stdout)
+        self.assertIn("DROP TABLE service_heartbeats", down.stdout)
 
 
 if __name__ == "__main__":

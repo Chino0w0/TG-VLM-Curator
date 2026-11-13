@@ -14,6 +14,38 @@ from .configured_runtime import ConfiguredTelegramClientPool, ConfiguredTelegram
 logger = logging.getLogger(__name__)
 
 
+def _peer_id_variants(telegram_peer_id: int) -> tuple[int, ...]:
+    """Return canonical Bot-API (`-100<id>`) and bare MTProto peer-ID aliases."""
+
+    variants: list[int] = [telegram_peer_id]
+    text = str(telegram_peer_id)
+    if telegram_peer_id < -1_000_000_000_000 and text.startswith("-100"):
+        bare = int(text[4:])
+        if bare > 0:
+            variants.append(bare)
+            variants.append(-bare)
+    elif telegram_peer_id > 0:
+        variants.append(-int(f"100{telegram_peer_id}"))
+        variants.append(-telegram_peer_id)
+    elif telegram_peer_id < 0:
+        bare = -telegram_peer_id
+        variants.append(bare)
+        variants.append(-int(f"100{bare}"))
+    return tuple(dict.fromkeys(variants))
+
+
+def _extract_event_peer_id(event: Any) -> int | None:
+    chat_id = getattr(event, "chat_id", None)
+    if isinstance(chat_id, int) and not isinstance(chat_id, bool):
+        return chat_id
+    peer = getattr(getattr(event, "message", None), "peer_id", None)
+    for attr, prefix in (("channel_id", "-100"), ("chat_id", "-"), ("user_id", "")):
+        raw = getattr(peer, attr, None)
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            return int(f"{prefix}{raw}")
+    return None
+
+
 class TelegramSubscriptionManager:
     """Subscribe configured read identities and periodically reconcile durable history gaps."""
 
@@ -48,15 +80,20 @@ class TelegramSubscriptionManager:
                 )
             )
         current: dict[str, dict[int, str]] = {}
+        active_source_ids_by_identity: dict[str, list[str]] = {}
         for source in sources:
-            current.setdefault(str(source.default_read_identity_id), {})[
-                source.telegram_peer_id
-            ] = str(source.id)
+            identity_key = str(source.default_read_identity_id)
+            peer_map = current.setdefault(identity_key, {})
+            source_id = str(source.id)
+            active_source_ids_by_identity.setdefault(identity_key, []).append(source_id)
+            peer_map[source.telegram_peer_id] = source_id
+            for alias in _peer_id_variants(source.telegram_peer_id):
+                peer_map.setdefault(alias, source_id)
         self._sources_by_identity = current
         connected_sources: list[str] = []
         all_connected = bool(current)
         changed = False
-        for identity_id, source_map in current.items():
+        for identity_id in current:
             try:
                 client = await self.pool.resolve_client(identity_id=identity_id)
                 if self._subscribed.get(identity_id) is not client:
@@ -75,7 +112,7 @@ class TelegramSubscriptionManager:
                         self._handlers.append((client, handler, builder))
                     self._subscribed[identity_id] = client
                     changed = True
-                connected_sources.extend(source_map.values())
+                connected_sources.extend(active_source_ids_by_identity.get(identity_id, ()))
             except Exception as error:
                 all_connected = False
                 old = self._subscribed.pop(identity_id, None)
@@ -113,9 +150,16 @@ class TelegramSubscriptionManager:
                 )
 
     async def _source_for_event(self, identity_id: str, event: Any) -> str | None:
-        source_id = self._sources_by_identity.get(identity_id, {}).get(
-            getattr(event, "chat_id", None)
-        )
+        event_peer_id = _extract_event_peer_id(event)
+        if event_peer_id is None:
+            return None
+        peer_map = self._sources_by_identity.get(identity_id, {})
+        source_id = peer_map.get(event_peer_id)
+        if source_id is None:
+            for alias in _peer_id_variants(event_peer_id):
+                source_id = peer_map.get(alias)
+                if source_id is not None:
+                    break
         if source_id is None:
             return None
         # A callback already queued before the next poll must not outlive identity
@@ -137,6 +181,8 @@ class TelegramSubscriptionManager:
 
     def _new_message_handler(self, runtime: Any, identity_id: str):
         async def handler(event: Any) -> None:
+            if getattr(getattr(event, "message", None), "action", None) is not None:
+                return
             source_id = await self._source_for_event(identity_id, event)
             if source_id is None:
                 return
@@ -157,6 +203,8 @@ class TelegramSubscriptionManager:
 
     def _edit_message_handler(self, runtime: Any, identity_id: str):
         async def handler(event: Any) -> None:
+            if getattr(getattr(event, "message", None), "action", None) is not None:
+                return
             source_id = await self._source_for_event(identity_id, event)
             if source_id is None:
                 return
