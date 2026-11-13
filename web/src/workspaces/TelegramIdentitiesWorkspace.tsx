@@ -1,5 +1,5 @@
 import { RecordEditor } from "../components/RecordEditor";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
   SecretStatusRecord,
@@ -7,6 +7,24 @@ import type {
   TelegramIdentity,
 } from "../api/types";
 import { ResponsiveTable } from "../components/ResponsiveTable";
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
+
+const MTPROTO_SECRET_TYPES = new Set([
+  "telegram_session",
+  "telethon_session",
+  "mtproto_session",
+]);
+
+function isSecretCompatibleWithIdentityType(
+  secretType: string,
+  identityType: "mtproto_user" | "bot",
+): boolean {
+  if (identityType === "bot") {
+    return secretType === "bot_token";
+  }
+  return MTPROTO_SECRET_TYPES.has(secretType);
+}
 
 export interface TelegramIdentitiesWorkspaceProps {
   client: AdminApiClient;
@@ -15,9 +33,13 @@ export interface TelegramIdentitiesWorkspaceProps {
 export function TelegramIdentitiesWorkspace({
   client,
 }: TelegramIdentitiesWorkspaceProps) {
+  const reads = useRequestGeneration();
+  const evalReads = useRequestGeneration();
+  const { busy, runAction } = useMutationGuard();
+  const [loading, setLoading] = useState(true);
   const [secrets, setSecrets] = useState<SecretStatusRecord[]>([]);
   const [identities, setIdentities] = useState<TelegramIdentity[]>([]);
-  const [secretType, setSecretType] = useState("telethon_session");
+  const [secretType, setSecretType] = useState("telegram_session");
   const [secretPlaintext, setSecretPlaintext] = useState("");
   const [rotateTargetId, setRotateTargetId] = useState<string | null>(null);
   const [rotatePlaintext, setRotatePlaintext] = useState("");
@@ -26,6 +48,8 @@ export function TelegramIdentitiesWorkspace({
   const [identityType, setIdentityType] = useState<"mtproto_user" | "bot">(
     "mtproto_user",
   );
+  const identityTypeRef = useRef<"mtproto_user" | "bot">(identityType);
+  identityTypeRef.current = identityType;
   const [identitySecretId, setIdentitySecretId] = useState("");
 
   const [evalIdentityId, setEvalIdentityId] = useState("");
@@ -39,26 +63,42 @@ export function TelegramIdentitiesWorkspace({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
+    const request = reads.next();
+    setLoading(true);
     setErrorMsg(null);
     try {
       const [secList, idList] = await Promise.all([
         client.listSecrets(),
         client.listIdentities(),
       ]);
+      if (!reads.isCurrent(request)) return;
       setSecrets(secList);
       setIdentities(idList);
-      if (!identitySecretId && secList.length > 0) {
-        setIdentitySecretId(secList[0].secret_id);
-      }
-      if (!evalIdentityId && idList.length > 0) {
-        setEvalIdentityId(idList[0].id);
+      const compatibleSecrets = secList.filter((sec) =>
+        isSecretCompatibleWithIdentityType(
+          sec.secret_type,
+          identityTypeRef.current,
+        ),
+      );
+      setIdentitySecretId((prev) =>
+        compatibleSecrets.some((sec) => sec.secret_id === prev)
+          ? prev
+          : (compatibleSecrets[0]?.secret_id ?? ""),
+      );
+      if (idList.length > 0) {
+        setEvalIdentityId((prev) => prev || idList[0].id);
       }
     } catch (err) {
+      if (!reads.isCurrent(request)) return;
       setErrorMsg(
         err instanceof Error ? err.message : "Failed to load identities & secrets.",
       );
+    } finally {
+      if (reads.isCurrent(request)) {
+        setLoading(false);
+      }
     }
-  }, [client, identitySecretId, evalIdentityId]);
+  }, [client, reads]);
 
   useEffect(() => {
     void loadAll();
@@ -68,56 +108,63 @@ export function TelegramIdentitiesWorkspace({
     event.preventDefault();
     setErrorMsg(null);
     setStatusMsg(null);
-    try {
-      const created = await client.createSecret(secretType, secretPlaintext);
-      // Immediately scrub plaintext from component state (write-only invariant)
-      setSecretPlaintext("");
-      setStatusMsg(
-        `Encrypted secret ${created.secret_id.slice(0, 8)} stored (AES-256-GCM). Plaintext cleared.`,
-      );
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to store secret.");
-    }
+    await runAction(async () => {
+      try {
+        const created = await client.createSecret(secretType, secretPlaintext);
+        // Immediately scrub plaintext from component state (write-only invariant)
+        setSecretPlaintext("");
+        setStatusMsg(
+          `Encrypted secret ${created.secret_id.slice(0, 8)} stored (AES-256-GCM). Plaintext cleared.`,
+        );
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to store secret.");
+      }
+    });
   }
 
   async function handleRotateSecret(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!rotateTargetId) return;
     setErrorMsg(null);
-    try {
-      await client.rotateSecret(rotateTargetId, rotatePlaintext);
-      setRotatePlaintext("");
-      setRotateTargetId(null);
-      setStatusMsg("Secret rotated in-place; plaintext scrubbed.");
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to rotate secret.");
-    }
+    await runAction(async () => {
+      try {
+        await client.rotateSecret(rotateTargetId, rotatePlaintext);
+        setRotatePlaintext("");
+        setRotateTargetId(null);
+        setStatusMsg("Secret rotated in-place; plaintext scrubbed.");
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to rotate secret.");
+      }
+    });
   }
 
   async function handleCreateIdentity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setErrorMsg(null);
-    try {
-      await client.createIdentity({
-        name: identityName.trim(),
-        identity_type: identityType,
-        secret_id: identitySecretId,
-      });
-      setIdentityName("");
-      setStatusMsg("Telegram identity registered.");
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Failed to register identity.",
-      );
-    }
+    await runAction(async () => {
+      try {
+        await client.createIdentity({
+          name: identityName.trim(),
+          identity_type: identityType,
+          secret_id: identitySecretId,
+        });
+        setIdentityName("");
+        setStatusMsg("Telegram identity registered.");
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? err.message : "Failed to register identity.",
+        );
+      }
+    });
   }
 
   async function handleEvaluateCaps(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!evalIdentityId) return;
+    const request = evalReads.next();
     setErrorMsg(null);
     try {
       const result = await client.evaluateIdentityCapabilities(evalIdentityId, {
@@ -125,13 +172,32 @@ export function TelegramIdentitiesWorkspace({
         has_source_access: evalSourceAccess,
         has_destination_post_permission: evalDestPost,
       });
+      if (!evalReads.isCurrent(request)) return;
       setEvaluatedCaps(result.capabilities);
     } catch (err) {
+      if (!evalReads.isCurrent(request)) return;
       setErrorMsg(
         err instanceof Error ? err.message : "Failed to evaluate capabilities.",
       );
     }
   }
+
+  function handleIdentityTypeChange(nextType: "mtproto_user" | "bot") {
+    identityTypeRef.current = nextType;
+    setIdentityType(nextType);
+    const compatibleSecrets = secrets.filter((sec) =>
+      isSecretCompatibleWithIdentityType(sec.secret_type, nextType),
+    );
+    setIdentitySecretId((prev) =>
+      compatibleSecrets.some((sec) => sec.secret_id === prev)
+        ? prev
+        : (compatibleSecrets[0]?.secret_id ?? ""),
+    );
+  }
+
+  const compatibleIdentitySecrets = secrets.filter((sec) =>
+    isSecretCompatibleWithIdentityType(sec.secret_type, identityType),
+  );
 
   return (
     <section aria-labelledby="identities-heading">
@@ -176,10 +242,9 @@ export function TelegramIdentitiesWorkspace({
                 value={secretType}
                 onChange={(e) => setSecretType(e.target.value)}
               >
-                <option value="telethon_session">telethon_session</option>
+                <option value="telegram_session">telegram_session</option>
                 <option value="bot_token">bot_token</option>
-                <option value="telegram_api_hash">telegram_api_hash</option>
-                <option value="inference_api_key">inference_api_key</option>
+                <option value="api_key">api_key</option>
               </select>
             </div>
 
@@ -198,8 +263,8 @@ export function TelegramIdentitiesWorkspace({
               />
             </div>
 
-            <button type="submit" className="btn btn-primary">
-              Encrypt & Store Secret
+            <button type="submit" className="btn btn-primary" disabled={busy}>
+              Encrypt &amp; Store Secret
             </button>
           </form>
         </div>
@@ -232,7 +297,7 @@ export function TelegramIdentitiesWorkspace({
                   type="radio"
                   value="mtproto_user"
                   checked={identityType === "mtproto_user"}
-                  onChange={() => setIdentityType("mtproto_user")}
+                  onChange={() => handleIdentityTypeChange("mtproto_user")}
                 />
                 <label htmlFor="id-kind-mtproto">
                   mtproto_user (Channel History + Read + Publish)
@@ -245,7 +310,7 @@ export function TelegramIdentitiesWorkspace({
                   type="radio"
                   value="bot"
                   checked={identityType === "bot"}
-                  onChange={() => setIdentityType("bot")}
+                  onChange={() => handleIdentityTypeChange("bot")}
                 />
                 <label htmlFor="id-kind-bot">bot (Bot API Publisher)</label>
               </div>
@@ -261,7 +326,7 @@ export function TelegramIdentitiesWorkspace({
                 onChange={(e) => setIdentitySecretId(e.target.value)}
               >
                 <option value="">-- Choose configured secret --</option>
-                {secrets.map((sec) => (
+                {compatibleIdentitySecrets.map((sec) => (
                   <option key={sec.secret_id} value={sec.secret_id}>
                     {sec.secret_type} ({sec.secret_id.slice(0, 8)} · Configured)
                   </option>
@@ -269,7 +334,7 @@ export function TelegramIdentitiesWorkspace({
               </select>
             </div>
 
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary" disabled={busy}>
               Register Identity
             </button>
           </form>
@@ -285,6 +350,8 @@ export function TelegramIdentitiesWorkspace({
         <ResponsiveTable
           caption="Encrypted secrets metadata and write-only replacement controls"
           headers={["Secret ID", "Type", "Status", "Key ID", "Replace / Rotate"]}
+          loading={loading}
+          emptyMessage="No encrypted secrets configured yet."
         >
           {secrets.map((sec) => (
             <tr key={sec.secret_id}>
@@ -305,6 +372,7 @@ export function TelegramIdentitiesWorkspace({
                 <button
                   type="button"
                   className="btn"
+                  disabled={busy}
                   onClick={() => {
                     setRotateTargetId(sec.secret_id);
                     setRotatePlaintext("");
@@ -339,7 +407,7 @@ export function TelegramIdentitiesWorkspace({
               />
             </div>
             <div className="btn-row">
-              <button type="submit" className="btn btn-primary">
+              <button type="submit" className="btn btn-primary" disabled={busy}>
                 Confirm Secret Rotation
               </button>
               <button
@@ -355,7 +423,7 @@ export function TelegramIdentitiesWorkspace({
       </div>
 
       <div className="panel">
-        <h2>Telegram Identities & Capability Matrix ({identities.length})</h2>
+        <h2>Telegram Identities &amp; Capability Matrix ({identities.length})</h2>
         <ResponsiveTable
           caption="Telegram identities, health status, and baseline capabilities"
           headers={[
@@ -367,6 +435,8 @@ export function TelegramIdentitiesWorkspace({
             "Copy Publish",
             "Manage",
           ]}
+          loading={loading}
+          emptyMessage="No Telegram identities registered yet."
         >
           {identities.map((idItem) => (
             <tr key={idItem.id}>
@@ -388,11 +458,39 @@ export function TelegramIdentitiesWorkspace({
               </td>
               <td data-label="Manage">
                 <span className="badge">{idItem.enabled ? "Enabled" : "Disabled"}</span>
-                <RecordEditor label="Identity" fields={[
-                  {key: "name", label: "Identity Name", value: idItem.name, required: true},
-                  {key: "enabled", label: "Enabled", value: idItem.enabled},
-                  {key: "secret_id", label: "Credential Reference", value: idItem.secret_id, required: true, options: secrets.map(s => ({value: s.secret_id, label: `${s.secret_type} / ${s.secret_id}`}))},
-                ]} onSave={async changes => { await client.updateIdentity(idItem.id, changes); await loadAll(); }} />
+                <RecordEditor
+                  label="Identity"
+                  fields={[
+                    {
+                      key: "name",
+                      label: "Identity Name",
+                      value: idItem.name,
+                      required: true,
+                    },
+                    { key: "enabled", label: "Enabled", value: idItem.enabled },
+                    {
+                      key: "secret_id",
+                      label: "Credential Reference",
+                      value: idItem.secret_id,
+                      required: true,
+                      options: secrets
+                        .filter((s) =>
+                          isSecretCompatibleWithIdentityType(
+                            s.secret_type,
+                            idItem.identity_type,
+                          ),
+                        )
+                        .map((s) => ({
+                          value: s.secret_id,
+                          label: `${s.secret_type} / ${s.secret_id}`,
+                        })),
+                    },
+                  ]}
+                  onSave={async (changes) => {
+                    await client.updateIdentity(idItem.id, changes);
+                    await loadAll();
+                  }}
+                />
               </td>
             </tr>
           ))}
@@ -411,7 +509,11 @@ export function TelegramIdentitiesWorkspace({
                 id="eval-identity-select"
                 name="identity_id"
                 value={evalIdentityId}
-                onChange={(e) => setEvalIdentityId(e.target.value)}
+                onChange={(e) => {
+                  evalReads.invalidate();
+                  setEvalIdentityId(e.target.value);
+                  setEvaluatedCaps(null);
+                }}
               >
                 {identities.map((item) => (
                   <option key={item.id} value={item.id}>
@@ -427,7 +529,11 @@ export function TelegramIdentitiesWorkspace({
               name="source_protected_content"
               type="checkbox"
               checked={evalProtected}
-              onChange={(e) => setEvalProtected(e.target.checked)}
+              onChange={(e) => {
+                evalReads.invalidate();
+                setEvalProtected(e.target.checked);
+                setEvaluatedCaps(null);
+              }}
             />
             <label htmlFor="eval-protected">
               Source has Telegram Protected Content (`noforwards`)
@@ -439,7 +545,11 @@ export function TelegramIdentitiesWorkspace({
               name="has_source_access"
               type="checkbox"
               checked={evalSourceAccess}
-              onChange={(e) => setEvalSourceAccess(e.target.checked)}
+              onChange={(e) => {
+                evalReads.invalidate();
+                setEvalSourceAccess(e.target.checked);
+                setEvaluatedCaps(null);
+              }}
             />
             <label htmlFor="eval-source-access">Identity has source access</label>
           </div>
@@ -449,13 +559,17 @@ export function TelegramIdentitiesWorkspace({
               name="has_destination_post_permission"
               type="checkbox"
               checked={evalDestPost}
-              onChange={(e) => setEvalDestPost(e.target.checked)}
+              onChange={(e) => {
+                evalReads.invalidate();
+                setEvalDestPost(e.target.checked);
+                setEvaluatedCaps(null);
+              }}
             />
             <label htmlFor="eval-dest-post">
               Identity has destination post permission
             </label>
           </div>
-          <button type="submit" className="btn">
+          <button type="submit" className="btn" disabled={!evalIdentityId}>
             Evaluate Capabilities
           </button>
         </form>

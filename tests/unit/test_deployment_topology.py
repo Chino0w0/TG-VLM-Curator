@@ -139,6 +139,7 @@ class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
             "docker/backend.Dockerfile",
             "docker/web.Dockerfile",
             "docker/nginx.conf",
+            "scripts/backup-common.sh",
             "scripts/backup-postgres.sh",
             "scripts/backup-media.sh",
             "scripts/restore-postgres.sh",
@@ -163,10 +164,23 @@ class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
         self.assertIn("listen 443 ssl;", nginx)
         self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", nginx)
         self.assertIn("return 308 https://", nginx)
+        port_80_and_map = nginx.split("listen 443 ssl;", 1)[0]
+        self.assertNotIn("$host", port_80_and_map)
+        self.assertIn('""      localhost;', port_80_and_map)
+        self.assertIn("TGCURATOR_SERVER_NAME: ${TGCURATOR_SERVER_NAME:-localhost}", compose)
+        self.assertIn("server_tokens off;", nginx)
+        self.assertIn('X-Content-Type-Options "nosniff"', nginx)
+        self.assertIn('X-Frame-Options "DENY"', nginx)
+        self.assertIn('Referrer-Policy "same-origin"', nginx)
+        self.assertIn("gzip on;", nginx)
         self.assertIn("read_only: true", compose)
+        self.assertIn("no-new-privileges:true", compose)
+        self.assertIn("-backend:local", compose)
         self.assertEqual(compose.count("create_host_path: false"), 2)
         self.assertIn("--no-proxy-headers", compose)
         self.assertNotIn("postgresql-client", backend)
+        if "--no-build-isolation" in backend:
+            self.assertIn("hatchling", backend.split("COPY tgcurator", 1)[0])
         self.assertNotIn("proxy_add_x_forwarded_for", nginx)
         self.assertIn("location = /metrics { return 404; }", nginx)
 
@@ -225,6 +239,7 @@ class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
             media_argv,
         )
         self.assertIn("--concurrency=3", media_argv)
+        self.assertIn("--without-heartbeat", media_argv)
 
         publish_argv = resolve_worker_argv(role="publish")
         self.assertIn("--queues=publication", publish_argv)

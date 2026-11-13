@@ -69,6 +69,7 @@ M8_TABLES = {
     "media_processing_profiles",
     "media_processing_profile_versions",
 }
+M10_TABLES = {"service_heartbeats"}
 
 
 class DatabaseSchemaTests(unittest.TestCase):
@@ -82,7 +83,8 @@ class DatabaseSchemaTests(unittest.TestCase):
             | M5_TABLES
             | M6_TABLES
             | M7_TABLES
-            | M8_TABLES,
+            | M8_TABLES
+            | M10_TABLES,
         )
 
     def test_processing_range_has_boundary_and_watermark_constraints(self) -> None:
@@ -605,6 +607,44 @@ class DatabaseSchemaTests(unittest.TestCase):
         self.assertIsNotNone(published_idx.dialect_options["postgresql"]["where"])
         for col in ("published_at", "archived_at", "created_at", "updated_at"):
             self.assertTrue(versions.c[col].type.timezone, col)
+
+    def test_post_m10_service_heartbeats_and_hot_path_indexes_are_explicit(self) -> None:
+        heartbeats = Base.metadata.tables["service_heartbeats"]
+        self.assertIn(
+            "ck_service_heartbeats_service_heartbeat_name_not_blank",
+            {str(c.name) for c in heartbeats.constraints},
+        )
+        self.assertTrue(heartbeats.c.last_heartbeat_at.type.timezone)
+        self.assertTrue(heartbeats.c.updated_at.type.timezone)
+
+        self.assertIn(
+            "ix_durable_wakeups_status_lease",
+            {idx.name for idx in Base.metadata.tables["durable_wakeups"].indexes},
+        )
+        dedup_idx = {idx.name: idx for idx in Base.metadata.tables["messages"].indexes}[
+            "ix_messages_dedup_candidates"
+        ]
+        self.assertIsNotNone(dedup_idx.dialect_options["postgresql"]["where"])
+        stage_indexes = {idx.name for idx in Base.metadata.tables["stage_runs"].indexes}
+        self.assertTrue(
+            {
+                "ix_stage_runs_batch_colease",
+                "ix_stage_runs_message_status",
+                "ix_stage_runs_target_status",
+            }.issubset(stage_indexes)
+        )
+        self.assertIn(
+            "ix_model_assignments_analysis_run",
+            {idx.name for idx in Base.metadata.tables["model_label_assignments"].indexes},
+        )
+        self.assertIn(
+            "ix_manual_labels_target_key_created",
+            {idx.name for idx in Base.metadata.tables["manual_label_assignments"].indexes},
+        )
+        self.assertIn(
+            "ix_audit_events_entity",
+            {idx.name for idx in Base.metadata.tables["audit_events"].indexes},
+        )
 
 
 if __name__ == "__main__":

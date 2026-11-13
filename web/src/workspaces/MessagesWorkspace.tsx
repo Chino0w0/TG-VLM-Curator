@@ -171,7 +171,7 @@ export function MessagesWorkspace({
 
       <div className="panel">
         <h2 id="messages-filter-heading">Search &amp; Filter Messages</h2>
-        <search aria-labelledby="messages-filter-heading">
+        <div role="search" aria-labelledby="messages-filter-heading">
           <form onSubmit={handleApplySearch}>
             <div className="form-grid">
               <div className="field">
@@ -454,7 +454,7 @@ export function MessagesWorkspace({
               </button>
             </div>
           </form>
-        </search>
+        </div>
       </div>
 
       <div className="panel">
@@ -511,6 +511,8 @@ export function MessagesWorkspace({
             "Excerpt",
             "Actions",
           ]}
+          loading={loading}
+          emptyMessage="No messages match the current filters."
         >
           {items.map((msg) => (
             <tr key={msg.id}>
@@ -521,7 +523,7 @@ export function MessagesWorkspace({
               <td data-label="Processing">
                 <span
                   className={
-                    msg.processing_status === "completed"
+                    msg.processing_status === "processed"
                       ? "badge badge-ok"
                       : msg.processing_status === "failed"
                         ? "badge badge-danger"

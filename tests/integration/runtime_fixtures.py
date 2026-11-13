@@ -396,7 +396,7 @@ async def seed_configuration(db, settings, peer, base_url, *, end_mode):
             "start_at": (now - timedelta(days=1)).isoformat(),
             "end_mode": end_mode,
             "end_at": now.isoformat() if end_mode == "fixed" else None,
-            "steady_after_seconds": 1,
+            "steady_after_seconds": 1 if end_mode == "latest" else None,
             "resolved_start_message_id": 1,
             "resolved_fixed_end_message_id": 2 if end_mode == "fixed" else None,
         },

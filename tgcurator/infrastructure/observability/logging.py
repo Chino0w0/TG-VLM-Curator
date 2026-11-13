@@ -25,10 +25,28 @@ CORRELATION_FIELDS = (
     "routing_evaluation_id",
     "publication_intent_id",
 )
-_SAFE_SECRET_METADATA_FIELDS = {"secret_id", "secret_type", "key_id", "secret_configured"}
+_SAFE_SECRET_METADATA_FIELDS = {
+    "secret_id",
+    "secret_type",
+    "key_id",
+    "secret_configured",
+    "api_secret_reference",
+    "max_input_tokens",
+    "token_usage",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "reasoning_tokens",
+    "lease_token_cleared",
+}
 _SENSITIVE_PHRASES = (
     "password",
     "passwd",
+    "plaintext",
+    "secret",
     "api_key",
     "api_hash",
     "bot_token",
@@ -54,8 +72,10 @@ _SENSITIVE_PHRASES = (
     "secret_plaintext",
 )
 _BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+_URL_USERINFO_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/@\s]+@)")
+_TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _KEY_VALUE_PATTERN = re.compile(
-    r"(?i)\b(password|passwd|api[_-]?key|api[_-]?hash|token|authorization|cookie|session)"
+    r"(?i)\b(password|passwd|secret|api[_-]?key|api[_-]?hash|token|authorization|cookie|session)"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
 
@@ -73,6 +93,8 @@ def _is_sensitive_field(field_name: str) -> bool:
 
 def redact_text(value: str) -> str:
     value = _BEARER_PATTERN.sub(lambda match: match.group(1) + REDACTED_VALUE, value)
+    value = _URL_USERINFO_PATTERN.sub(lambda match: match.group(1) + REDACTED_VALUE + "@", value)
+    value = _TELEGRAM_BOT_TOKEN_PATTERN.sub(REDACTED_VALUE, value)
     return _KEY_VALUE_PATTERN.sub(
         lambda match: match.group(1) + match.group(2) + REDACTED_VALUE,
         value,

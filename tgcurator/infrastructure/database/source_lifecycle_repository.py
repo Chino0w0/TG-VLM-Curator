@@ -80,8 +80,9 @@ def source_message_deletion_statement(
 class SqlAlchemySourceMessageLifecycleRepository:
     """PostgreSQL adapter that rebuilds logical messages from retained Telegram parts."""
 
-    def __init__(self, database: AsyncDatabase) -> None:
+    def __init__(self, database: AsyncDatabase, *, defer_media_wakeups: bool = False) -> None:
         self._database = database
+        self._defer_media_wakeups = defer_media_wakeups
 
     async def record_edit(
         self,
@@ -92,7 +93,9 @@ class SqlAlchemySourceMessageLifecycleRepository:
         telegram_metadata: Mapping[str, Any],
         media: tuple[MediaAsset, ...],
         edited_at: datetime,
+        defer_media_wakeups: bool | None = None,
     ) -> bool:
+        defer = self._defer_media_wakeups if defer_media_wakeups is None else defer_media_wakeups
         async with self._database.session() as session:
             async with session.begin():
                 locked = (
@@ -139,12 +142,19 @@ class SqlAlchemySourceMessageLifecycleRepository:
                     parts=tuple(telegram_part_from_record(record) for record in retained_records),
                 )
                 await session.execute(
-                    message_parent_update_statement(message_id=parent.id, message=recomputed)
+                    message_parent_update_statement(
+                        message_id=parent.id,
+                        message=recomputed,
+                        preserve_processed_change_flag=True,
+                    )
                 )
                 if parent.processing_status == "processed":
                     parent.source_changed_after_processing = True
                 await synchronize_archive_assets(
-                    session=session, message_id=parent.id, message=recomputed
+                    session=session,
+                    message_id=parent.id,
+                    message=recomputed,
+                    defer_wakeups=defer or bool(parent.blocked_from_analysis),
                 )
                 return True
 

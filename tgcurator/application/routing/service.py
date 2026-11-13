@@ -182,6 +182,7 @@ def build_routing_facts(snapshot: RoutingSnapshot) -> dict[str, Any]:
         snapshot.model_assignments,
         snapshot.manual_events,
     )
+    label_snapshot = labels_to_routing_snapshot(resolved)
     message = dict(snapshot.message)
     message.setdefault("id", snapshot.message_id)
     message["review_status"] = snapshot.review_status.value
@@ -193,9 +194,25 @@ def build_routing_facts(snapshot: RoutingSnapshot) -> dict[str, Any]:
         "media": [dict(item) for item in snapshot.media],
         "blocked_from_analysis": blocked,
         "review_status": snapshot.review_status.value,
-        "labels": labels_to_routing_snapshot(resolved),
+        "labels": label_snapshot,
+        "model": _flat_namespace_scores(resolved.model),
+        "manual": _flat_namespace_scores(resolved.manual),
+        "effective": _flat_namespace_scores(resolved.effective),
     }
     return canonical_facts_snapshot(facts)
+
+
+def _flat_namespace_scores(values: tuple[Any, ...]) -> dict[str, dict[str, float]]:
+    global_scores: dict[str, float] = {}
+    media_scores: dict[str, float] = {}
+    for value in values:
+        score = float(value.score)
+        if value.target_scope == "global":
+            global_scores[value.label_key] = score
+        else:
+            existing = media_scores.get(value.label_key)
+            media_scores[value.label_key] = score if existing is None else max(existing, score)
+    return {"global": global_scores, "media": media_scores}
 
 
 def _as_reused(result: RoutingExecutionResult) -> RoutingExecutionResult:

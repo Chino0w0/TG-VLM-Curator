@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from tgcurator.shared import DomainValidationError
 
@@ -16,6 +17,15 @@ from .common import (
 )
 
 _SENSITIVE_PARAMETER_FRAGMENTS = ("secret", "password", "api_key", "apikey", "authorization")
+_SENSITIVE_URL_QUERY_FRAGMENTS = (
+    "secret",
+    "password",
+    "apikey",
+    "authorization",
+    "token",
+    "credential",
+    "signature",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +67,14 @@ class InferenceProfileVersion:
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise DomainValidationError("inference base_url must be an absolute HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+            raise DomainValidationError("inference base_url cannot contain credentials")
+        for query_key, _ in parse_qsl(parsed.query, keep_blank_values=True):
+            normalized_key = re.sub(r"[^a-z0-9]", "", query_key.lower())
+            if any(fragment in normalized_key for fragment in _SENSITIVE_URL_QUERY_FRAGMENTS):
+                raise DomainValidationError(
+                    "inference base_url cannot contain secret query parameters"
+                )
         object.__setattr__(self, "base_url", base_url)
         object.__setattr__(
             self, "model_name", validate_non_blank(self.model_name, field="model name")

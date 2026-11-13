@@ -25,13 +25,14 @@ class InferenceImage:
     height: int
     sources: tuple[Mapping[str, Any], ...]
     composition: str = "raw"
+    size_bytes: int | None = None
 
     def manifest_record(self, index: int) -> dict[str, Any]:
         return {
             "index": index,
             "sha256": self.sha256,
             "content_type": self.content_type,
-            "size_bytes": len(self.content),
+            "size_bytes": self.size_bytes if self.size_bytes is not None else len(self.content),
             "width": self.width,
             "height": self.height,
             "composition": self.composition,

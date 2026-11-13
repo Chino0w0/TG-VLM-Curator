@@ -42,7 +42,9 @@ class TelethonMediaDownloader:
             message = await self._client.get_messages(peer, ids=request.telegram_message_id)
             if message is None or getattr(message, "media", None) is None:
                 raise TelegramMediaUnavailableError("source Telegram message has no media")
-            if getattr(message, "noforwards", False):
+            if getattr(message, "noforwards", False) or getattr(
+                getattr(message, "chat", None), "noforwards", False
+            ):
                 raise TelegramProtectedContentError("source Telegram message is content-protected")
             content = await self._client.download_media(message, file=bytes)
         except TelegramMediaUnavailableError:

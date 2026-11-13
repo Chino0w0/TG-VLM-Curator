@@ -24,15 +24,15 @@
 }
 ```
 
-这些示例没有可用凭据，不要原样使用。不要把真实值贴到聊天、Git、日志、截图或普通频道配置。JSON 经已有 Secret API 加密存入 vault，界面不会提供明文重新读取。程序也支持从进程设置取得 telegram_api_id/telegram_api_hash 的后备值，但推荐将完整凭据组合放在加密 Secret 内，避免普通 .env 明文。原始 session/token 仅在同时显式提供应用凭据时可用。
+这些示例没有可用凭据，不要原样使用。不要把真实值贴到聊天、Git、日志、截图或普通频道配置。JSON 经已有 Secret API 加密存入 vault，界面不会提供明文重新读取。Secret 的 `secret_type` 在绑定、发布与运行时解密全链路强校验隔离：`mtproto_user` 身份必须使用 `telegram_session`（兼容历史 `telethon_session`/`mtproto_session`），`bot` 身份必须使用 `bot_token`，外部推理配置必须使用 `api_key`（兼容历史 `inference_api_key`），禁止跨用途混用凭据。程序也支持从进程设置取得 telegram_api_id/telegram_api_hash 的后备值，但推荐将完整凭据组合放在加密 Secret 内，避免普通 .env 明文。原始 session/token 仅在同时显式提供应用凭据时可用。
 
-来源频道的 default_read_identity_id 决定历史读取、下载和实时订阅身份；目的频道的 default_publish_identity_id 决定发布身份。确保来源读取和目的发送权限真实存在。历史扫描通常应使用 MTProto 用户；机器人历史能力受 Telegram 限制，能力模拟器不代表已经获得远端授权。
+来源频道的 default_read_identity_id 决定历史读取、下载和实时订阅身份，且必须为 `mtproto_user`；目的频道的 default_publish_identity_id 决定发布身份（支持 `mtproto_user` 或 `bot`，当发布身份为 `bot` 或与来源读取身份不同且执行 `copy_with_caption` 时，系统通过来源读取身份下载媒体并重新上传）。确保来源读取和目的发送权限真实存在。能力模拟器不代表已经获得远端授权。
 
-默认进程在外部调用前读取加密身份，客户端只在当前进程/事件循环内使用。Secret 旋转或断连会替换旧客户端；实时 ingestor 按身份注册新消息、编辑与删除事件，并在启动、重连和定期轮询时进行幂等历史补抓。身份连接失败只记录错误类别，不回显凭据。worker 任务结束和服务关闭会清理客户端、数据库连接和注册的媒体进程。
+默认进程在外部调用前读取加密身份，客户端只在当前进程/事件循环内复用。Celery worker 按进程维护持久事件循环与单例 `WorkerRuntime`（复用 SQLAlchemy 连接池、Telethon MTProto 会话池与 `httpx.AsyncClient` 连接池，并在进程退出或 `SIGTERM` 时统一释放连接与终止活跃 `ffprobe`/`ffmpeg` 子进程）。Secret 旋转或断连会替换旧客户端；实时 ingestor 按身份注册新消息、编辑与删除事件（自动规范化 `-100<id>` 与裸 `<id>` 频道 peer 并忽略系统 `MessageService` 动态），并在启动、重连和定期轮询时进行幂等历史补抓与来源 `last_activity_at` 单调推进。身份连接失败只记录错误类别，不回显凭据。
 
 ## 外部推理与视觉输入
 
-先创建推理 API Key Secret，再发布引用它的 InferenceProfile，以及标签、LabelSet、Prompt、Stage 和 Pipeline。api_secret_reference 填 Secret UUID，不是密钥文本。Profile 的 base_url 应是兼容 /chat/completions 的版本 API 根地址，模型必须支持该 Stage 所需的视觉输入与严格 JSON Schema。
+先创建 `secret_type="api_key"` 的推理 API Key Secret，再发布引用它的 InferenceProfile，以及标签、LabelSet、Prompt、Stage 和 Pipeline。api_secret_reference 填 Secret UUID，不是密钥文本。Profile 的 base_url 应是兼容 /chat/completions 的版本 API 根地址，禁止内嵌 URL 用户名密码或敏感查询参数；默认拦截云元数据地址、链路本地地址以及回环/私网地址（SSRF 防护）。若确需连接受控本机或内网自建推理网关，须显式设置环境变量 `TGCURATOR_ALLOW_LOCAL_INFERENCE=true`（云元数据与链路本地地址始终禁止）。模型必须支持该 Stage 所需的视觉输入与严格 JSON Schema，运行时按 Profile 与 Stage 的 `max_concurrency` 执行信号量并发限流。
 
 先在 Prompt Test Bench 做受控试跑，再绑定来源 Profile。Preview 只准备输入，不调用外部推理；实际执行会使用同一个 Provider/vault/视觉准备器，不写正式标签、路由或发布记录。实际请求只能在获授权的服务上验收。
 
@@ -50,7 +50,7 @@ Pipeline 节点只允许覆盖 timeout_seconds、max_batch_size、max_concurrenc
 
 ## 健康与验收分层
 
-API readiness 检查 PostgreSQL，scheduler/worker readiness 检查 PostgreSQL 和 Redis。外部 Telegram/推理不可用不应让管理员失去排障入口，因此基础 readiness 不代表所有业务能力已就绪。应同时查看身份健康、last_error 类别、失败 Stage/Intent、watermark 和 backlog；没有来源配置时 ingestor 不会假装已连接 Telegram。
+API readiness 检查 PostgreSQL，`ingestor` readiness 检查 PostgreSQL 与本容器新鲜磁盘心跳，`scheduler`/`worker` readiness 检查 PostgreSQL、Redis 与本容器新鲜磁盘心跳（`TGCURATOR_HEARTBEAT_DIR`）；同时 `scheduler`、`ingestor` 与各 `worker-*` 将跨进程心跳写入 PostgreSQL `service_heartbeats` 表，供管理端 `Dashboard`/`Operations` 与内部 `/metrics` 汇总真实存活就绪态、队列积压及全部 17 组遥测指标。外部 Telegram/推理不可用不应让管理员失去排障入口，因此基础 readiness 不代表所有业务能力已就绪。应同时查看身份健康、last_error 类别、失败步骤（全部 6 类 `step_kind`）、watermark 和 backlog；没有来源配置时 ingestor 不会假装已连接 Telegram。
 
 普通验收使用真实 PostgreSQL16、Redis/Celery、SQLAlchemy 仓储和生产 factory，只将外部 Telegram 与推理服务作为受控 fixture。独立的本地 TLS/备份恢复演练使用专属 Compose project、卷和主密钥，并清理自己的资源，不触业务项目。
 

@@ -11,6 +11,7 @@ import type {
   ConfigVersion,
   PromptTestBenchResponse,
 } from "../api/types";
+import { ModalDialog } from "../components/ModalDialog";
 import { Tabs } from "../components/Tabs";
 
 const ANALYSIS_FAMILIES: Array<{
@@ -135,6 +136,9 @@ export function AnalysisConfigWorkspace({
 
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pendingDiscardAction, setPendingDiscardAction] = useState<
+    (() => void) | null
+  >(null);
 
   const activeFamilyMeta = ANALYSIS_FAMILIES.find(
     (f) => f.family === activeTab,
@@ -187,17 +191,17 @@ export function AnalysisConfigWorkspace({
     try {
       const stages = await client.listConfigEntities("analysis-stages");
       setStageEntities(stages);
-      if (!benchStageVersionId && stages.length > 0) {
+      if (stages.length > 0) {
         const firstVer =
           publishedVersion(stages[0]) ?? stages[0].versions[0];
         if (firstVer) {
-          setBenchStageVersionId(firstVer.id);
+          setBenchStageVersionId((prev) => prev || firstVer.id);
         }
       }
     } catch {
       // Handled when running bench if unavailable
     }
-  }, [client, benchStageVersionId]);
+  }, [client]);
 
   useEffect(() => {
     if (activeFamilyMeta) {
@@ -216,21 +220,35 @@ export function AnalysisConfigWorkspace({
   const isDraft = selectedVersion?.state === "draft";
   const dirty = selectedVersion ? isDirtyJson(editorJson, selectedVersion.content) : false;
 
+  function guardDirtyNavigation(action: () => void) {
+    if (isDraft && dirty) {
+      setPendingDiscardAction(() => action);
+      return;
+    }
+    action();
+  }
+
   function handleSelectEntity(entityId: string) {
-    setSelectedEntityId(entityId);
-    const ent = entities.find((e) => e.id === entityId);
-    const ver =
-      publishedVersion(ent) ?? ent?.versions[ent.versions.length - 1] ?? null;
-    setSelectedVersionId(ver?.id ?? "");
-    setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
+    if (entityId === selectedEntityId) return;
+    guardDirtyNavigation(() => {
+      setSelectedEntityId(entityId);
+      const ent = entities.find((e) => e.id === entityId);
+      const ver =
+        publishedVersion(ent) ?? ent?.versions[ent.versions.length - 1] ?? null;
+      setSelectedVersionId(ver?.id ?? "");
+      setEditorJson(ver ? JSON.stringify(ver.content, null, 2) : "{}");
+    });
   }
 
   function handleSelectVersion(versionId: string) {
-    setSelectedVersionId(versionId);
-    const ver = selectedEntity?.versions.find((v) => v.id === versionId);
-    if (ver) {
-      setEditorJson(JSON.stringify(ver.content, null, 2));
-    }
+    if (versionId === selectedVersionId) return;
+    guardDirtyNavigation(() => {
+      setSelectedVersionId(versionId);
+      const ver = selectedEntity?.versions.find((v) => v.id === versionId);
+      if (ver) {
+        setEditorJson(JSON.stringify(ver.content, null, 2));
+      }
+    });
   }
 
   async function handleCreateEntity(event: FormEvent<HTMLFormElement>) {
@@ -745,7 +763,17 @@ export function AnalysisConfigWorkspace({
       <Tabs
         ariaLabel="Analysis Configuration Sections"
         activeKey={activeTab}
-        onSelect={tab => { familyRequests.invalidate(); setEntities([]); setSelectedEntityId(""); setSelectedVersionId(""); setEditorJson("{}"); setActiveTab(tab); }}
+        onSelect={(tab) => {
+          if (tab === activeTab) return;
+          guardDirtyNavigation(() => {
+            familyRequests.invalidate();
+            setEntities([]);
+            setSelectedEntityId("");
+            setSelectedVersionId("");
+            setEditorJson("{}");
+            setActiveTab(tab);
+          });
+        }}
         tabs={[
           ...ANALYSIS_FAMILIES.map((item) => ({
             key: item.family,
@@ -759,6 +787,23 @@ export function AnalysisConfigWorkspace({
           },
         ]}
       />
+      <ModalDialog
+        open={pendingDiscardAction !== null}
+        title="Discard Unsaved Draft Changes?"
+        confirmLabel="Discard Unsaved Changes"
+        destructive={true}
+        onConfirm={() => {
+          const action = pendingDiscardAction;
+          setPendingDiscardAction(null);
+          action?.();
+        }}
+        onCancel={() => setPendingDiscardAction(null)}
+      >
+        <p>
+          You have unsaved edits in the current DRAFT JSON editor. Discard your
+          unsaved changes?
+        </p>
+      </ModalDialog>
       </fieldset>
     </section>
   );

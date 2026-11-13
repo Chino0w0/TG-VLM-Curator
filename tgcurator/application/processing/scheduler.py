@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -8,12 +9,14 @@ from tgcurator.application.ports import TaskDispatcher
 from tgcurator.application.ports.processing import (
     DurableWakeupRepository,
     LatestBoundarySource,
+    LatestMessageBoundary,
     PendingRangeExecution,
     ProcessingRangeScheduleRepository,
 )
 from tgcurator.domain.processing import latest_boundary_is_stable
 from tgcurator.shared import DomainValidationError, ensure_aware, ensure_positive_duration
 
+logger = logging.getLogger(__name__)
 RANGE_EXECUTION_QUEUE = "range_execution"
 
 
@@ -22,6 +25,7 @@ class RangeScheduleReport:
     scanned_ranges: int
     created_executions: int
     skipped_ranges: int = 0
+    failed_ranges: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,57 +51,84 @@ class ProcessingRangeScheduler:
         ensure_aware(now, field="now")
         scheduled_ranges = await self.repository.list_enabled_ranges()
         created_executions = 0
+        failed_ranges = 0
+        boundary_cache: dict[str, LatestMessageBoundary | None | Exception] = {}
 
         for scheduled_range in scheduled_ranges:
-            from_message_id = (
-                scheduled_range.processing_watermark_message_id
-                if scheduled_range.processing_watermark_message_id is not None
-                else scheduled_range.resolved_start_message_id - 1
-            )
-            to_message_id: int | None
-
-            if scheduled_range.end_mode == "fixed":
-                to_message_id = scheduled_range.resolved_fixed_end_message_id
-            elif scheduled_range.end_mode == "latest":
-                boundary = await self.latest_boundary_source.newest_message(
-                    source_channel_id=scheduled_range.source_channel_id
+            try:
+                from_message_id = (
+                    scheduled_range.processing_watermark_message_id
+                    if scheduled_range.processing_watermark_message_id is not None
+                    else scheduled_range.resolved_start_message_id - 1
                 )
-                quiet_seconds = scheduled_range.steady_after_seconds
-                if boundary is None or quiet_seconds is None:
+                to_message_id: int | None
+
+                if scheduled_range.end_mode == "fixed":
+                    to_message_id = scheduled_range.resolved_fixed_end_message_id
+                elif scheduled_range.end_mode == "latest":
+                    channel_id = scheduled_range.source_channel_id
+                    if channel_id not in boundary_cache:
+                        try:
+                            boundary_cache[
+                                channel_id
+                            ] = await self.latest_boundary_source.newest_message(
+                                source_channel_id=channel_id
+                            )
+                        except Exception as error:
+                            boundary_cache[channel_id] = error
+                    cached = boundary_cache[channel_id]
+                    if isinstance(cached, Exception):
+                        raise cached
+                    boundary = cached
+                    quiet_seconds = scheduled_range.steady_after_seconds
+                    if boundary is None or quiet_seconds is None:
+                        continue
+                    if not latest_boundary_is_stable(
+                        boundary.published_at,
+                        now,
+                        timedelta(seconds=quiet_seconds),
+                    ):
+                        continue
+                    to_message_id = boundary.message_id
+                else:
+                    raise DomainValidationError(
+                        "unsupported persisted processing range end mode: "
+                        f"{scheduled_range.end_mode!r}"
+                    )
+
+                if to_message_id is None or to_message_id <= from_message_id:
                     continue
-                if not latest_boundary_is_stable(
-                    boundary.published_at,
-                    now,
-                    timedelta(seconds=quiet_seconds),
-                ):
-                    continue
-                to_message_id = boundary.message_id
-            else:
-                raise DomainValidationError(
-                    f"unsupported persisted processing range end mode: {scheduled_range.end_mode!r}"
+
+                created = await self.repository.create_execution_and_wakeup(
+                    execution=PendingRangeExecution(
+                        execution_id=str(uuid4()),
+                        processing_range_id=scheduled_range.range_id,
+                        source_profile_version_id=scheduled_range.source_profile_version_id,
+                        from_message_id_exclusive=from_message_id,
+                        to_message_id_inclusive=to_message_id,
+                        max_attempts=self.max_attempts,
+                    ),
+                    queue=RANGE_EXECUTION_QUEUE,
+                    available_at=now,
                 )
-
-            if to_message_id is None or to_message_id <= from_message_id:
-                continue
-
-            created = await self.repository.create_execution_and_wakeup(
-                execution=PendingRangeExecution(
-                    execution_id=str(uuid4()),
-                    processing_range_id=scheduled_range.range_id,
-                    source_profile_version_id=scheduled_range.source_profile_version_id,
-                    from_message_id_exclusive=from_message_id,
-                    to_message_id_inclusive=to_message_id,
-                    max_attempts=self.max_attempts,
-                ),
-                queue=RANGE_EXECUTION_QUEUE,
-                available_at=now,
-            )
-            created_executions += int(created)
+                created_executions += int(created)
+            except Exception as error:
+                failed_ranges += 1
+                logger.warning(
+                    "Processing range schedule skipped after failure",
+                    extra={
+                        "event": "scheduler.range_schedule_failed",
+                        "processing_range_id": scheduled_range.range_id,
+                        "source_channel_id": scheduled_range.source_channel_id,
+                        "context": {"error_type": type(error).__name__},
+                    },
+                )
 
         return RangeScheduleReport(
             scanned_ranges=len(scheduled_ranges),
             created_executions=created_executions,
             skipped_ranges=len(scheduled_ranges) - created_executions,
+            failed_ranges=failed_ranges,
         )
 
 

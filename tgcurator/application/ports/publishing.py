@@ -60,6 +60,8 @@ class ClaimedPublicationIntent:
     main_remote_message_ids: tuple[int, ...] = ()
     in_flight_part: PublicationPart | None = None
     in_flight_operation: PublicationOperation | None = None
+    source_read_identity_id: str | None = None
+    main_degraded_to_text: bool = False
 
     def __post_init__(self) -> None:
         for field in (
@@ -72,6 +74,10 @@ class ClaimedPublicationIntent:
             "publish_identity_id",
         ):
             _uuid(getattr(self, field), field=field)
+        if self.source_read_identity_id is not None:
+            _uuid(self.source_read_identity_id, field="source_read_identity_id")
+        if not isinstance(self.main_degraded_to_text, bool):
+            raise DomainValidationError("main_degraded_to_text must be a boolean")
         if (
             not isinstance(self.attempt_number, int)
             or isinstance(self.attempt_number, bool)
@@ -162,10 +168,13 @@ class TelegramPublishRequest:
     random_ids: tuple[int, ...]
     text: str | None = None
     reply_to_message_id: int | None = None
+    source_read_identity_id: str | None = None
 
     def __post_init__(self) -> None:
         _uuid(self.intent_id, field="intent_id")
         _uuid(self.identity_id, field="identity_id")
+        if self.source_read_identity_id is not None:
+            _uuid(self.source_read_identity_id, field="source_read_identity_id")
         _telegram_peer(self.source_peer_id, field="source_peer_id")
         _telegram_peer(self.destination_peer_id, field="destination_peer_id")
         _positive_message_ids(self.source_message_ids, field="source_message_ids")

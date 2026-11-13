@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from tgcurator.application.ports.analysis import (
     AnalysisCommitResult,
@@ -13,7 +14,7 @@ from tgcurator.domain.analysis import AnalysisErrorCode
 from tgcurator.shared import DomainValidationError
 
 from .input_composer import AnalysisInputError, AnalysisTargetInput
-from .orchestrator import AnalysisExecutionFailure, AnalysisOrchestrator
+from .orchestrator import AnalysisExecutionFailure, AnalysisOrchestrator, PreparedAnalysisCall
 
 ANALYSIS_QUEUE = "analysis"
 
@@ -36,38 +37,70 @@ class AnalysisStageRunWorker:
             return False
 
         loaded_snapshot: AnalysisStageSnapshot | None = None
+        probed_cache_key = None
         try:
             loaded_snapshot = await self.repository.load_stage_snapshot(claim=claim)
             snapshot = loaded_snapshot
             targets = _analysis_inputs(snapshot)
-            prepared = await self.orchestrator.prepare_async(
+            probe = self.orchestrator.prepare_cache_probe(
                 stage=snapshot.stage,
                 targets=targets,
                 source_channel_context=snapshot.source_channel_context,
                 attempt=claim.attempt_count,
             )
+            if probe is not None and probe.cache_key is not None:
+                probed_cache_key = probe.cache_key
+                hit = await self.repository.find_cache_hit(
+                    snapshot=snapshot, cache_key=probe.cache_key
+                )
+                if hit is not None:
+                    committed = await self.repository.commit_cache_hit(
+                        snapshot=snapshot,
+                        manifest=probe.request.input_manifest,
+                        cache_key=probe.cache_key,
+                        hit=hit,
+                        now=now,
+                    )
+                    if committed.committed_target_ids:
+                        await self._finish(snapshot=snapshot, committed=committed, now=now)
+                        return True
+            if probe is not None and not snapshot.stage.input_policy.media:
+                prepared = probe
+            else:
+                prepared = await self.orchestrator.prepare_async(
+                    stage=snapshot.stage,
+                    targets=targets,
+                    source_channel_context=snapshot.source_channel_context,
+                    attempt=claim.attempt_count,
+                )
         except AnalysisInputError as error:
             failure = AnalysisExecutionFailure(error.code, error.error_type, error.retryable)
-            await self._fail_prepare_error(
+            isolated = await self._isolate_batch_prepare_failure(
                 claim=claim,
                 loaded_snapshot=loaded_snapshot,
                 failure=failure,
                 now=now,
             )
-            return True
+            if isolated is None:
+                return True
+            snapshot, targets, prepared = isolated
+            probed_cache_key = None
         except DomainValidationError as error:
             failure = AnalysisExecutionFailure(
                 AnalysisErrorCode.INPUT_BUILD_ERROR,
                 type(error).__name__,
                 False,
             )
-            await self._fail_prepare_error(
+            isolated = await self._isolate_batch_prepare_failure(
                 claim=claim,
                 loaded_snapshot=loaded_snapshot,
                 failure=failure,
                 now=now,
             )
-            return True
+            if isolated is None:
+                return True
+            snapshot, targets, prepared = isolated
+            probed_cache_key = None
         except Exception as error:
             failure = AnalysisExecutionFailure(
                 AnalysisErrorCode.INTERNAL_ERROR,
@@ -82,7 +115,7 @@ class AnalysisStageRunWorker:
             )
             return True
 
-        if prepared.cache_key is not None:
+        if prepared.cache_key is not None and prepared.cache_key != probed_cache_key:
             hit = await self.repository.find_cache_hit(
                 snapshot=snapshot, cache_key=prepared.cache_key
             )
@@ -94,8 +127,9 @@ class AnalysisStageRunWorker:
                     hit=hit,
                     now=now,
                 )
-                await self._finish(snapshot=snapshot, committed=committed, now=now)
-                return True
+                if committed.committed_target_ids:
+                    await self._finish(snapshot=snapshot, committed=committed, now=now)
+                    return True
 
         started = await self.repository.start_inference(
             snapshot=snapshot,
@@ -238,6 +272,125 @@ class AnalysisStageRunWorker:
             now=now,
         )
 
+    async def _isolate_batch_prepare_failure(
+        self,
+        *,
+        claim: ClaimedAnalysisStageRun,
+        loaded_snapshot: AnalysisStageSnapshot | None,
+        failure: AnalysisExecutionFailure,
+        now: datetime,
+    ) -> tuple[AnalysisStageSnapshot, tuple[AnalysisTargetInput, ...], PreparedAnalysisCall] | None:
+        if loaded_snapshot is None or len(loaded_snapshot.targets) <= 1:
+            await self._fail_prepare_error(
+                claim=claim,
+                loaded_snapshot=loaded_snapshot,
+                failure=failure,
+                now=now,
+            )
+            return None
+
+        healthy_snaps = []
+        failed_run_ids: list[str] = []
+        for target_snap in loaded_snapshot.targets:
+            single_input = (_single_analysis_input(target_snap),)
+            try:
+                await self.orchestrator.prepare_async(
+                    stage=loaded_snapshot.stage,
+                    targets=single_input,
+                    source_channel_context=loaded_snapshot.source_channel_context,
+                    attempt=claim.attempt_count,
+                )
+            except AnalysisInputError as err:
+                target_failure = AnalysisExecutionFailure(err.code, err.error_type, err.retryable)
+            except DomainValidationError as err:
+                target_failure = AnalysisExecutionFailure(
+                    AnalysisErrorCode.INPUT_BUILD_ERROR,
+                    type(err).__name__,
+                    False,
+                )
+            except Exception as err:
+                target_failure = AnalysisExecutionFailure(
+                    AnalysisErrorCode.INTERNAL_ERROR,
+                    type(err).__name__,
+                    True,
+                )
+            else:
+                healthy_snaps.append(target_snap)
+                continue
+
+            await self.repository.retry_or_fail_targets(
+                snapshot=loaded_snapshot,
+                target_ids=(target_snap.target_id,),
+                code=target_failure.code,
+                error_type=target_failure.error_type,
+                retryable=target_failure.retryable,
+                retry_at=_retry_at(snapshot=loaded_snapshot, now=now),
+                now=now,
+            )
+            run_id = target_snap.analysis_run_id or loaded_snapshot.claim.analysis_run_id
+            if run_id not in failed_run_ids:
+                failed_run_ids.append(run_id)
+
+        if not healthy_snaps:
+            await self._complete_snapshot_runs(snapshot=loaded_snapshot, now=now)
+            return None
+
+        if len(healthy_snaps) == len(loaded_snapshot.targets):
+            # Combined batch exceeded a cross-target budget; run the primary target solo
+            # and reschedule co-leased siblings immediately.
+            overflow = healthy_snaps[1:]
+            healthy_snaps = [healthy_snaps[0]]
+            if overflow:
+                await self.repository.retry_or_fail_targets(
+                    snapshot=loaded_snapshot,
+                    target_ids=tuple(item.target_id for item in overflow),
+                    code=failure.code,
+                    error_type=failure.error_type,
+                    retryable=True,
+                    retry_at=now,
+                    now=now,
+                )
+                for item in overflow:
+                    run_id = item.analysis_run_id or loaded_snapshot.claim.analysis_run_id
+                    if run_id not in failed_run_ids:
+                        failed_run_ids.append(run_id)
+
+        narrowed_snapshot = AnalysisStageSnapshot(
+            claim=loaded_snapshot.claim,
+            stage=loaded_snapshot.stage,
+            targets=tuple(healthy_snaps),
+            source_channel_context=loaded_snapshot.source_channel_context,
+        )
+        healthy_run_ids = {
+            item.analysis_run_id or loaded_snapshot.claim.analysis_run_id for item in healthy_snaps
+        }
+        for run_id in failed_run_ids:
+            if run_id not in healthy_run_ids:
+                await self.repository.complete_analysis_run(analysis_run_id=run_id, now=now)
+
+        narrowed_targets = _analysis_inputs(narrowed_snapshot)
+        try:
+            narrowed_prepared = await self.orchestrator.prepare_async(
+                stage=narrowed_snapshot.stage,
+                targets=narrowed_targets,
+                source_channel_context=narrowed_snapshot.source_channel_context,
+                attempt=claim.attempt_count,
+            )
+        except Exception as err:
+            fallback = (
+                AnalysisExecutionFailure(err.code, err.error_type, err.retryable)
+                if isinstance(err, AnalysisInputError)
+                else AnalysisExecutionFailure(
+                    AnalysisErrorCode.INTERNAL_ERROR,
+                    type(err).__name__,
+                    True,
+                )
+            )
+            await self._fail_targets(snapshot=narrowed_snapshot, failure=fallback, now=now)
+            await self._complete_snapshot_runs(snapshot=narrowed_snapshot, now=now)
+            return None
+        return narrowed_snapshot, narrowed_targets, narrowed_prepared
+
     async def _fail_prepare_error(
         self,
         *,
@@ -271,20 +424,21 @@ class AnalysisStageRunWorker:
         )
 
 
-def _analysis_inputs(snapshot: AnalysisStageSnapshot) -> tuple[AnalysisTargetInput, ...]:
-    return tuple(
-        AnalysisTargetInput(
-            target_id=target.target_id,
-            message_id=target.message_id,
-            asset_id=target.asset_id,
-            text=target.text,
-            telegram_metadata=target.telegram_metadata,
-            media=target.media,
-            previous_results=target.previous_results,
-            visual_identity=target.visual_identity,
-        )
-        for target in snapshot.targets
+def _single_analysis_input(target: Any) -> AnalysisTargetInput:
+    return AnalysisTargetInput(
+        target_id=target.target_id,
+        message_id=target.message_id,
+        asset_id=target.asset_id,
+        text=target.text,
+        telegram_metadata=target.telegram_metadata,
+        media=target.media,
+        previous_results=target.previous_results,
+        visual_identity=target.visual_identity,
     )
+
+
+def _analysis_inputs(snapshot: AnalysisStageSnapshot) -> tuple[AnalysisTargetInput, ...]:
+    return tuple(_single_analysis_input(target) for target in snapshot.targets)
 
 
 def _retry_at(*, snapshot: AnalysisStageSnapshot, now: datetime) -> datetime:

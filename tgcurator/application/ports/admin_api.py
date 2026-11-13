@@ -12,7 +12,7 @@ from tgcurator.application.ports.operations import OperationsSnapshot
 class AdminAccountRecord:
     user_id: str
     username: str
-    password_hash: str
+    password_hash: str = field(repr=False)
     is_active: bool
 
 
@@ -21,8 +21,8 @@ class AdminSessionState:
     session_id: str
     admin_user_id: str
     username: str
-    session_token_hash: str
-    csrf_token_hash: str
+    session_token_hash: str = field(repr=False)
+    csrf_token_hash: str = field(repr=False)
     expires_at: datetime
     last_seen_at: datetime
     created_at: datetime
@@ -36,8 +36,8 @@ class AuthenticatedAdmin:
     session_id: str
     user_id: str
     username: str
-    csrf_token: str
-    csrf_token_hash: str
+    csrf_token: str = field(repr=False)
+    csrf_token_hash: str = field(repr=False)
     expires_at: datetime
 
 

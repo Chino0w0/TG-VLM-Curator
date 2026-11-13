@@ -162,12 +162,11 @@ export interface SourceChannel {
   display_name: string;
   username: string | null;
   enabled: boolean;
-  protected_content?: boolean;
   default_read_identity_id: string | null;
   active_profile_version_id: string | null;
-  last_observed_message_id?: number | null;
-  last_observed_at?: string | null;
-  last_ingested_message_id?: number | null;
+  last_activity_at?: string | null;
+  latest_seen_message_id?: number | null;
+  last_seen_message_id?: number | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -200,15 +199,17 @@ export interface ProcessingRange {
 
 export interface RangeExecution {
   id: string;
-  processing_range_id: string;
+  processing_range_id?: string;
   from_message_id_exclusive: number;
   to_message_id_inclusive: number;
   watermark_message_id: number;
-  history_ingested: boolean;
+  history_ingested?: boolean;
   status: string;
   attempt_count: number;
   last_error_code?: string | null;
-  created_at: string;
+  created_at?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
 }
 
 export interface ConfigVersion {
@@ -275,6 +276,8 @@ export interface MessageSummary {
   id: string;
   source_channel_id: string;
   primary_telegram_message_id: number;
+  telegram_message_ids?: number[];
+  telegram_grouped_id?: number | null;
   media_group_id?: string | null;
   published_at: string;
   original_text: string | null;
@@ -331,10 +334,13 @@ export interface StageRunCausalItem {
   id: string;
   analysis_run_id?: string;
   analysis_stage_template_version_id?: string;
-  node_key?: string;
+  node_key?: string | null;
+  target_scope?: string;
+  target_kind?: string;
   target_id?: string;
   status: string;
   result_origin?: string | null;
+  reused_from_stage_run_id?: string | null;
   attempt_count: number;
   last_error_code?: string | null;
   last_error_type?: string | null;
