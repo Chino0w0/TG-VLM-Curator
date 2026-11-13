@@ -6,6 +6,8 @@ import type {
   SourceChannel,
 } from "../api/types";
 import { ResponsiveTable } from "../components/ResponsiveTable";
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 
 export interface ProcessingRangesWorkspaceProps {
   client: AdminApiClient;
@@ -14,6 +16,11 @@ export interface ProcessingRangesWorkspaceProps {
 export function ProcessingRangesWorkspace({
   client,
 }: ProcessingRangesWorkspaceProps) {
+  const reads = useRequestGeneration();
+  const execReads = useRequestGeneration();
+  const { busy, runAction } = useMutationGuard();
+  const [loading, setLoading] = useState(true);
+  const [execLoading, setExecLoading] = useState(false);
   const [ranges, setRanges] = useState<ProcessingRange[]>([]);
   const [sources, setSources] = useState<SourceChannel[]>([]);
   const [selectedRangeId, setSelectedRangeId] = useState<string | null>(null);
@@ -27,33 +34,51 @@ export function ProcessingRangesWorkspace({
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
+    const request = reads.next();
+    setLoading(true);
     setErrorMsg(null);
     try {
       const [rangeItems, sourceItems] = await Promise.all([
         client.listProcessingRanges(),
         client.listSourceChannels(),
       ]);
+      if (!reads.isCurrent(request)) return;
       setRanges(rangeItems);
       setSources(sourceItems);
-      if (!sourceChannelId && sourceItems.length > 0) {
-        setSourceChannelId(sourceItems[0].id);
+      if (sourceItems.length > 0) {
+        setSourceChannelId((prev) => prev || sourceItems[0].id);
       }
     } catch (err) {
+      if (!reads.isCurrent(request)) return;
       setErrorMsg(err instanceof Error ? err.message : "Failed to load processing ranges.");
+    } finally {
+      if (reads.isCurrent(request)) {
+        setLoading(false);
+      }
     }
-  }, [client, sourceChannelId]);
+  }, [client, reads]);
 
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
 
   async function handleInspectExecutions(rangeId: string) {
+    const request = execReads.next();
     setSelectedRangeId(rangeId);
+    setExecLoading(true);
+    setExecutions([]);
+    setErrorMsg(null);
     try {
       const items = await client.listRangeExecutions(rangeId);
+      if (!execReads.isCurrent(request)) return;
       setExecutions(items);
     } catch (err) {
+      if (!execReads.isCurrent(request)) return;
       setErrorMsg(err instanceof Error ? err.message : "Failed to load executions.");
+    } finally {
+      if (execReads.isCurrent(request)) {
+        setExecLoading(false);
+      }
     }
   }
 
@@ -61,37 +86,68 @@ export function ProcessingRangesWorkspace({
     event.preventDefault();
     setErrorMsg(null);
     setStatusMsg(null);
-    try {
-      const payload: Record<string, unknown> = {
-        source_channel_id: sourceChannelId,
-        start_at: startAt,
-        end_mode: endMode,
-      };
-      if (endMode === "fixed") {
-        payload.end_at = endAt;
-      } else {
-        payload.steady_after_seconds = Number(steadyAfterSeconds);
-      }
-      const created = await client.createProcessingRange(payload);
-      setStatusMsg(`Created ${created.end_mode.toUpperCase()} processing range.`);
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to create processing range.");
+    const trimmedStart = startAt.trim();
+    const startMs = Date.parse(trimmedStart);
+    if (Number.isNaN(startMs)) {
+      setErrorMsg("Start Timestamp must be a valid ISO-8601 timestamp.");
+      return;
     }
+    const payload: Record<string, unknown> = {
+      source_channel_id: sourceChannelId,
+      start_at: trimmedStart,
+      end_mode: endMode,
+    };
+    if (endMode === "fixed") {
+      const trimmedEnd = endAt.trim();
+      const endMs = Date.parse(trimmedEnd);
+      if (Number.isNaN(endMs) || endMs <= startMs) {
+        setErrorMsg(
+          "End Timestamp must be a valid ISO-8601 timestamp after Start Timestamp.",
+        );
+        return;
+      }
+      payload.end_at = trimmedEnd;
+    } else {
+      const trimmedSteady = steadyAfterSeconds.trim();
+      const parsedSteady = Number(trimmedSteady);
+      if (
+        !/^\d+$/.test(trimmedSteady) ||
+        !Number.isSafeInteger(parsedSteady) ||
+        parsedSteady < 1
+      ) {
+        setErrorMsg(
+          "Steady Quiet Threshold must be a positive integer (>= 1 second).",
+        );
+        return;
+      }
+      payload.steady_after_seconds = parsedSteady;
+    }
+
+    await runAction(async () => {
+      try {
+        const created = await client.createProcessingRange(payload);
+        setStatusMsg(`Created ${created.end_mode.toUpperCase()} processing range.`);
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to create processing range.");
+      }
+    });
   }
 
   async function handlePauseResume(range: ProcessingRange) {
     setErrorMsg(null);
-    try {
-      if (range.status === "paused") {
-        await client.resumeProcessingRange(range.id);
-      } else {
-        await client.pauseProcessingRange(range.id);
+    await runAction(async () => {
+      try {
+        if (range.status === "paused") {
+          await client.resumeProcessingRange(range.id);
+        } else if (range.status === "pending" || range.status === "active") {
+          await client.pauseProcessingRange(range.id);
+        }
+        await loadAll();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to update range state.");
       }
-      await loadAll();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to update range state.");
-    }
+    });
   }
 
   return (
@@ -219,7 +275,7 @@ export function ProcessingRangesWorkspace({
             )}
           </div>
 
-          <button type="submit" className="btn btn-primary">
+          <button type="submit" className="btn btn-primary" disabled={busy}>
             Create ProcessingRange
           </button>
         </form>
@@ -238,9 +294,14 @@ export function ProcessingRangesWorkspace({
             "Processing Watermark",
             "Actions",
           ]}
+          loading={loading}
+          emptyMessage="No processing ranges created yet."
         >
           {ranges.map((item) => {
             const source = sources.find((s) => s.id === item.source_channel_id);
+            const canPause =
+              item.status === "pending" || item.status === "active";
+            const canResume = item.status === "paused";
             return (
               <tr key={item.id}>
                 <th scope="row">{item.id.slice(0, 8)}</th>
@@ -266,13 +327,18 @@ export function ProcessingRangesWorkspace({
                 </td>
                 <td data-label="Actions">
                   <div className="btn-row">
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => void handlePauseResume(item)}
-                    >
-                      {item.status === "paused" ? "Resume" : "Pause"}
-                    </button>
+                    {canPause || canResume ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => void handlePauseResume(item)}
+                      >
+                        {canResume ? "Resume" : "Pause"}
+                      </button>
+                    ) : (
+                      <span className="stat-meta">Terminal</span>
+                    )}
                     <button
                       type="button"
                       className="btn"
@@ -294,7 +360,9 @@ export function ProcessingRangesWorkspace({
             RangeExecution History for Range{" "}
             <span className="mono">{selectedRangeId.slice(0, 8)}</span>
           </h2>
-          {executions.length === 0 ? (
+          {execLoading ? (
+            <p className="stat-meta">Loading RangeExecution windows...</p>
+          ) : executions.length === 0 ? (
             <p className="stat-meta">No frozen RangeExecution windows recorded yet.</p>
           ) : (
             <ResponsiveTable
@@ -318,7 +386,11 @@ export function ProcessingRangesWorkspace({
                     {exec.watermark_message_id}
                   </td>
                   <td data-label="History Ingested">
-                    {exec.history_ingested ? "Yes" : "No"}
+                    {exec.history_ingested === undefined
+                      ? "—"
+                      : exec.history_ingested
+                        ? "Yes"
+                        : "No"}
                   </td>
                   <td data-label="Status">
                     <span className="badge">{exec.status}</span>

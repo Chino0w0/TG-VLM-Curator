@@ -134,9 +134,11 @@ async def seed_http_and_database(db, vault, base, username, password, evidence):
 
         credential = secrets.token_urlsafe(32)
         SENSITIVE.append(credential)
-        secret = await post("/secrets", {"secret_type": "mtproto_session", "plaintext": credential})
+        secret = await post(
+            "/secrets", {"secret_type": "telegram_session", "plaintext": credential}
+        )
         inference_secret = await post(
-            "/secrets", {"secret_type": "inference_api_key", "plaintext": credential}
+            "/secrets", {"secret_type": "api_key", "plaintext": credential}
         )
         identity = await post(
             "/telegram-identities",
@@ -650,11 +652,40 @@ async def verify_removed(name: str) -> bool:
         await connection.close()
 
 
+def resolve_git_common_dir(repo_root: Path) -> Path:
+    dot_git = repo_root / ".git"
+    if dot_git.is_dir():
+        return dot_git.resolve()
+    if dot_git.is_file():
+        header = dot_git.read_text(encoding="utf-8").strip()
+        if header.startswith("gitdir:"):
+            raw_gitdir = header.split(":", 1)[1].strip()
+            git_dir = Path(raw_gitdir)
+            if not git_dir.is_absolute():
+                git_dir = (repo_root / git_dir).resolve()
+            commondir_file = git_dir / "commondir"
+            if commondir_file.is_file():
+                raw_common = commondir_file.read_text(encoding="utf-8").strip()
+                common_dir = Path(raw_common)
+                if not common_dir.is_absolute():
+                    common_dir = (git_dir / common_dir).resolve()
+                return common_dir
+            return git_dir
+    return dot_git
+
+
 def main() -> int:
+    git_common_dir = resolve_git_common_dir(ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--evidence", type=Path, default=ROOT / ".git/fix-2026-11-12/pr30/native")
     parser.add_argument(
-        "--services", type=Path, default=ROOT / ".git/fix-2026-11-12/test-services.json"
+        "--evidence",
+        type=Path,
+        default=git_common_dir / "fix-2026-11-12/pr30/native",
+    )
+    parser.add_argument(
+        "--services",
+        type=Path,
+        default=git_common_dir / "fix-2026-11-12/test-services.json",
     )
     parser.add_argument("--port", type=int, default=18732)
     args = parser.parse_args()

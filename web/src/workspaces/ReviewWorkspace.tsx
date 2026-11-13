@@ -1,7 +1,13 @@
 import { useMutationGuard } from "../hooks/useMutationGuard";
 import { useRequestGeneration } from "../hooks/useRequestGeneration";
-import { publishedVersion } from "../api/config";
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { AdminApiClient } from "../api/client";
 import type {
   ConfigEntity,
@@ -10,6 +16,26 @@ import type {
   RerouteResult,
 } from "../api/types";
 import { ResponsiveTable } from "../components/ResponsiveTable";
+
+function getEligibleLabelOptions(
+  entities: ConfigEntity[],
+  scope: "global" | "media",
+) {
+  return entities.flatMap((ent) =>
+    ent.versions
+      .filter(
+        (ver) =>
+          ver.state === "published" &&
+          ver.content.enabled !== false &&
+          String(ver.content.scope ?? "global") === scope,
+      )
+      .map((ver) => ({
+        entityName: ent.name,
+        version: ver,
+        key: String(ver.content.key ?? ent.name),
+      })),
+  );
+}
 
 export interface ReviewWorkspaceProps {
   client: AdminApiClient;
@@ -25,6 +51,9 @@ export function ReviewWorkspace({
   const { busy, runAction } = useMutationGuard();
   const selectedId = useRef(selectedMessageId);
   selectedId.current = selectedMessageId;
+  const onSelectMessageIdRef = useRef(onSelectMessageId);
+  onSelectMessageIdRef.current = onSelectMessageId;
+  const loadedMessageIdRef = useRef<string | null>(null);
   const queueRequests = useRequestGeneration();
   const detailRequests = useRequestGeneration();
   const [queueCursor, setQueueCursor] = useState<string | null>(null);
@@ -67,6 +96,21 @@ export function ReviewWorkspace({
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const matchingLabelOptions = useMemo(
+    () => getEligibleLabelOptions(labelDefs, targetScope),
+    [labelDefs, targetScope],
+  );
+
+  useEffect(() => {
+    if (matchingLabelOptions.length === 0) return;
+    if (
+      !matchingLabelOptions.some((opt) => opt.version.id === labelVersionId)
+    ) {
+      setLabelVersionId(matchingLabelOptions[0].version.id);
+      setLabelKey(matchingLabelOptions[0].key);
+    }
+  }, [matchingLabelOptions, labelVersionId]);
+
   const loadQueueAndMetadata = useCallback(async () => {
     const request = queueRequests.next();
     setQueueLoading(true);
@@ -89,35 +133,35 @@ export function ReviewWorkspace({
       setLabelDefs(lbls);
       setPipelines(pipes);
       setRoutingPolicies(policies);
-      if (!selectedMessageId && page.items.length > 0) {
-        onSelectMessageId(page.items[0].id);
-      }
-      if (!labelVersionId && lbls.length > 0) {
-        const pub = publishedVersion(lbls[0]) ?? lbls[0].versions[0];
-        if (pub) {
-          setLabelVersionId(pub.id);
-          setLabelKey(String(pub.content.key ?? lbls[0].name));
-        }
+      if (!selectedId.current && page.items.length > 0) {
+        onSelectMessageIdRef.current(page.items[0].id);
       }
     } catch (err) {
       if (queueRequests.isCurrent(request)) setErrorMsg(err instanceof Error ? err.message : "Failed to load review queue.");
     } finally {
       if (queueRequests.isCurrent(request)) setQueueLoading(false);
     }
-  }, [client, queueFilter, queueCursor, queueRequests, selectedMessageId, onSelectMessageId, labelVersionId]);
+  }, [client, queueFilter, queueCursor, queueRequests]);
 
   const loadSelectedDetail = useCallback(
     async (msgId: string) => {
       if (!msgId || msgId !== selectedId.current) return;
       const request = detailRequests.next();
-      setDetail(null);
+      const isSwitchingMessage = loadedMessageIdRef.current !== msgId;
+      if (isSwitchingMessage) {
+        setDetail(null);
+      }
       try {
         const loaded = await client.getMessageDetail(msgId);
         if (!detailRequests.isCurrent(request) || msgId !== selectedId.current) return;
+        const isSameMessage = loadedMessageIdRef.current === loaded.message.id;
+        loadedMessageIdRef.current = loaded.message.id;
         setDetail(loaded);
-        setTargetScope("global");
-        setTargetKind("message");
-        setTargetId(loaded.message.id);
+        if (!isSameMessage) {
+          setTargetScope("global");
+          setTargetKind("message");
+          setTargetId(loaded.message.id);
+        }
       } catch (err) {
         if (!detailRequests.isCurrent(request) || msgId !== selectedId.current) return;
         setErrorMsg(
@@ -150,6 +194,22 @@ export function ReviewWorkspace({
       if (targetScope === "media" && !(targetKind === "image_asset" ? detail.media.images : detail.media.videos).some(asset => asset.id === targetId)) {
         throw new Error("Select an image or video belonging to this message.");
       }
+      let parsedScore: number | undefined;
+      if (operation === "set") {
+        const rawScore = score.trim();
+        const numericScore = Number(rawScore);
+        if (
+          rawScore === "" ||
+          !Number.isFinite(numericScore) ||
+          numericScore < 0 ||
+          numericScore > 1
+        ) {
+          throw new Error(
+            "Score must be a finite number between 0.0 and 1.0.",
+          );
+        }
+        parsedScore = numericScore;
+      }
       await client.applyManualLabel(detail.message.id, {
         operation,
         target_scope: targetScope,
@@ -159,7 +219,7 @@ export function ReviewWorkspace({
         video_asset_id: targetScope === "media" && targetKind === "video_asset" ? targetId : undefined,
         label_definition_version_id: labelVersionId,
         label_key: labelKey.trim(),
-        score: operation === "set" ? Number(score) : undefined,
+        score: parsedScore,
         activated: operation === "set" ? activated : undefined,
         reason: labelReason.trim() || undefined,
       });
@@ -179,6 +239,12 @@ export function ReviewWorkspace({
     if (!detail) return;
     setErrorMsg(null);
     setStatusMsg(null);
+    if (nextReviewStatus === detail.message.review_status) {
+      setErrorMsg(
+        `Review status is already '${detail.message.review_status}'. Choose a different target status.`,
+      );
+      return;
+    }
     try {
       await client.transitionReviewStatus(
         detail.message.id,
@@ -293,6 +359,8 @@ export function ReviewWorkspace({
         <ResponsiveTable
           caption="Messages available for human review"
           headers={["TG Msg ID", "Review Status", "Excerpt", "Action"]}
+          loading={queueLoading}
+          emptyMessage="No messages in this review queue."
         >
           {queueItems.map((item) => (
             <tr key={item.id}>
@@ -389,6 +457,22 @@ export function ReviewWorkspace({
                           setTargetKind(image ? "image_asset" : "video_asset");
                           setTargetId(image?.id ?? video?.id ?? "");
                         }
+                        const nextOpts = getEligibleLabelOptions(
+                          labelDefs,
+                          nextScope,
+                        );
+                        if (
+                          nextOpts.length > 0 &&
+                          !nextOpts.some(
+                            (opt) => opt.version.id === labelVersionId,
+                          )
+                        ) {
+                          setLabelVersionId(nextOpts[0].version.id);
+                          setLabelKey(nextOpts[0].key);
+                        } else if (nextOpts.length === 0) {
+                          setLabelVersionId("");
+                          setLabelKey("");
+                        }
                       }}
                     >
                       <option value="global">global (message)</option>
@@ -413,37 +497,32 @@ export function ReviewWorkspace({
                     <label htmlFor="rev-label-def">
                       Label Definition Version *
                     </label>
-                    {labelDefs.length > 0 ? (
+                    {matchingLabelOptions.length > 0 ? (
                       <select
                         id="rev-label-def"
                         value={labelVersionId}
                         onChange={(e) => {
                           setLabelVersionId(e.target.value);
-                          for (const ent of labelDefs) {
-                            const found = ent.versions.find(
-                              (v) => v.id === e.target.value,
-                            );
-                            if (found) {
-                              setLabelKey(
-                                String(found.content.key ?? ent.name),
-                              );
-                            }
+                          const found = matchingLabelOptions.find(
+                            (opt) => opt.version.id === e.target.value,
+                          );
+                          if (found) {
+                            setLabelKey(found.key);
                           }
                         }}
                       >
-                        {labelDefs.flatMap((ent) =>
-                          ent.versions.map((ver) => (
-                            <option key={ver.id} value={ver.id}>
-                              {ent.name} v{ver.version_number} ({ver.state})
-                            </option>
-                          )),
-                        )}
+                        {matchingLabelOptions.map((opt) => (
+                          <option key={opt.version.id} value={opt.version.id}>
+                            {opt.entityName} v{opt.version.version_number} (published · {targetScope})
+                          </option>
+                        ))}
                       </select>
                     ) : (
                       <input
                         id="rev-label-def"
                         type="text"
                         required
+                        placeholder={`Published ${targetScope} label version UUID`}
                         value={labelVersionId}
                         onChange={(e) => setLabelVersionId(e.target.value)}
                       />
@@ -538,9 +617,21 @@ export function ReviewWorkspace({
                     />
                   </div>
                 </div>
-                <button type="submit" className="btn btn-primary">
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={
+                    busy || nextReviewStatus === detail.message.review_status
+                  }
+                >
                   Update Review Status
                 </button>
+                {nextReviewStatus === detail.message.review_status ? (
+                  <p className="hint" style={{ marginBlockStart: "0.4rem" }}>
+                    Message is already in &apos;{detail.message.review_status}
+                    &apos; status.
+                  </p>
+                ) : null}
               </form>
 
               <hr

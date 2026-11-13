@@ -1,3 +1,4 @@
+import { useMutationGuard } from "../hooks/useMutationGuard";
 import { useRequestGeneration } from "../hooks/useRequestGeneration";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
@@ -18,6 +19,7 @@ export function MessageDetailWorkspace({
   onOpenReview,
 }: MessageDetailWorkspaceProps) {
   const reads = useRequestGeneration();
+  const { busy, runAction } = useMutationGuard();
   const [lookupInput, setLookupInput] = useState(selectedMessageId ?? "");
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   const [skipReason, setSkipReason] = useState("");
@@ -33,8 +35,8 @@ export function MessageDetailWorkspace({
 
   const loadDetail = useCallback(
     async (messageId: string) => {
-      const request = reads.next();
       if (!messageId) return;
+      const request = reads.next();
       setLoading(true);
       setErrorMsg(null);
       try {
@@ -63,27 +65,32 @@ export function MessageDetailWorkspace({
     event.preventDefault();
     const trimmed = lookupInput.trim();
     if (!trimmed) return;
-    onSelectMessageId(trimmed);
-    void loadDetail(trimmed);
+    if (trimmed !== selectedMessageId) {
+      onSelectMessageId(trimmed);
+    } else {
+      void loadDetail(trimmed);
+    }
   }
 
   async function handleSkipMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!detail) return;
+    if (!detail || detail.message.processing_status === "processed") return;
     setErrorMsg(null);
     setStatusMsg(null);
-    try {
-      await client.skipMessage(detail.message.id, skipReason.trim());
-      setSkipReason("");
-      setStatusMsg(
-        "Message marked as skipped with audit trail; continuous watermark unblocked.",
-      );
-      await loadDetail(detail.message.id);
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Failed to skip message.",
-      );
-    }
+    await runAction(async () => {
+      try {
+        await client.skipMessage(detail.message.id, skipReason.trim());
+        setSkipReason("");
+        setStatusMsg(
+          "Message marked as skipped with audit trail; continuous watermark unblocked.",
+        );
+        await loadDetail(detail.message.id);
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? err.message : "Failed to skip message.",
+        );
+      }
+    });
   }
 
   return (
@@ -121,7 +128,7 @@ export function MessageDetailWorkspace({
       </div>
 
       <div className="panel">
-        <search aria-label="Lookup message by UUID">
+        <div role="search" aria-label="Lookup message by UUID">
           <form onSubmit={handleLookupSubmit} className="btn-row">
             <label htmlFor="detail-lookup-id">Message UUID:</label>
             <input
@@ -140,7 +147,7 @@ export function MessageDetailWorkspace({
               Load Causal Chain
             </button>
           </form>
-        </search>
+        </div>
       </div>
 
       {errorMsg ? (
@@ -300,6 +307,12 @@ export function MessageDetailWorkspace({
                   <span className="mono">
                     {run.analysis_pipeline_version_id}
                   </span>
+                  {run.created_at ? (
+                    <>
+                      {" "}
+                      | Created: <span className="mono">{run.created_at}</span>
+                    </>
+                  ) : null}
                 </p>
                 <ResponsiveTable
                   caption={`StageRuns for AnalysisRun ${run.id.slice(0, 8)}`}
@@ -315,7 +328,7 @@ export function MessageDetailWorkspace({
                     <tr key={sr.id}>
                       <th scope="row">{sr.id.slice(0, 8)}</th>
                       <td data-label="Node / Target" className="mono">
-                        {sr.node_key ?? "stage"} / {sr.target_id ?? "message"}
+                        {sr.node_key || "stage"} / {sr.target_id ?? "message"}
                       </td>
                       <td data-label="Status & Origin">
                         <span className="badge">{sr.status}</span>{" "}
@@ -331,7 +344,7 @@ export function MessageDetailWorkspace({
                       </td>
                       <td data-label="Inference Call" className="mono">
                         {sr.inference_call
-                          ? `${sr.inference_call.provider_adapter} (${sr.inference_call.model_name}) HTTP ${sr.inference_call.http_status ?? "?"} · ${sr.inference_call.latency_ms ?? 0}ms`
+                          ? `${sr.inference_call.provider_adapter} (${sr.inference_call.model_name}) HTTP ${sr.inference_call.http_status ?? "n/a"} · ${sr.inference_call.latency_ms ?? 0}ms`
                           : "Reused / Not invoked"}
                       </td>
                     </tr>
@@ -428,6 +441,11 @@ export function MessageDetailWorkspace({
                       </td>
                       <td data-label="Status">
                         <span className="badge">{intent.status}</span>
+                        {intent.next_retry_at ? (
+                          <div className="hint">
+                            Next retry: {intent.next_retry_at}
+                          </div>
+                        ) : null}
                       </td>
                       <td data-label="Attempts" className="mono">
                         {intent.attempts.length}
@@ -481,8 +499,9 @@ export function MessageDetailWorkspace({
             >
               <h3>Explicitly Skip Failed / Poison Message</h3>
               <p className="hint">
-                Unblocks the gap-free continuous `processing_watermark` while
-                recording an immutable AuditEvent.
+                {detail.message.processing_status === "processed"
+                  ? "Settled ('processed') messages have already completed processing and cannot be skipped."
+                  : "Unblocks the gap-free continuous `processing_watermark` while recording an immutable AuditEvent."}
               </p>
               <div className="field">
                 <label htmlFor="skip-reason-input">Audit Reason *</label>
@@ -491,12 +510,21 @@ export function MessageDetailWorkspace({
                   name="reason"
                   type="text"
                   required
+                  disabled={
+                    busy || detail.message.processing_status === "processed"
+                  }
                   placeholder="Explain why this message is being skipped..."
                   value={skipReason}
                   onChange={(e) => setSkipReason(e.target.value)}
                 />
               </div>
-              <button type="submit" className="btn btn-danger">
+              <button
+                type="submit"
+                className="btn btn-danger"
+                disabled={
+                  busy || detail.message.processing_status === "processed"
+                }
+              >
                 Skip Message &amp; Advance Watermark
               </button>
             </form>
