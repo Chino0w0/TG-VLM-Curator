@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import unittest
+from typing import Any
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
+import httpx
 
 from apps.api import create_app
 from tgcurator.application import Settings
@@ -52,11 +54,83 @@ class DeterministicTestBenchProvider:
         )
 
 
+class SyncAsgiClient:
+    def __init__(self, app: Any, *, base_url: str = "http://testserver") -> None:
+        self.app = app
+        self._base_url = base_url
+        self._cookies = httpx.Cookies()
+        self._runner: asyncio.Runner | None = None
+        self._lifespan_cm: Any = None
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def cookies(self) -> httpx.Cookies:
+        return self._client.cookies if self._client is not None else self._cookies
+
+    def __enter__(self) -> SyncAsgiClient:
+        if self._runner is None:
+            self._runner = asyncio.Runner()
+            self._lifespan_cm = self.app.router.lifespan_context(self.app)
+            self._runner.run(self._lifespan_cm.__aenter__())
+            self._client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.app),
+                base_url=self._base_url,
+                cookies=self._cookies,
+            )
+            self._runner.run(self._client.__aenter__())
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._runner is not None:
+            try:
+                if self._client is not None:
+                    self._cookies = self._client.cookies
+                    self._runner.run(self._client.__aexit__(exc_type, exc_val, exc_tb))
+                if self._lifespan_cm is not None:
+                    self._runner.run(self._lifespan_cm.__aexit__(exc_type, exc_val, exc_tb))
+            finally:
+                self._client = None
+                self._lifespan_cm = None
+                self._runner.close()
+                self._runner = None
+
+    def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if self._runner is not None and self._client is not None:
+            return self._runner.run(self._client.request(method, url, **kwargs))
+
+        async def _oneshot() -> httpx.Response:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.app),
+                base_url=self._base_url,
+                cookies=self._cookies,
+            ) as client:
+                resp = await client.request(method, url, **kwargs)
+                self._cookies = client.cookies
+                return resp
+
+        return asyncio.run(_oneshot())
+
+    def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("PUT", url, **kwargs)
+
+    def patch(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self.request("DELETE", url, **kwargs)
+
+
 def _build_test_stack(
     *,
     environment: str = "test",
     with_provider: bool = True,
-) -> tuple[TestClient, InMemoryAdminBackend, DeterministicTestBenchProvider | None]:
+) -> tuple[SyncAsgiClient, InMemoryAdminBackend, DeterministicTestBenchProvider | None]:
     hasher = Argon2idPasswordHasher()
     backend = InMemoryAdminBackend()
     backend.seed_admin(
@@ -84,10 +158,10 @@ def _build_test_stack(
         app_master_key=master_key_b64,  # type: ignore[arg-type]
     )
     app = create_app(settings, FakeDatabaseProbe(), admin_service=service)
-    return TestClient(app), backend, provider
+    return SyncAsgiClient(app), backend, provider
 
 
-def _login_and_csrf(client: TestClient) -> dict[str, str]:
+def _login_and_csrf(client: SyncAsgiClient) -> dict[str, str]:
     resp = client.post(
         "/api/v1/auth/login",
         json={
@@ -114,8 +188,8 @@ class AdminApiSecurityAndWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(bad_login.status_code, 401)
 
-            # Use https base_url so Secure cookie is sent back by TestClient
-            https_client = TestClient(client.app, base_url="https://curator.example.test")
+            # Use https base_url so Secure cookie is sent back by SyncAsgiClient
+            https_client = SyncAsgiClient(client.app, base_url="https://curator.example.test")
             login_resp = https_client.post(
                 "/api/v1/auth/login",
                 json={
@@ -697,7 +771,7 @@ class AdminApiSecurityAndWorkflowTests(unittest.TestCase):
             tg_sec = client.post(
                 "/api/v1/secrets",
                 headers=headers,
-                json={"secret_type": "bot_token", "plaintext": "999:bot-secret"},
+                json={"secret_type": "telegram_session", "plaintext": "1BVtsOHwBu-mtproto-session"},
             ).json()
             ident = client.post(
                 "/api/v1/telegram-identities",
