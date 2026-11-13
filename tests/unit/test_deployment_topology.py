@@ -179,6 +179,8 @@ class DeploymentTopologyAndLifecycleTests(unittest.TestCase):
         self.assertEqual(compose.count("create_host_path: false"), 2)
         self.assertIn("--no-proxy-headers", compose)
         self.assertNotIn("postgresql-client", backend)
+        if "--no-build-isolation" in backend:
+            self.assertIn("hatchling", backend.split("COPY tgcurator", 1)[0])
         self.assertNotIn("proxy_add_x_forwarded_for", nginx)
         self.assertIn("location = /metrics { return 404; }", nginx)
 

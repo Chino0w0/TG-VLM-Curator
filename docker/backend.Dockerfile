@@ -24,7 +24,7 @@ COPY pyproject.toml README.md ./
 RUN mkdir -p tgcurator apps \
     && printf '"""Dependency cache stub."""\n' > tgcurator/__init__.py \
     && printf '"""Dependency cache stub."""\n' > apps/__init__.py \
-    && pip install --no-cache-dir ".[runtime]" \
+    && pip install --no-cache-dir "hatchling>=1.25" ".[runtime]" \
     && rm -rf tgcurator apps
 
 COPY tgcurator ./tgcurator
