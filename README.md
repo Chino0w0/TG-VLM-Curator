@@ -8,12 +8,12 @@ publishing system. The implementation follows tg-vlm-curator-architecture.md.
 M0–M10 implementations are merged on `main` (M6 / #27 `99696fa2`, M7 / #28 `28c3e6fd`,
 M8 / #29 `b0e955f4`, M9 / #30 `0007be1e`, and M10 / #31 `f6ac697`, whose code head
 `8fc2737` passed GitHub CI PR run `43212224146` and push run `43212215720`). On top of
-`f6ac697`, local `main` integrates the four post-M10 full-stack hardening branches
-(`fix/final-core-hardening` `24bd8ed`, `fix/final-admin-api-hardening` `8f71f06`,
-`fix/final-web-hardening` `8b702a6`, `fix/final-ops-runtime-hardening` `18620b5`) plus
-two integration commits (`1290c20` and `c5456dc`), reaching verified code head
-`c5456dc` (`c5456dc3756d62b3385aa19de7d69b5ae3e18a71`, local `main`, not yet pushed to
-`origin`).
+`f6ac697`, the post-M10 full-stack hardening delivery (`fix/post-m10-full-stack-hardening`)
+integrates four independently audited hardening slices (`fix/final-core-hardening`
+`24bd8ed`, `fix/final-admin-api-hardening` `8f71f06`, `fix/final-web-hardening` `8b702a6`,
+`fix/final-ops-runtime-hardening` `18620b5`) plus two cross-slice integration commits
+(`1290c20` and `c5456dc`), reaching verified code baseline `c5456dc`
+(`c5456dc3756d62b3385aa19de7d69b5ae3e18a71`).
 
 At local code head `c5456dc`, `pytest -ra -W error` passed **648 tests with 0 errors,
 0 failures, 0 skips, and 0 warnings** (`236.62` seconds). This includes **40** live
@@ -33,11 +33,11 @@ cancellation + graceful `SIGTERM` + PG16/media/independent-key DR & consistency 
 all passed locally.
 
 These are real local PostgreSQL 16, Redis 7 / Celery, Docker Compose, HTTP, and headless
-Chrome results. Telegram and external VLM/LLM inference remain controlled fixtures — not
-live account credentials, real channel deliveries, external provider compatibility,
-model-quality acceptance, or remote GitHub Actions verification on the unpushed local
-`main` head. Historical finding-by-finding M6–M10 remediation evidence is preserved in
-[the remediation delivery report](docs/reviews/2026-11-12-remediation-status.md).
+Chrome results, gated for remote `main` merge on GitHub Actions (`python`, `web`, and
+`deployment` checks). Telegram and external VLM/LLM inference remain controlled fixtures —
+not live account credentials, real channel deliveries, external provider compatibility, or
+model-quality acceptance. Historical finding-by-finding M6–M10 remediation evidence is
+preserved in [the remediation delivery report](docs/reviews/2026-11-12-remediation-status.md).
 
 M0 provides deterministic, framework-independent rules for message visual identity,
 processing boundaries, immutable configuration snapshots, analysis DAG validation, Negative
