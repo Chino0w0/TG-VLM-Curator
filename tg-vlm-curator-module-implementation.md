@@ -1,6 +1,6 @@
 # TG-VLM-Curator module implementation plan
 
-Status date: 2026-11-12
+Status date: 2026-11-13
 
 Source specification: `tg-vlm-curator-architecture.md`.
 
@@ -23,39 +23,17 @@ may contain multiple cooperating packages when they are required by its acceptan
 | M7 | End-to-end pipeline orchestration, visual deduplication, and continuous watermarks | Merged #28 `28c3e6fd`; local remediation verified |
 | M8 | Admin HTTP API, authentication, Prompt Test Bench, and Prometheus metrics | Merged #29 `b0e955f4`; native PostgreSQL verified |
 | M9 | React + TypeScript + Vite web administration console | Merged #30 `0007be1e`; native browser verified |
-| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Implemented; native local and GitHub CI gates passed at `8fc2737` (delivery PR #31) |
+| M10 | Docker Compose orchestration, daemon lifecycles, backup/consistency tooling, and E2E verification | Merged #31 `f6ac697` (GitHub CI passed at `8fc2737`); post-M10 full-stack hardening verified locally at `c5456dc` |
 
 ## Delivery acceptance snapshot
 
-Frozen at 2026-11-12 11:53 UTC. Final local pytest: 596 passed, 2 warnings,
-JUnit tests596/errors0/failures0/skipped0 (281.558 seconds). Native cases comprise
-M6=6, M7=6, M8=8, media_profile=6, runtime_closed_loop=3, telegram_revocation=1,
-and worker_process_restart=1, totaling31; offline_sql=17 is a separate category.
-The 17-group native PostgreSQL Chrome run, 24 Vitest tests, typecheck/build,
-recorded npm audit with zero vulnerabilities, Ruff282-file check, pip check and
-compileall passed. Complete local Docker deployment exited0.
+Updated at 2026-11-13 03:20 UTC on local `main` code head `c5456dc` (`c5456dc3756d62b3385aa19de7d69b5ae3e18a71`, integrating `fix/final-core-hardening` `24bd8ed`, `fix/final-admin-api-hardening` `8f71f06`, `fix/final-web-hardening` `8b702a6`, `fix/final-ops-runtime-hardening` `18620b5`, plus integration fixes `1290c20` and `c5456dc` on top of PR #31 merge `f6ac697`). Final local `pytest -ra -W error`: **648 passed, 0 failed, 0 errors, 0 skipped, 0 warnings** (`236.62` seconds; JUnit `tests=648, errors=0, failures=0, skipped=0`). Live native PostgreSQL 16 / Redis 7 cases comprise `M6=6`, `M7=6`, `M8=8`, `media_profile=6`, `post_m10_core_postgres=6`, `post_m10_admin_http_postgres=3`, `runtime_closed_loop=3`, `telegram_revocation=1`, and `worker_process_restart=1`, totaling **40**; `alembic_offline_sql=18` (including post-M10 revision `b9c3e5f7a106`) is a separate category. The 17-group native PostgreSQL Chrome run (`17/17` passed, `errors=[]`, `database_removed=true`), **33/33** Vitest tests (**0** stderr warnings), `typecheck`/lazy-chunk `vite build`, `npm audit --json` with **0** vulnerabilities, Ruff `289`-file check, `pip check`, `compileall`, and `bash -n scripts/*.sh` all passed. Complete local Docker Compose deployment (`scripts/check-deployment.py`) exited `0` in `147.32` seconds with `0` leaked smoke images.
 
-The Docker exercise verifies ten-service startup/restart, actual FFprobe/frame
-extraction and active FFmpeg cancellation, TLS Secure-cookie login, application
-SIGTERM, PG16/media/independent-key restore, wrong-key handling, deliberate orphan
-failure and clean consistency scans, and cleanup of only its own two projects/volumes.
-The standalone OS-process test kills a worker after an external fixture effect but
-before response/PublishRecord commit, then recovers after a 4-second lease with a
-new worker PID: five records match five unique fixture effects, preserving history.
+The Docker exercise verifies ten-service startup/restart, special-character PostgreSQL password encoding (`@:/?#%`), actual FFprobe/frame extraction and active FFmpeg cancellation, TLS Secure-cookie login, fixed-host port-80 `308` redirect blocking spoofed `Host` headers, public `/metrics` returning `404`, application `SIGTERM`, PG16/media/independent-key restore, wrong-key handling, deliberate orphan failure (exit `2`) and clean consistency scans, and cleanup of only its own two projects, volumes, and smoke images. The standalone OS-process test kills a worker after an external fixture effect but before response/`PublishRecord` commit, then recovers after a 4-second lease with a new worker PID: five records match five unique fixture effects, preserving history.
 
-Code head `8fc2737` passed all GitHub python/web/deployment jobs in PR run
-`43212224146` and push run `43212215720`; Linux/Python3.12/SQLAlchemy2.1.8
-passed 596 tests with 1 warning in127.86 seconds. PR #31 targets main; the final
-documentation head must pass all checks before exact-SHA merge. Its actual merge commit
-is recorded on the remote PR, independently of this documented code-gate snapshot.
+Prior M10 delivery PR #31 (`f6ac697`, code head `8fc2737`) passed all GitHub python/web/deployment jobs in PR run `43212224146` and push run `43212215720`; the post-M10 hardening commits on local `main` (`c5456dc`) have not yet been pushed to `origin`, so remote GitHub Actions verification on the new head remains pending an authorized push.
 
-PostgreSQL16, Redis/Celery, SQLAlchemy, local HTTP, browser and Docker are real local
-boundaries. External Telegram/provider are controlled fixtures: live account permissions,
-channel delivery, provider compatibility/model quality and production TLS remain separate
-acceptance. Base module tests described below retain their offline/unit scope; final delivery
-also requires the real-service gates above. The 33 historical findings and precise evidence
-mapping are in `docs/reviews/2026-11-12-remediation-status.md`; operating contracts are in
-`docs/operations/runtime.md` and `docs/operations/deployment.md`.
+PostgreSQL 16, Redis 7 / Celery, SQLAlchemy, local HTTP, headless Chrome, and Docker Compose are real local boundaries. External Telegram/provider remain controlled fixtures: live account permissions, channel delivery, provider compatibility/model quality, and production TLS remain separate acceptance. Base module tests described below retain their offline/unit scope; final delivery also requires the real-service gates above. Historical M6–M10 findings and frozen evidence are preserved in `docs/reviews/2026-11-12-remediation-status.md`; operating contracts are in `docs/operations/runtime.md` and `docs/operations/deployment.md`.
 
 ## Dependency rule
 
@@ -367,20 +345,22 @@ compilation (`npm run build`).
 M10 delivers the production container topology, operational maintenance utilities, and closed-loop
 system verification without bundling any inference model service:
 
-- multi-stage `docker/backend.Dockerfile` (non-root Python 3.12 + FFmpeg runtime), `docker/web.Dockerfile`
-  (Node 22 Vite build + Nginx static SPA serving with `/api/`, `/health/`, and `/metrics` reverse
-  proxying via `docker/nginx.conf`), `.dockerignore`, `.env.example`, and `docker-compose.yml`
-  orchestrating the exact ten core services (`postgres`, `redis`, `api`, `web`, `telegram-ingestor`,
-  `scheduler`, `worker-media`, `worker-analysis`, `worker-publish`, `worker-maintenance`), four
-  persistent volumes (`postgres-data`, `redis-data`, `archive-data`, `temp-media`), and read-only
-  file secret `app_master_key`;
+- multi-stage `docker/backend.Dockerfile` (non-root Python 3.12 + FFmpeg runtime with cached
+  `hatchling` + runtime dependency layer), `docker/web.Dockerfile` (Node 22 Vite build + Nginx
+  static SPA serving with `/api/` and `/health/` reverse proxying and public `/metrics` explicitly
+  returning HTTP `404` via `docker/nginx.conf` per Section 40.2), `.dockerignore`, `.env.example`,
+  and `docker-compose.yml` orchestrating the exact ten core services (`postgres`, `redis`, `api`,
+  `web`, `telegram-ingestor`, `scheduler`, `worker-media`, `worker-analysis`, `worker-publish`,
+  `worker-maintenance`), four persistent volumes (`postgres-data`, `redis-data`, `archive-data`,
+  `temp-media`), and read-only file secret `app_master_key`;
 - graceful `SIGTERM` handling across `apps/scheduler/__main__.py`,
   `apps/telegram_ingestor/__main__.py` (bounded media-group flush + `shutdown()`),
   `apps/worker/__main__.py` (`--role media|analysis|publish|maintenance|all` plus Celery
   `worker_shutting_down` hook terminating active `ffprobe`/`ffmpeg` child processes in
   `FFmpegVideoFrameExtractor`), and service-appropriate readiness probes in `apps/healthcheck.py`
-  (`tgcurator-healthcheck`: PostgreSQL-only for `api`/`ingestor`, PostgreSQL + Redis for
-  `scheduler`/`worker`);
+  (`tgcurator-healthcheck`: PostgreSQL-only for `api`, PostgreSQL + local daemon heartbeat for
+  `ingestor`, PostgreSQL + Redis + local daemon heartbeat for `scheduler`/`worker`, alongside
+  shared `service_heartbeats` SQL telemetry);
 - operator backup and restore scripts (`scripts/backup-postgres.sh`, `scripts/backup-media.sh`,
   `scripts/restore-postgres.sh`) with UTC timestamp + SHA-256 manifests and independent
   `APP_MASTER_KEY` reminders, plus the framework-independent `StorageConsistencyScanner`
