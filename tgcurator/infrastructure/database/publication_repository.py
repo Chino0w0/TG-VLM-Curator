@@ -224,6 +224,26 @@ class SqlAlchemyPublicationRepository:
                     )
                 )
 
+                main_degraded_to_text = False
+                if (
+                    mode is PublicationMode.NATIVE_FORWARD_WITH_SUPPLEMENT
+                    and PublicationPart.MAIN.value in intent.completed_parts
+                ):
+                    main_degraded_to_text = bool(
+                        await session.scalar(
+                            select(
+                                exists(
+                                    select(PublishRecord.id).where(
+                                        PublishRecord.publication_intent_id == intent.id,
+                                        PublishRecord.part == PublicationPart.MAIN.value,
+                                        PublishRecord.operation
+                                        == PublicationOperation.SEND_TEXT.value,
+                                    )
+                                )
+                            )
+                        )
+                    )
+
                 return _claimed(
                     intent=intent,
                     attempt_id=attempt_id,
@@ -231,6 +251,7 @@ class SqlAlchemyPublicationRepository:
                     message=message,
                     source=source,
                     destination=destination,
+                    main_degraded_to_text=main_degraded_to_text,
                 )
 
     async def begin_part(
@@ -372,13 +393,38 @@ class SqlAlchemyPublicationRepository:
                     return False
                 plan = publication_plan(_publication_mode(intent.publication_mode))
                 completed_parts = tuple(PublicationPart(value) for value in intent.completed_parts)
+                degraded_single_part = False
                 if not set(plan.required_parts).issubset(set(completed_parts)):
-                    return False
+                    if (
+                        intent.publication_mode
+                        == PublicationMode.NATIVE_FORWARD_WITH_SUPPLEMENT.value
+                        and completed_parts == (PublicationPart.MAIN,)
+                    ):
+                        degraded_single_part = claim.main_degraded_to_text or bool(
+                            await session.scalar(
+                                select(
+                                    exists(
+                                        select(PublishRecord.id).where(
+                                            PublishRecord.publication_intent_id == intent.id,
+                                            PublishRecord.part == PublicationPart.MAIN.value,
+                                            PublishRecord.operation
+                                            == PublicationOperation.SEND_TEXT.value,
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    if not degraded_single_part:
+                        return False
 
-                intent.status = publication_status_for_parts(
-                    plan=plan,
-                    completed_parts=completed_parts,
-                ).value
+                intent.status = (
+                    PublicationStatus.SENT.value
+                    if degraded_single_part
+                    else publication_status_for_parts(
+                        plan=plan,
+                        completed_parts=completed_parts,
+                    ).value
+                )
                 intent.next_retry_at = None
                 intent.lease_token = None
                 intent.lease_expires_at = None
@@ -411,6 +457,8 @@ class SqlAlchemyPublicationRepository:
                     return False
                 plan = publication_plan(_publication_mode(intent.publication_mode))
                 completed_parts = tuple(PublicationPart(value) for value in intent.completed_parts)
+                if claim.main_degraded_to_text and completed_parts == (PublicationPart.MAIN,):
+                    return False
                 next_status = publication_status_for_parts(
                     plan=plan,
                     completed_parts=completed_parts,
@@ -779,7 +827,13 @@ def _claimed(
     message: MessageRecord,
     source: SourceChannel,
     destination: DestinationChannel,
+    main_degraded_to_text: bool = False,
 ) -> ClaimedPublicationIntent:
+    source_read_identity_id = (
+        str(source.default_read_identity_id)
+        if getattr(source, "default_read_identity_id", None) is not None
+        else None
+    )
     return ClaimedPublicationIntent(
         intent_id=str(intent.id),
         attempt_id=str(attempt_id),
@@ -810,6 +864,8 @@ def _claimed(
             if intent.in_flight_operation is not None
             else None
         ),
+        source_read_identity_id=source_read_identity_id,
+        main_degraded_to_text=main_degraded_to_text,
     )
 
 

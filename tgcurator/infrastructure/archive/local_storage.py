@@ -14,6 +14,10 @@ class ArchiveStorageKeyError(ValueError):
     """Raised when a caller attempts to address an archive object outside the storage root."""
 
 
+class ArchivePathEscapeError(ArchiveStorageKeyError):
+    """Raised when an archive key escapes the storage root or traverses a symlink."""
+
+
 class ArchiveObjectConflictError(RuntimeError):
     """Raised when an immutable archive key already names different bytes."""
 
@@ -163,6 +167,8 @@ class LocalArchiveStorage:
     def _target_for(self, key: str) -> Path:
         if not isinstance(key, str) or not key.strip():
             raise ArchiveStorageKeyError("archive key must not be blank")
+        if "\x00" in key:
+            raise ArchiveStorageKeyError("archive key must not contain null bytes")
         if "\\" in key:
             raise ArchiveStorageKeyError("archive key must use relative POSIX separators")
         normalized = PurePosixPath(key)
@@ -173,11 +179,24 @@ class LocalArchiveStorage:
         if any(":" in part for part in normalized.parts):
             raise ArchiveStorageKeyError("archive key must not contain a drive designator")
 
+        current = self._root
+        last_index = len(normalized.parts) - 1
+        for index, part in enumerate(normalized.parts):
+            current = current / part
+            try:
+                mode = os.lstat(current).st_mode
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(mode):
+                raise ArchivePathEscapeError("archive key must not traverse symlinks")
+            if index < last_index and not stat.S_ISDIR(mode):
+                raise ArchiveStorageKeyError("archive key parent is not a directory")
+
         target = (self._root / Path(*normalized.parts)).resolve()
         try:
             target.relative_to(self._root)
         except ValueError as error:
-            raise ArchiveStorageKeyError("archive key escapes storage root") from error
+            raise ArchivePathEscapeError("archive key escapes storage root") from error
         return target
 
     @staticmethod

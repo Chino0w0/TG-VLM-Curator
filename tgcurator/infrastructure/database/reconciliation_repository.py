@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.sql.dml import Update
 
 from .models import SourceChannel
@@ -12,13 +12,19 @@ from .session import AsyncDatabase
 def _monotonic_cursor_advance_statement(
     *, source_channel_id: UUID, telegram_message_id: int, column
 ) -> Update:
+    values = {column.key: telegram_message_id}
+    if column is SourceChannel.last_seen_message_id:
+        values["latest_seen_message_id"] = func.greatest(
+            func.coalesce(SourceChannel.latest_seen_message_id, telegram_message_id),
+            telegram_message_id,
+        )
     return (
         update(SourceChannel)
         .where(
             SourceChannel.id == source_channel_id,
             or_(column.is_(None), column < telegram_message_id),
         )
-        .values({column.key: telegram_message_id})
+        .values(values)
     )
 
 

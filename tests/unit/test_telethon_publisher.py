@@ -146,24 +146,57 @@ class TelethonPublisherTests(unittest.TestCase):
         cases = (
             (
                 (_source_message(message_id=11, media=_input_photo(11), noforwards=True),),
+                "caption",
                 TelegramProtectedContent,
             ),
-            ((_source_message(message_id=11, media=None),), TelegramMediaUnavailable),
-            ((), TelegramMediaUnavailable),
+            (
+                (
+                    SimpleNamespace(
+                        id=11,
+                        media=_input_photo(11),
+                        noforwards=False,
+                        chat=SimpleNamespace(noforwards=True),
+                    ),
+                ),
+                "caption",
+                TelegramProtectedContent,
+            ),
+            ((_source_message(message_id=11, media=None),), "", TelegramMediaUnavailable),
+            ((), "caption", TelegramMediaUnavailable),
+        )
+
+        for messages, text, expected_error in cases:
+            with self.subTest(expected_error=expected_error.__name__, text=text):
+                request = _request(
+                    operation=PublicationOperation.COPY_WITH_CAPTION,
+                    source_message_ids=(11,),
+                    random_ids=(601,),
+                    text=text,
+                )
+                client = _Client(responses=[], messages=messages)
+                with self.assertRaises(expected_error):
+                    asyncio.run(_publisher(client).publish(request=request))
+                self.assertEqual(client.requests, [])
+
+    def test_copy_with_caption_on_text_only_source_sends_message_request(self) -> None:
+        client = _Client(
+            responses=[SimpleNamespace(id=777, random_id=601, updates=None)],
+            messages=(_source_message(message_id=11, media=None),),
         )
         request = _request(
             operation=PublicationOperation.COPY_WITH_CAPTION,
             source_message_ids=(11,),
             random_ids=(601,),
-            text="caption",
+            text="rendered text-only copy",
         )
 
-        for messages, expected_error in cases:
-            with self.subTest(expected_error=expected_error.__name__):
-                client = _Client(responses=[], messages=messages)
-                with self.assertRaises(expected_error):
-                    asyncio.run(_publisher(client).publish(request=request))
-                self.assertEqual(client.requests, [])
+        result = asyncio.run(_publisher(client).publish(request=request))
+
+        self.assertEqual(result.remote_message_ids, (777,))
+        self.assertEqual(len(client.requests), 1)
+        self.assertIsInstance(client.requests[0], functions.messages.SendMessageRequest)
+        self.assertEqual(client.requests[0].message, "rendered text-only copy")
+        self.assertEqual(client.requests[0].random_id, 601)
 
     def test_translates_named_telethon_capability_failures(self) -> None:
         cases = (

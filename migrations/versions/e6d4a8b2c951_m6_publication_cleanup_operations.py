@@ -880,6 +880,32 @@ def _downgrade_cleanup() -> None:
             table_name,
             type_="check",
         )
+        if table_name == "video_assets":
+            op.execute(
+                "UPDATE video_assets "
+                "SET archive_state = CASE "
+                "WHEN duration_seconds IS NOT NULL "
+                "AND source_sha256 IS NOT NULL "
+                "AND archive_ready_at IS NOT NULL "
+                "THEN 'ready' ELSE 'pending' END, "
+                "cleanup_job_id = NULL, "
+                "previous_archive_size = NULL "
+                "WHERE archive_state = 'deleting'"
+            )
+        else:
+            op.execute(
+                "UPDATE image_assets "
+                "SET archive_state = CASE "
+                "WHEN storage_backend IS NOT NULL AND storage_key IS NOT NULL "
+                "AND content_type IS NOT NULL AND width IS NOT NULL AND height IS NOT NULL "
+                "AND source_sha256 IS NOT NULL AND archive_sha256 IS NOT NULL "
+                "AND perceptual_hash IS NOT NULL AND archive_size_bytes IS NOT NULL "
+                "AND archive_ready_at IS NOT NULL "
+                "THEN 'ready' ELSE 'pending' END, "
+                "cleanup_job_id = NULL, "
+                "previous_archive_size = NULL "
+                "WHERE archive_state = 'deleting'"
+            )
         op.create_check_constraint(
             op.f(f"ck_{table_name}_{prefix}_archive_state"),
             table_name,
