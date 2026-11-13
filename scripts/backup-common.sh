@@ -9,13 +9,15 @@ COMPOSE=(docker compose --project-name "$COMPOSE_PROJECT_NAME" --file "${COMPOSE
 if [[ -n "${COMPOSE_ENV_FILE:-}" ]]; then COMPOSE+=(--env-file "$COMPOSE_ENV_FILE"); fi
 compose() { "${COMPOSE[@]}" "$@"; }
 require_maintenance() {
-  local service running
+  local service running restarting
   running="$(compose ps --status running --services)"
+  restarting="$(compose ps --status restarting --services)"
   while IFS= read -r service; do
+    service="${service%$'\r'}"
     case "$service" in postgres|redis|archive-tools|'') ;;
       *) echo "Stop application services before backup/restore: $service" >&2; exit 2 ;;
     esac
-  done <<< "$running"
+  done <<< "${running}"$'\n'"${restarting}"
 }
 checksum() {
   (cd "$(dirname "$1")" && sha256sum "$(basename "$1")" > "$(basename "$1").sha256")
@@ -25,9 +27,11 @@ verify_checksum() {
   # Read the digest only; never trust paths supplied by a checksum sidecar.
   local expected actual
   read -r expected _ < "$1.sha256"
+  expected="${expected%$'\r'}"
   [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Invalid checksum sidecar' >&2; exit 2; }
   actual="$(sha256sum "$1")"; actual="${actual%% *}"
-  [[ "$actual" == "$expected" ]] || { echo 'Backup checksum mismatch' >&2; exit 2; }
+  actual="${actual%$'\r'}"
+  [[ "${actual,,}" == "${expected,,}" ]] || { echo 'Backup checksum mismatch' >&2; exit 2; }
 }
 metadata() {
   local artifact="$1" kind="$2" digest size

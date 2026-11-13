@@ -13,6 +13,7 @@ import secrets
 import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,7 +26,28 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
-BASH = "D:/Program Files/Git/bin/bash.exe" if os.name == "nt" else "bash"
+
+
+def resolve_bash() -> str:
+    configured = os.environ.get("GIT_BASH")
+    if configured and Path(configured).is_file():
+        return configured
+    if os.name == "nt":
+        for candidate in (
+            "C:/Program Files/Git/bin/bash.exe",
+            "D:/Program Files/Git/bin/bash.exe",
+            "C:/Program Files (x86)/Git/bin/bash.exe",
+            "D:/Program Files (x86)/Git/bin/bash.exe",
+        ):
+            if Path(candidate).is_file():
+                return candidate
+        found = shutil.which("bash")
+        if found and "system32" not in found.lower():
+            return found
+    return shutil.which("bash") or "bash"
+
+
+BASH = resolve_bash()
 
 
 def certificate(directory: Path) -> tuple[Path, Path]:
@@ -88,13 +110,14 @@ def main() -> None:
             if not k.startswith(("COMPOSE_", "TGCURATOR_", "POSTGRES_"))
         }
         env.update(
+            PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
             COMPOSE_PROJECT_NAME=prefix,
             COMPOSE_FILE=str(ROOT / "docker-compose.yml"),
             COMPOSE_ENV_FILE=str(envfile),
             TGCURATOR_ENVIRONMENT="production",
             POSTGRES_USER="smoke",
             POSTGRES_DB="smoke",
-            POSTGRES_PASSWORD=secrets.token_hex(24),
+            POSTGRES_PASSWORD=secrets.token_hex(24) + "@:/?#%",
             TGCURATOR_BIND_ADDRESS="127.0.0.1",
             TGCURATOR_HTTP_PORT="0",
             TGCURATOR_HTTPS_PORT="0",
@@ -292,21 +315,41 @@ def main() -> None:
             cleanup_errors = []
             for e in (target, env):
                 try:
-                    compose(e, "down", "--volumes", "--remove-orphans")
+                    compose(e, "down", "--volumes", "--remove-orphans", "--rmi", "local")
                 except Exception as exc:
                     cleanup_errors.append(exc)
-            for image in (prefix + "-api", prefix + "-web", prefix + "-restore-api"):
-                exists = (
+            listed = subprocess.run(
+                ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            smoke_images = {
+                line.strip()
+                for line in listed.stdout.splitlines()
+                if line.strip().startswith(prefix)
+            }
+            for fallback in (
+                f"{prefix}-backend:local",
+                f"{prefix}-web:local",
+                f"{prefix}-restore-backend:local",
+                f"{prefix}-restore-web:local",
+                prefix + "-api",
+                prefix + "-web",
+                prefix + "-restore-api",
+            ):
+                if (
                     subprocess.run(
-                        ["docker", "image", "inspect", image], env=env, capture_output=True
+                        ["docker", "image", "inspect", fallback], env=env, capture_output=True
                     ).returncode
                     == 0
-                )
-                if exists:
-                    try:
-                        run(["docker", "image", "rm", image], env)
-                    except Exception as exc:
-                        cleanup_errors.append(exc)
+                ):
+                    smoke_images.add(fallback)
+            for image in sorted(smoke_images):
+                try:
+                    run(["docker", "image", "rm", "-f", image], env)
+                except Exception as exc:
+                    cleanup_errors.append(exc)
             if cleanup_errors:
                 raise RuntimeError(
                     "Smoke cleanup failed; inspect only " + prefix
@@ -324,6 +367,11 @@ def tls_login(https_port: str, http_port: str, cert: Path, password: str) -> Non
             "/api/v1/auth/login", json={"username": "smoke", "password": password}
         )
         assert response.status_code == 200, f"login status {response.status_code}"
+        assert response.headers.get("x-content-type-options") == "nosniff"
+        assert response.headers.get("x-frame-options") == "DENY"
+        assert response.headers.get("referrer-policy") == "same-origin"
+        assert "strict-transport-security" in response.headers
+        assert "/" not in response.headers.get("server", "")
         cookie = response.headers["set-cookie"].lower()
         assert "secure" in cookie and "httponly" in cookie and "samesite=lax" in cookie
         assert client.get("/api/v1/auth/me").status_code == 200
@@ -331,6 +379,12 @@ def tls_login(https_port: str, http_port: str, cert: Path, password: str) -> Non
         assert redirect.status_code == 308 and redirect.headers["location"].startswith("https://")
         assert redirect.headers["location"] == f"https://localhost:{https_port}/api/v1/auth/me"
         assert "cookie" not in redirect.request.headers
+        spoofed = client.get(
+            f"http://localhost:{http_port}/api/v1/auth/me",
+            headers={"Host": "evil.example"},
+        )
+        assert spoofed.status_code == 308
+        assert spoofed.headers["location"] == f"https://localhost:{https_port}/api/v1/auth/me"
         assert client.get("/metrics").status_code == 404
     # Default trust must reject this local-only self-signed certificate.
     try:
