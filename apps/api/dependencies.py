@@ -15,6 +15,10 @@ from tgcurator.application.admin import (
     InMemorySecretVault,
     PromptTestBenchService,
 )
+from tgcurator.application.admin.config_validation import (
+    INFERENCE_SECRET_TYPES,
+    env_allow_local_inference,
+)
 from tgcurator.application.ports.admin_api import AuthenticatedAdmin
 from tgcurator.application.ports.secrets import SecretVault
 from tgcurator.application.settings import Settings
@@ -36,7 +40,22 @@ class _VaultInferenceSecretResolver:
         self._vault = vault
 
     async def resolve(self, *, secret_reference: str) -> str:
-        raw = await self._vault.resolve(secret_id=UUID(secret_reference.strip()))
+        if not isinstance(secret_reference, str) or not secret_reference.strip():
+            raise ValueError("inference api_secret_reference must not be blank")
+        try:
+            secret_id = UUID(secret_reference.strip())
+        except ValueError as exc:
+            raise ValueError("inference api_secret_reference must be a valid UUID") from exc
+        status = await self._vault.status(secret_id=secret_id)
+        expected_type = (
+            status.secret_type
+            if status is not None and status.secret_type in INFERENCE_SECRET_TYPES
+            else "api_key"
+        )
+        raw = await self._vault.resolve(
+            secret_id=secret_id,
+            expected_secret_type=expected_type,
+        )
         return raw.decode("utf-8")
 
 
@@ -49,6 +68,10 @@ def build_default_admin_service(*, settings: Settings, database: object) -> Admi
             key_id=settings.app_master_key_id,
         )
         csrf_secret = hashlib.sha256(b"tgcurator-csrf\x00" + raw_master.encode("utf-8")).digest()
+    elif database is not None:
+        raise RuntimeError(
+            "APP_MASTER_KEY or APP_MASTER_KEY_FILE is required when database is configured"
+        )
     else:
         cipher = AesGcmSecretCipher(
             master_key=_NON_PROD_FALLBACK_KEY,
@@ -56,8 +79,9 @@ def build_default_admin_service(*, settings: Settings, database: object) -> Admi
         )
         csrf_secret = hashlib.sha256(b"tgcurator-csrf\x00non-prod-fallback").digest()
 
+    allow_local = env_allow_local_inference(default=False)
     if isinstance(database, AsyncDatabase):
-        backend = SqlAlchemyAdminBackend(database)
+        backend = SqlAlchemyAdminBackend(database, allow_local_inference=allow_local)
         secrets_vault: SecretVault = SqlAlchemySecretVault(database, cipher)
         provider = OpenAICompatibleInferenceProvider(
             secret_resolver=_VaultInferenceSecretResolver(secrets_vault)
@@ -66,7 +90,7 @@ def build_default_admin_service(*, settings: Settings, database: object) -> Admi
             provider=provider, storage_resolver=configured_archive_storage(settings)
         )
     else:
-        backend = InMemoryAdminBackend()
+        backend = InMemoryAdminBackend(allow_local_inference=allow_local)
         secrets_vault = InMemorySecretVault(key_id=settings.app_master_key_id)
         test_bench = PromptTestBenchService(provider=None)
 
@@ -80,6 +104,7 @@ def build_default_admin_service(*, settings: Settings, database: object) -> Admi
         secrets=secrets_vault,
         backend=backend,
         test_bench=test_bench,
+        allow_local_inference=allow_local,
     )
 
 

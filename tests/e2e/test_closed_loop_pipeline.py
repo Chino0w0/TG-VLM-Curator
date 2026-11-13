@@ -8,11 +8,12 @@ import tempfile
 import unittest
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
+import httpx
 from PIL import Image
 
 from apps.api import create_app
@@ -1796,7 +1797,55 @@ class ClosedLoopPipelineE2ETests(unittest.TestCase):
             async def dispose(self) -> None:
                 return None
 
-        with TestClient(create_app(settings, _DbProbe(), admin_service=admin_service)) as client:
+        class _SyncAsgiClient:
+            def __init__(self, app: Any) -> None:
+                self.app = app
+                self._cookie_jar = CookieJar()
+                self._runner: asyncio.Runner | None = None
+                self._lifespan_cm: Any = None
+                self._client: httpx.AsyncClient | None = None
+
+            def __enter__(self) -> _SyncAsgiClient:
+                self._runner = asyncio.Runner()
+                self._lifespan_cm = self.app.router.lifespan_context(self.app)
+                self._runner.run(self._lifespan_cm.__aenter__())
+                self._client = httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=self.app),
+                    base_url="http://testserver",
+                    cookies=httpx.Cookies(self._cookie_jar),
+                )
+                self._runner.run(self._client.__aenter__())
+                return self
+
+            def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+                if self._runner is not None:
+                    try:
+                        if self._client is not None:
+                            self._runner.run(self._client.__aexit__(exc_type, exc_val, exc_tb))
+                        if self._lifespan_cm is not None:
+                            self._runner.run(self._lifespan_cm.__aexit__(exc_type, exc_val, exc_tb))
+                    finally:
+                        self._client = None
+                        self._lifespan_cm = None
+                        self._runner.close()
+                        self._runner = None
+
+            def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+                assert self._runner is not None and self._client is not None
+                return self._runner.run(self._client.request(method, url, **kwargs))
+
+            def get(self, url: str, **kwargs: Any) -> httpx.Response:
+                return self.request("GET", url, **kwargs)
+
+            def post(self, url: str, **kwargs: Any) -> httpx.Response:
+                return self.request("POST", url, **kwargs)
+
+            def patch(self, url: str, **kwargs: Any) -> httpx.Response:
+                return self.request("PATCH", url, **kwargs)
+
+        with _SyncAsgiClient(
+            create_app(settings, _DbProbe(), admin_service=admin_service)
+        ) as client:
             login = client.post(
                 "/api/v1/auth/login",
                 json={"username": "e2e-admin", "password": "e2e-strong-passphrase"},
