@@ -1,17 +1,22 @@
-import { type ReactNode, useId } from "react";
+import { Children, type ReactNode, useId } from "react";
 
 export interface ResponsiveTableProps {
   caption: string;
   headers: string[];
   children: ReactNode;
+  loading?: boolean;
+  emptyMessage?: string;
 }
 
 export function ResponsiveTable({
   caption,
   headers,
   children,
+  loading = false,
+  emptyMessage,
 }: ResponsiveTableProps) {
   const captionId = useId();
+  const isEmpty = Children.count(children) === 0;
   return (
     <div
       tabIndex={0}
@@ -32,6 +37,11 @@ export function ResponsiveTable({
         </thead>
         <tbody>{children}</tbody>
       </table>
+      {isEmpty && (loading || emptyMessage) ? (
+        <p className="table-empty-state stat-meta" aria-live="polite">
+          {loading ? "Loading records..." : emptyMessage}
+        </p>
+      ) : null}
     </div>
   );
 }

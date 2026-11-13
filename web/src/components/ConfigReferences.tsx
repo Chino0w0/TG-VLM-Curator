@@ -34,7 +34,7 @@ export function ConfigReferences({ client, family, json, onChange }: {
     setOptions({}); setError("");
     void Promise.all((refs ?? []).map(async ref => {
       let items: Option[];
-      if (ref.kind === "secret") items = (await client.listSecrets()).filter(s => s.secret_type === "inference_api_key").map(s => ({ id: s.secret_id, label: `${s.secret_type} / ${s.secret_id}` }));
+      if (ref.kind === "secret") items = (await client.listSecrets()).filter(s => s.secret_type === "api_key" || s.secret_type === "inference_api_key").map(s => ({ id: s.secret_id, label: `${s.secret_type} / ${s.secret_id}` }));
       else if (ref.kind === "destination") items = (await client.listDestinationChannels()).map(d => ({ id: d.id, label: d.name }));
       else items = (await client.listConfigEntities(ref.family!)).flatMap(e => e.versions.filter(v => v.state === "published").map(v => ({ id: v.id, label: `${e.name} v${v.version_number}` })));
       return [ref.field, items] as const;

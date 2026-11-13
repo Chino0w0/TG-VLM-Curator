@@ -2,12 +2,17 @@ import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { AdminApiClient } from "../api/client";
 import type { FailedStepItem, OperationsStatusResponse } from "../api/types";
 import { ResponsiveTable } from "../components/ResponsiveTable";
+import { useMutationGuard } from "../hooks/useMutationGuard";
+import { useRequestGeneration } from "../hooks/useRequestGeneration";
 
 export interface OperationsWorkspaceProps {
   client: AdminApiClient;
 }
 
 export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
+  const reads = useRequestGeneration();
+  const { busy, runAction } = useMutationGuard();
+  const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<OperationsStatusResponse | null>(null);
   const [stepKindFilter, setStepKindFilter] = useState("");
   const [failedItems, setFailedItems] = useState<FailedStepItem[]>([]);
@@ -19,23 +24,31 @@ export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
 
   const loadOperations = useCallback(
     async (stepKind: string) => {
+      const request = reads.next();
+      setLoading(true);
       setErrorMsg(null);
       try {
         const [opsStatus, items] = await Promise.all([
           client.getOperationsStatus(),
           client.listFailedItems(stepKind || undefined, 50),
         ]);
+        if (!reads.isCurrent(request)) return;
         setStatus(opsStatus);
         setFailedItems(items);
       } catch (err) {
+        if (!reads.isCurrent(request)) return;
         setErrorMsg(
           err instanceof Error
             ? err.message
             : "Failed to load operations telemetry.",
         );
+      } finally {
+        if (reads.isCurrent(request)) {
+          setLoading(false);
+        }
       }
     },
-    [client],
+    [client, reads],
   );
 
   useEffect(() => {
@@ -50,21 +63,23 @@ export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
   async function handleRetryStep(item: FailedStepItem) {
     setErrorMsg(null);
     setStatusMsg(null);
-    try {
-      await client.retryFailedStep({
-        step_kind: item.step_kind,
-        target_id: item.target_id,
-        reason: retryReason.trim() || "Operator targeted step retry",
-      });
-      setStatusMsg(
-        `Queued targeted step retry for ${item.step_kind} (${item.target_id.slice(0, 8)}).`,
-      );
-      await loadOperations(stepKindFilter);
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Failed to retry failed step.",
-      );
-    }
+    await runAction(async () => {
+      try {
+        await client.retryFailedStep({
+          step_kind: item.step_kind,
+          target_id: item.target_id,
+          reason: retryReason.trim() || "Operator targeted step retry",
+        });
+        setStatusMsg(
+          `Queued targeted step retry for ${item.step_kind} (${item.target_id.slice(0, 8)}).`,
+        );
+        await loadOperations(stepKindFilter);
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? err.message : "Failed to retry failed step.",
+        );
+      }
+    });
   }
 
   return (
@@ -187,20 +202,23 @@ export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
         <h2 id="failed-steps-heading">
           Failed Steps ({failedItems.length}) — Targeted Step Retry
         </h2>
-        <search aria-labelledby="failed-steps-heading">
+        <div role="search" aria-labelledby="failed-steps-heading">
           <form onSubmit={handleFilterSubmit} className="form-grid">
             <div className="field">
               <label htmlFor="ops-step-kind">Filter by Step Kind</label>
               <select
                 id="ops-step-kind"
                 value={stepKindFilter}
-                onChange={(e) => setStepKindFilter(e.target.value)}
+                onChange={(e) => {
+                  reads.invalidate();
+                  setStepKindFilter(e.target.value);
+                }}
               >
                 <option value="">All step kinds</option>
                 <option value="stage_run">stage_run</option>
                 <option value="publication_intent">publication_intent</option>
-                <option value="image_asset">image_asset</option>
-                <option value="video_asset">video_asset</option>
+                <option value="image_archive">image_archive</option>
+                <option value="video_archive">video_archive</option>
                 <option value="range_execution">range_execution</option>
                 <option value="cleanup_job">cleanup_job</option>
               </select>
@@ -215,7 +233,7 @@ export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
               />
             </div>
           </form>
-        </search>
+        </div>
 
         <ResponsiveTable
           caption="Failed pipeline steps eligible for targeted retry"
@@ -227,12 +245,14 @@ export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
             "Attempts",
             "Action",
           ]}
+          loading={loading}
+          emptyMessage="No failed pipeline steps match the selected filter."
         >
           {failedItems.map((item) => (
             <tr key={`${item.step_kind}-${item.target_id}`}>
               <th scope="row">{item.step_kind}</th>
               <td data-label="Target ID" className="mono">
-                {item.target_id.slice(0, 12)}
+                {item.target_id}
               </td>
               <td data-label="Status">
                 <span className="badge badge-danger">{item.status}</span>
@@ -247,6 +267,7 @@ export function OperationsWorkspace({ client }: OperationsWorkspaceProps) {
                 <button
                   type="button"
                   className="btn btn-primary"
+                  disabled={busy}
                   onClick={() => void handleRetryStep(item)}
                 >
                   Retry Exact Step

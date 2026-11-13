@@ -22,6 +22,16 @@ function parseCsvList(raw: string): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
+const ALLOWED_CLEANUP_DUPLICATE_STATUSES = new Set([
+  "unknown",
+  "unique",
+  "canonical",
+  "duplicate",
+  "duplicate_skipped",
+  "duplicate_reclassify",
+  "duplicate_analyzed",
+]);
+
 const FILTER_LABELS: Record<string, string> = {
   archived_from: "Archived from (inclusive UTC)", archived_before: "Archived before (exclusive UTC)",
   source_channel_ids: "Source channels", message_published_from: "Messages published from (inclusive UTC)",
@@ -164,8 +174,17 @@ export function ArchiveManagementWorkspace({
     setErrorMsg(null);
     setStatusMsg(null);
     if (confirming.current) return;
-    const request = previews.next();
     const filter = buildFilterPayload();
+    const invalidDedup = (filter.duplicate_statuses ?? []).filter(
+      (item) => !ALLOWED_CLEANUP_DUPLICATE_STATUSES.has(item),
+    );
+    if (invalidDedup.length > 0) {
+      setErrorMsg(
+        `Invalid duplicate_statuses: ${invalidDedup.join(", ")}. Allowed values: duplicate, unique, canonical, unknown (or duplicate_skipped, duplicate_reclassify, duplicate_analyzed).`,
+      );
+      return;
+    }
+    const request = previews.next();
     previewSnapshot.current = JSON.stringify(filter);
     setActiveDryRun(null);
     setPreviewLoading(true);
@@ -255,7 +274,7 @@ export function ArchiveManagementWorkspace({
         <h2 id="cleanup-filter-heading">
           Step 1: Configure Cleanup Filter &amp; Run Dry-Run Preview
         </h2>
-        <search aria-labelledby="cleanup-filter-heading">
+        <div role="search" aria-labelledby="cleanup-filter-heading">
           <form onSubmit={handleRunDryRun}>
             <div className="form-grid">
               <div className="field">
@@ -464,13 +483,17 @@ export function ArchiveManagementWorkspace({
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  placeholder="duplicate_skipped"
+                  placeholder="duplicate, unique, canonical, unknown"
                   value={duplicateStatuses}
                   onChange={(e) => {
                     setDuplicateStatuses(e.target.value);
                     invalidateDryRun();
                   }}
                 />
+                <span className="hint">
+                  Values: duplicate, unique, canonical, unknown (or
+                  duplicate_skipped, duplicate_reclassify)
+                </span>
               </div>
 
               <div className="field">
@@ -541,7 +564,7 @@ export function ArchiveManagementWorkspace({
               </button>
             </div>
           </form>
-        </search>
+        </div>
 
         {activeDryRun ? (
           <div
@@ -608,6 +631,8 @@ export function ArchiveManagementWorkspace({
           <ResponsiveTable
             caption="Recorded CleanupDryRun previews"
             headers={["Dry-Run ID", "Assets", "Messages", "Bytes", "Hash"]}
+            loading={historyLoading}
+            emptyMessage="No cleanup dry-run previews recorded yet."
           >
             {dryRuns.map((dr) => (
               <tr key={dr.id}>
@@ -669,6 +694,8 @@ export function ArchiveManagementWorkspace({
           <ResponsiveTable
             caption="Confirmed CleanupJob executions"
             headers={["Job ID", "Status", "Est. Assets", "Deleted", "Skipped"]}
+            loading={historyLoading}
+            emptyMessage="No confirmed cleanup jobs executed yet."
           >
             {jobs.map((job) => (
               <tr key={job.id}>
