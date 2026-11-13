@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from math import isfinite
+from numbers import Real
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
+from uuid import UUID
 
 from tgcurator.application.analysis import (
     AnalysisInputError,
@@ -15,6 +22,92 @@ from tgcurator.domain.analysis import AnalysisStageTemplateVersion
 from tgcurator.shared import DomainValidationError
 
 from .errors import AdminValidationError
+
+_REDACTED = "[REDACTED]"
+_REDACTED_URL = "[REDACTED_URL]"
+_SENSITIVE_KEY_FRAGMENTS = (
+    "secret",
+    "password",
+    "apikey",
+    "authorization",
+    "credential",
+    "signature",
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+
+
+def sanitize_test_bench_json(value: Any) -> Any:
+    """Normalize Test Bench JSON recursively while redacting credential-bearing values."""
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, Real):
+        number = float(value)
+        return number if isfinite(number) else None
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return sanitize_test_bench_json(value.value)
+    if isinstance(value, str):
+        return _sanitize_string(value)
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key)
+            result[normalized_key] = (
+                _REDACTED if _is_sensitive_key(normalized_key) else sanitize_test_bench_json(item)
+            )
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, memoryview)):
+        return [sanitize_test_bench_json(item) for item in value]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"<bytes:{len(value)}>"
+    return str(value)
+
+
+def _sanitize_optional_mapping(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    sanitized = sanitize_test_bench_json(dict(value))
+    return dict(sanitized) if isinstance(sanitized, Mapping) else None
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return (
+        any(fragment in normalized for fragment in _SENSITIVE_KEY_FRAGMENTS)
+        or normalized == "token"
+        or (normalized.endswith("token") and not normalized.endswith("tokens"))
+    )
+
+
+def _sanitize_string(value: str) -> str:
+    scrubbed = _BEARER_RE.sub("Bearer [REDACTED]", value)
+    scrubbed = _BOT_TOKEN_RE.sub(_REDACTED, scrubbed)
+    try:
+        parsed = urlsplit(scrubbed)
+    except ValueError:
+        return scrubbed
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return scrubbed
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        return _REDACTED_URL
+    sensitive_query_fragments = (
+        "secret",
+        "password",
+        "apikey",
+        "authorization",
+        "token",
+        "credential",
+        "signature",
+    )
+    for key, _ in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+        if any(fragment in normalized for fragment in sensitive_query_fragments):
+            return _REDACTED_URL
+    return scrubbed
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,14 +202,12 @@ class PromptTestBenchService:
                 input_manifest_hash=manifest_hash,
                 structured_output_schema=schema_doc,
                 structured_output_schema_hash=schema_hash,
-                raw_response=(
-                    dict(failure.raw_response) if failure.raw_response is not None else None
-                ),
+                raw_response=_sanitize_optional_mapping(failure.raw_response),
                 parsed_results=[],
                 invalid_targets={},
                 missing_target_ids=[],
                 negative_gate_would_trigger=False,
-                token_usage=dict(failure.token_usage) if failure.token_usage is not None else None,
+                token_usage=_sanitize_optional_mapping(failure.token_usage),
                 latency_ms=failure.latency_ms,
                 error_code=failure.code.value,
                 error_type=failure.error_type,
@@ -139,12 +230,12 @@ class PromptTestBenchService:
                 input_manifest_hash=manifest_hash,
                 structured_output_schema=schema_doc,
                 structured_output_schema_hash=schema_hash,
-                raw_response=dict(invocation.response.raw_response),
+                raw_response=_sanitize_optional_mapping(invocation.response.raw_response),
                 parsed_results=[],
                 invalid_targets={},
                 missing_target_ids=[],
                 negative_gate_would_trigger=False,
-                token_usage=dict(invocation.response.token_usage),
+                token_usage=_sanitize_optional_mapping(invocation.response.token_usage),
                 latency_ms=invocation.response.latency_ms,
                 error_code="invalid_structured_output",
                 error_type=type(error).__name__,
@@ -185,11 +276,11 @@ class PromptTestBenchService:
             input_manifest_hash=manifest_hash,
             structured_output_schema=schema_doc,
             structured_output_schema_hash=schema_hash,
-            raw_response=dict(invocation.response.raw_response),
+            raw_response=_sanitize_optional_mapping(invocation.response.raw_response),
             parsed_results=parsed_items,
             invalid_targets=invalid_targets,
             missing_target_ids=list(validated.validation.retry_target_ids),
             negative_gate_would_trigger=validated.negative_gate_hit,
-            token_usage=dict(invocation.response.token_usage),
+            token_usage=_sanitize_optional_mapping(invocation.response.token_usage),
             latency_ms=invocation.response.latency_ms,
         )

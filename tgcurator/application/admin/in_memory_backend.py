@@ -54,12 +54,36 @@ from .config_validation import (
     build_prompt_template_domain,
     build_stage_template_domain,
     canonical_content_hash,
+    env_allow_local_inference,
     validate_media_profile_content,
     validate_rendering_template_syntax,
     validate_routing_policy_content,
     validate_source_profile_content,
 )
 from .errors import AdminConflictError, AdminNotFoundError, AdminValidationError
+
+_SUPPORTED_STEP_KINDS: frozenset[str] = frozenset(
+    {
+        "range_execution",
+        "image_archive",
+        "video_archive",
+        "stage_run",
+        "publication_intent",
+        "cleanup_job",
+    }
+)
+
+_DUPLICATE_STATUS_ALIASES: Mapping[str, str] = {
+    "unchecked": "unknown",
+    "duplicate_skipped": "duplicate",
+    "duplicate_reclassify": "duplicate",
+    "duplicate_analyzed": "duplicate",
+}
+
+
+def normalize_cleanup_duplicate_status(value: str) -> str:
+    cleaned = str(value).strip()
+    return _DUPLICATE_STATUS_ALIASES.get(cleaned, cleaned)
 
 
 class InMemorySecretVault:
@@ -164,10 +188,16 @@ class InMemoryAdminBackend:
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
         operations_snapshot_provider: Callable[[datetime], OperationsSnapshot] | None = None,
+        allow_local_inference: bool | None = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or uuid4
         self._ops_provider = operations_snapshot_provider
+        self._allow_local_inference = (
+            env_allow_local_inference(default=False)
+            if allow_local_inference is None
+            else bool(allow_local_inference)
+        )
 
         self.admins: dict[str, AdminAccountRecord] = {}
         self.sessions: dict[str, AdminSessionState] = {}
@@ -213,6 +243,7 @@ class InMemoryAdminBackend:
         self.publish_records: dict[str, list[dict[str, Any]]] = {}
         self.cleanup_dry_runs: dict[str, dict[str, Any]] = {}
         self.cleanup_jobs: dict[str, dict[str, Any]] = {}
+        self.cleanup_items: dict[str, list[dict[str, Any]]] = {}
         self.wakeups: list[tuple[str, str]] = []
 
     def seed_admin(self, *, username: str, password_hash: str, user_id: str | None = None) -> str:
@@ -435,17 +466,18 @@ class InMemoryAdminBackend:
         if not display_name:
             raise AdminValidationError("display_name must not be blank")
         read_identity_id = str(payload.get("default_read_identity_id", "")).strip()
-        if read_identity_id not in self.identities:
+        read_identity = self.identities.get(read_identity_id)
+        if read_identity is None:
             raise AdminValidationError("default_read_identity_id does not exist")
+        if read_identity.get("identity_type") != "mtproto_user":
+            raise AdminValidationError(
+                "default_read_identity_id must reference an mtproto_user identity"
+            )
         active_profile_vid = payload.get("active_profile_version_id")
         if active_profile_vid is not None:
-            ver = self.config_versions.get(str(active_profile_vid))
-            if (
-                ver is None
-                or ver["family"] != "source-channel-profiles"
-                or ver["state"] != "published"
-            ):
-                raise AdminValidationError("active_profile_version_id must be a published profile")
+            raise AdminValidationError(
+                "active_profile_version_id must be a published profile owned by this source channel"
+            )
         channel_id = str(self._id_factory())
         record = {
             "id": channel_id,
@@ -489,20 +521,33 @@ class InMemoryAdminBackend:
             and changes["default_read_identity_id"] is not None
         ):
             rid = str(changes["default_read_identity_id"])
-            if rid not in self.identities:
+            read_identity = self.identities.get(rid)
+            if read_identity is None:
                 raise AdminValidationError("default_read_identity_id does not exist")
+            if read_identity.get("identity_type") != "mtproto_user":
+                raise AdminValidationError(
+                    "default_read_identity_id must reference an mtproto_user identity"
+                )
             record["default_read_identity_id"] = rid
         if "active_profile_version_id" in changes:
             pvid = changes["active_profile_version_id"]
             if pvid is not None:
                 ver = self.config_versions.get(str(pvid))
+                parent_ent = (
+                    self.config_entities["source-channel-profiles"].get(ver["entity_id"])
+                    if ver is not None and ver["family"] == "source-channel-profiles"
+                    else None
+                )
                 if (
                     ver is None
                     or ver["family"] != "source-channel-profiles"
                     or ver["state"] != "published"
+                    or parent_ent is None
+                    or parent_ent.get("source_channel_id") != channel_id
                 ):
                     raise AdminValidationError(
-                        "active_profile_version_id must be a published profile"
+                        "active_profile_version_id must be a published profile "
+                        "owned by this source channel"
                     )
                 record["active_profile_version_id"] = str(pvid)
             else:
@@ -633,10 +678,44 @@ class InMemoryAdminBackend:
 
         resolved_start = payload.get("resolved_start_message_id")
         resolved_end = payload.get("resolved_fixed_end_message_id")
+        if resolved_start is not None and (
+            not isinstance(resolved_start, int)
+            or isinstance(resolved_start, bool)
+            or resolved_start <= 0
+        ):
+            raise AdminValidationError("resolved_start_message_id must be a positive integer")
+        if resolved_end is not None:
+            if end_mode == "latest":
+                raise AdminValidationError("latest range cannot set resolved_fixed_end_message_id")
+            if (
+                not isinstance(resolved_end, int)
+                or isinstance(resolved_end, bool)
+                or resolved_end <= 0
+            ):
+                raise AdminValidationError(
+                    "resolved_fixed_end_message_id must be a positive integer"
+                )
+            if resolved_start is not None and resolved_end < resolved_start:
+                raise AdminValidationError(
+                    "resolved_fixed_end_message_id must be >= resolved_start_message_id"
+                )
         watermark = (
             resolved_start - 1 if isinstance(resolved_start, int) and resolved_start > 0 else None
         )
-        enabled = bool(payload.get("enabled", True))
+        raw_enabled = payload.get("enabled", True)
+        if not isinstance(raw_enabled, bool):
+            raise AdminValidationError("enabled must be a boolean")
+        enabled = raw_enabled
+        raw_status = payload.get("status")
+        if raw_status is not None:
+            status_val = str(raw_status).strip()
+            if status_val not in {"pending", "active", "paused"}:
+                raise AdminValidationError(
+                    "initial processing range status must be pending, active, or paused"
+                )
+            enabled = status_val in {"pending", "active"}
+        else:
+            status_val = "active" if enabled else "paused"
         range_id = str(self._id_factory())
         record = {
             "id": range_id,
@@ -649,7 +728,7 @@ class InMemoryAdminBackend:
             "resolved_fixed_end_message_id": resolved_end,
             "processing_watermark_message_id": watermark,
             "active_high_watermark_message_id": None,
-            "status": "active" if enabled else "paused",
+            "status": status_val,
             "enabled": enabled,
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
@@ -668,28 +747,59 @@ class InMemoryAdminBackend:
         if record is None:
             raise AdminNotFoundError("processing range does not exist")
         before = copy.deepcopy(record)
-        if "enabled" in changes and changes["enabled"] is not None:
-            enabled = bool(changes["enabled"])
-            record["enabled"] = enabled
-            if not enabled and record["status"] in {"pending", "active"}:
-                record["status"] = "paused"
-            elif enabled and record["status"] == "paused":
-                record["status"] = "active"
-        if "status" in changes and changes["status"] is not None:
-            st = str(changes["status"])
+        cur_status = before["status"]
+
+        if "steady_after_seconds" in changes:
+            if record["end_mode"] != "latest":
+                raise AdminValidationError("fixed range cannot set steady_after_seconds")
+            raw_steady = changes["steady_after_seconds"]
+            if not isinstance(raw_steady, int) or isinstance(raw_steady, bool) or raw_steady <= 0:
+                raise AdminValidationError("steady_after_seconds must be a positive integer")
+            record["steady_after_seconds"] = raw_steady
+
+        if "status" in changes:
+            if changes["status"] is None:
+                raise AdminValidationError("status must not be null")
+            st = str(changes["status"]).strip()
             if st not in {"pending", "active", "paused", "completed", "failed"}:
                 raise AdminValidationError("invalid processing range status")
+            if cur_status in {"completed", "failed"}:
+                raise AdminConflictError(
+                    f"cannot transition terminal processing range in status {cur_status}"
+                )
+            if st == "paused" and cur_status not in {"pending", "active"}:
+                raise AdminConflictError(f"cannot pause processing range in status {cur_status}")
+            if st == "active" and cur_status != "paused":
+                raise AdminConflictError(f"cannot resume processing range in status {cur_status}")
             record["status"] = st
             record["enabled"] = st in {"pending", "active"}
+        elif "enabled" in changes:
+            if not isinstance(changes["enabled"], bool):
+                raise AdminValidationError("enabled must be a boolean")
+            if cur_status in {"completed", "failed"}:
+                raise AdminConflictError(
+                    f"cannot modify terminal processing range in status {cur_status}"
+                )
+            enabled = changes["enabled"]
+            record["enabled"] = enabled
+            if not enabled and cur_status in {"pending", "active"}:
+                record["status"] = "paused"
+            elif enabled and cur_status == "paused":
+                record["status"] = "active"
+
         record["updated_at"] = now.isoformat()
         return before, copy.deepcopy(record)
 
     async def list_range_executions(self, *, range_id: str) -> list[dict[str, Any]]:
-        items = [
-            copy.deepcopy(ex)
-            for ex in self.range_executions.values()
-            if ex["processing_range_id"] == range_id
-        ]
+        items: list[dict[str, Any]] = []
+        for ex in self.range_executions.values():
+            if ex["processing_range_id"] != range_id:
+                continue
+            serialized = copy.deepcopy(ex)
+            serialized["history_ingested"] = bool(
+                ex.get("history_ingested", ex.get("status") in {"awaiting_pipeline", "completed"})
+            )
+            items.append(serialized)
         items.sort(key=lambda item: item["from_message_id_exclusive"], reverse=True)
         return items
 
@@ -740,16 +850,22 @@ class InMemoryAdminBackend:
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
-        bucket[entity_id] = ent
-
         initial_content = payload.get("initial_version")
-        if isinstance(initial_content, Mapping):
-            await self.create_config_version(
-                family=family,
-                entity_id=entity_id,
-                content=initial_content,
-                now=now,
-            )
+        if initial_content is not None and not isinstance(initial_content, Mapping):
+            raise AdminValidationError("initial_version must be a JSON object")
+
+        bucket[entity_id] = ent
+        try:
+            if isinstance(initial_content, Mapping):
+                await self.create_config_version(
+                    family=family,
+                    entity_id=entity_id,
+                    content=initial_content,
+                    now=now,
+                )
+        except Exception:
+            bucket.pop(entity_id, None)
+            raise
         return self._serialize_config_entity(family, entity_id)
 
     async def create_config_version(
@@ -1023,18 +1139,37 @@ class InMemoryAdminBackend:
             if run["message_id"] == message_id
         ]
         for run in runs:
+            run.setdefault("created_at", run.get("started_at"))
+            pipe_ver = self.config_versions.get(str(run.get("analysis_pipeline_version_id") or ""))
+            node_key_by_stage: dict[str, str] = {}
+            if pipe_ver is not None and isinstance(pipe_ver.get("content"), Mapping):
+                for node in pipe_ver["content"].get("nodes") or ():
+                    if isinstance(node, Mapping) and node.get("node_key"):
+                        st_vid = str(node.get("analysis_stage_template_version_id") or "")
+                        if st_vid and st_vid not in node_key_by_stage:
+                            node_key_by_stage[st_vid] = str(node["node_key"])
             sruns = [
                 copy.deepcopy(sr)
                 for sr in self.stage_runs.values()
                 if sr["analysis_run_id"] == run["id"]
             ]
             for sr in sruns:
+                if not sr.get("node_key"):
+                    sr["node_key"] = node_key_by_stage.get(
+                        str(sr.get("analysis_stage_template_version_id") or "")
+                    )
                 sr["input_manifest"] = copy.deepcopy(
                     self.input_manifests.get(sr.get("input_manifest_id") or "")
                 )
-                sr["inference_call"] = copy.deepcopy(
-                    self.inference_calls.get(sr.get("inference_call_id") or "")
-                )
+                raw_call = self.inference_calls.get(sr.get("inference_call_id") or "")
+                if raw_call is not None:
+                    call_copy = copy.deepcopy(raw_call)
+                    call_copy.setdefault("http_status", None)
+                    call_copy.setdefault("error_type", None)
+                    call_copy.setdefault("raw_response", None)
+                    sr["inference_call"] = call_copy
+                else:
+                    sr["inference_call"] = None
             run["stage_runs"] = sruns
 
         intents = [
@@ -1043,8 +1178,12 @@ class InMemoryAdminBackend:
             if pi["message_id"] == message_id
         ]
         for pi in intents:
-            pi["attempts"] = copy.deepcopy(self.publish_attempts.get(pi["id"], []))
-            pi["records"] = copy.deepcopy(self.publish_records.get(pi["id"], []))
+            pi.setdefault("next_retry_at", None)
+            attempts = copy.deepcopy(self.publish_attempts.get(pi["id"], pi.get("attempts", [])))
+            for att in attempts:
+                att.setdefault("error_type", None)
+            pi["attempts"] = attempts
+            pi["records"] = copy.deepcopy(self.publish_records.get(pi["id"], pi.get("records", [])))
 
         images = [
             copy.deepcopy(img)
@@ -1061,11 +1200,14 @@ class InMemoryAdminBackend:
         audits = [
             {k: v for k, v in ev.items() if k != "_ts"}
             for ev in self.audit_events
-            if ev.get("entity_id") == message_id
+            if ev.get("entity_type") == "message" and ev.get("entity_id") == message_id
         ]
 
+        msg_copy = copy.deepcopy(msg)
+        msg_copy["blocked_by_label_key"] = self._resolve_blocked_by_label_key(msg_copy)
+
         return {
-            "message": copy.deepcopy(msg),
+            "message": msg_copy,
             "parts": copy.deepcopy(self.message_parts.get(message_id, [])),
             "media": {"images": images, "videos": videos},
             "duplicate_match": copy.deepcopy(self.duplicate_matches.get(message_id)),
@@ -1162,6 +1304,25 @@ class InMemoryAdminBackend:
         except (DomainValidationError, ValueError, TypeError) as exc:
             raise AdminValidationError(str(exc)) from exc
 
+        label_ver = self.config_versions.get(event.label_definition_version_id)
+        if label_ver is None or label_ver["family"] != "label-definitions":
+            raise AdminValidationError("label definition version does not exist")
+        label_content = label_ver["content"]
+        if label_ver["state"] != "published" or not bool(label_content.get("enabled", True)):
+            raise AdminValidationError("manual labels require an enabled published label version")
+        if label_content.get("key") != event.label_key:
+            raise AdminValidationError("label key does not match label definition version")
+        if label_content.get("scope") != event.target_scope:
+            raise AdminValidationError("label scope does not match manual label target")
+        if event.target_kind == "image_asset":
+            img = self.image_assets.get(event.target_id)
+            if img is None or img.get("message_id") != message_id:
+                raise AdminValidationError("image asset does not exist for message")
+        elif event.target_kind == "video_asset":
+            vid = self.video_assets.get(event.target_id)
+            if vid is None or vid.get("message_id") != message_id:
+                raise AdminValidationError("video asset does not exist for message")
+
         self.manual_events.setdefault(message_id, []).append(event)
         return self._serialize_manual_event(event)
 
@@ -1250,6 +1411,7 @@ class InMemoryAdminBackend:
                 self.stage_runs[sr_id] = {
                     "id": sr_id,
                     "analysis_run_id": run_id,
+                    "node_key": node.get("node_key"),
                     "analysis_stage_template_version_id": node[
                         "analysis_stage_template_version_id"
                     ],
@@ -1377,6 +1539,8 @@ class InMemoryAdminBackend:
         msg = self.messages.get(message_id)
         if msg is None:
             raise AdminNotFoundError("message does not exist")
+        if msg.get("processing_status") == "processed":
+            raise AdminConflictError("already processed message cannot be skipped")
         msg["processing_status"] = "processed"
         msg["terminal_reason"] = "admin_skipped"
         msg["failure_stage"] = None
@@ -1459,11 +1623,82 @@ class InMemoryAdminBackend:
         if item is None:
             raise AdminNotFoundError(f"{step_kind} {target_id} does not exist")
         old_state = item.get(status_key)
+        if old_state != "failed":
+            raise AdminConflictError(
+                f"{step_kind} {target_id} is in state {old_state!r}; "
+                "only failed items can be retried"
+            )
+        if step_kind == "range_execution":
+            parent_range_id = item.get("processing_range_id")
+            if any(
+                other["id"] != target_id
+                and other.get("processing_range_id") == parent_range_id
+                and other.get("status") in {"pending", "running", "awaiting_pipeline", "retry_wait"}
+                for other in self.range_executions.values()
+            ):
+                raise AdminConflictError(
+                    "another execution is already active for this processing range"
+                )
+            if isinstance(parent_range_id, str) and parent_range_id in self.processing_ranges:
+                parent_range = self.processing_ranges[parent_range_id]
+                if parent_range.get("status") == "failed":
+                    parent_range["status"] = "active"
+                    parent_range["enabled"] = True
+                    parent_range["updated_at"] = now.isoformat()
+        elif step_kind == "cleanup_job":
+            requeued_image_ids: set[str] = set()
+            requeued_video_ids: set[str] = set()
+            job_items = self.cleanup_items.get(target_id)
+            if job_items is None and isinstance(item.get("items"), list):
+                job_items = item["items"]
+            for ci in job_items or ():
+                if ci.get("status") in {"failed", "deleting"}:
+                    ci["status"] = "pending"
+                    ci["deletion_token"] = None
+                    ci["deleted_at"] = None
+                    ci["skipped_at"] = None
+                    ci["last_error_code"] = None
+                    ci["last_error_type"] = None
+                    if ci.get("image_asset_id"):
+                        requeued_image_ids.add(str(ci["image_asset_id"]))
+                    elif ci.get("asset_kind") == "image" and ci.get("asset_id"):
+                        requeued_image_ids.add(str(ci["asset_id"]))
+                    if ci.get("video_asset_id"):
+                        requeued_video_ids.add(str(ci["video_asset_id"]))
+                    elif ci.get("asset_kind") == "video" and ci.get("asset_id"):
+                        requeued_video_ids.add(str(ci["asset_id"]))
+            for img_id, img in self.image_assets.items():
+                if img.get("archive_state") == "deleting" and (
+                    img.get("cleanup_job_id") == target_id or img_id in requeued_image_ids
+                ):
+                    img["archive_state"] = "ready"
+                    img["cleanup_job_id"] = None
+                    img["previous_archive_size"] = None
+                    img["archive_deleted_at"] = None
+            for vid_id, vid in self.video_assets.items():
+                if vid.get("archive_state") == "deleting" and (
+                    vid.get("cleanup_job_id") == target_id or vid_id in requeued_video_ids
+                ):
+                    vid["archive_state"] = "ready"
+                    vid["cleanup_job_id"] = None
+                    vid["archive_deleted_at"] = None
+                    for fr in self.video_frames.get(vid_id, []):
+                        if fr.get("archive_state") == "deleting":
+                            fr["archive_state"] = "ready"
+                            fr["cleanup_job_id"] = None
+                            fr["previous_archive_size"] = None
+                            fr["archive_deleted_at"] = None
+
         item[status_key] = "pending"
         if "attempt_count" in item:
             item["attempt_count"] = 0
         if "archive_attempt_count" in item:
             item["archive_attempt_count"] = 0
+        item["last_error_code"] = None
+        item["last_error_type"] = None
+        if status_key == "archive_state":
+            item["archive_last_error_code"] = None
+            item["archive_last_error_type"] = None
         item["lease_token"] = None
         item["lease_expires_at"] = None
         item["next_retry_at"] = None
@@ -1473,8 +1708,10 @@ class InMemoryAdminBackend:
             parent_msg = self.messages[msg_id]
             if parent_msg.get("processing_status") == "failed":
                 parent_msg["processing_status"] = "processing"
+                parent_msg["terminal_reason"] = None
                 parent_msg["failure_stage"] = None
                 parent_msg["last_error_code"] = None
+                parent_msg["updated_at"] = now.isoformat()
         self.wakeups.append((queue_name, target_id))
         return {
             "step_kind": step_kind,
@@ -1598,7 +1835,7 @@ class InMemoryAdminBackend:
             payload={"dry_run_id": dry_run_id, "filter_hash": dry_run["filter_hash"]},
             now=now,
         )
-        return {k: v for k, v in copy.deepcopy(job).items() if k != "_ts"}
+        return self._serialize_cleanup_job(job)
 
     async def list_cleanup_jobs(
         self,
@@ -1613,7 +1850,7 @@ class InMemoryAdminBackend:
             jobs = [j for j in jobs if (j["_ts"], j["id"]) < (token.timestamp, token.entity_id)]
         window = jobs[: limit + 1]
         has_more = len(window) > limit
-        items = [{k: v for k, v in copy.deepcopy(j).items() if k != "_ts"} for j in window[:limit]]
+        items = [self._serialize_cleanup_job(j) for j in window[:limit]]
         next_cursor = (
             encode_cursor(timestamp=window[limit - 1]["_ts"], entity_id=window[limit - 1]["id"])
             if has_more and items
@@ -1625,7 +1862,22 @@ class InMemoryAdminBackend:
         item = self.cleanup_jobs.get(job_id)
         if item is None:
             return None
-        return {k: v for k, v in copy.deepcopy(item).items() if k != "_ts"}
+        return self._serialize_cleanup_job(item)
+
+    def _serialize_cleanup_job(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        payload = {k: v for k, v in copy.deepcopy(dict(job)).items() if k != "_ts"}
+        items = self.cleanup_items.get(str(job["id"]))
+        if items is None and isinstance(job.get("items"), list):
+            items = job["items"]
+        if items is not None:
+            deleted_count = sum(1 for ci in items if ci.get("status") == "deleted")
+            skipped_count = sum(1 for ci in items if ci.get("status") == "skipped_in_use")
+        else:
+            deleted_count = int(payload.get("deleted_count", 0))
+            skipped_count = int(payload.get("skipped_active_count", 0))
+        payload["deleted_count"] = deleted_count
+        payload["skipped_active_count"] = skipped_count
+        return payload
 
     # --- Dashboard, Operations, Audit & Metrics ---
 
@@ -1718,7 +1970,14 @@ class InMemoryAdminBackend:
 
     async def operations_status(self, *, now: datetime) -> dict[str, Any]:
         ops = self._current_ops(now)
-        failed_items = await self.list_failed_items(step_kind=None, limit=25)
+        total_failed = (
+            sum(1 for e in self.range_executions.values() if e.get("status") == "failed")
+            + sum(1 for a in self.image_assets.values() if a.get("archive_state") == "failed")
+            + sum(1 for a in self.video_assets.values() if a.get("archive_state") == "failed")
+            + sum(1 for s in self.stage_runs.values() if s.get("status") == "failed")
+            + sum(1 for p in self.publication_intents.values() if p.get("status") == "failed")
+            + sum(1 for j in self.cleanup_jobs.values() if j.get("status") == "failed")
+        )
         return {
             "operations": _serialize_ops(ops),
             "queues": {
@@ -1750,8 +2009,14 @@ class InMemoryAdminBackend:
                     for j in self.cleanup_jobs.values()
                     if j["status"] in {"pending", "retry_wait"}
                 ),
+                "publication_pending": ops.backlog.publication_pending,
+                "publication_partial": ops.backlog.publication_partial,
+                "publication_retry_due": ops.backlog.publication_retry_due,
+                "cleanup_pending": ops.backlog.cleanup_pending,
+                "cleanup_retry_due": ops.backlog.cleanup_retry_due,
+                "durable_wakeups_due": ops.backlog.durable_wakeups_due,
             },
-            "failed_count": len(failed_items),
+            "failed_count": total_failed,
         }
 
     async def list_failed_items(
@@ -1760,7 +2025,9 @@ class InMemoryAdminBackend:
         step_kind: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
+        if step_kind is not None and step_kind not in _SUPPORTED_STEP_KINDS:
+            raise AdminValidationError(f"unsupported step_kind: {step_kind}")
+        results: list[tuple[tuple[str, str], dict[str, Any]]] = []
         sources: list[tuple[str, dict[str, dict[str, Any]], str]] = [
             ("range_execution", self.range_executions, "status"),
             ("image_archive", self.image_assets, "archive_state"),
@@ -1774,21 +2041,32 @@ class InMemoryAdminBackend:
                 continue
             for item in bucket.values():
                 if item.get(status_key) == "failed":
-                    results.append(
-                        {
-                            "step_kind": kind,
-                            "target_id": item["id"],
-                            "message_id": item.get("message_id"),
-                            "status": "failed",
-                            "error_code": item.get("last_error_code")
-                            or item.get("archive_last_error_code"),
-                            "error_type": item.get("last_error_type")
-                            or item.get("archive_last_error_type"),
-                            "attempt_count": item.get("attempt_count")
-                            or item.get("archive_attempt_count", 0),
-                        }
+                    sort_ts = str(
+                        item.get("updated_at")
+                        or item.get("last_failure_at")
+                        or item.get("archive_last_failure_at")
+                        or item.get("created_at")
+                        or ""
                     )
-        return results[:limit]
+                    results.append(
+                        (
+                            (sort_ts, str(item["id"])),
+                            {
+                                "step_kind": kind,
+                                "target_id": item["id"],
+                                "message_id": item.get("message_id"),
+                                "status": "failed",
+                                "error_code": item.get("last_error_code")
+                                or item.get("archive_last_error_code"),
+                                "error_type": item.get("last_error_type")
+                                or item.get("archive_last_error_type"),
+                                "attempt_count": item.get("attempt_count")
+                                or item.get("archive_attempt_count", 0),
+                            },
+                        )
+                    )
+        results.sort(key=lambda pair: pair[0], reverse=True)
+        return [payload for _key, payload in results[:limit]]
 
     async def list_audit_events(
         self,
@@ -1889,6 +2167,35 @@ class InMemoryAdminBackend:
             st = str(pi["status"])
             intents_by_status[st] = intents_by_status.get(st, 0) + 1
 
+        worker_backlog_by_queue = {
+            "range_execution": sum(
+                1
+                for e in self.range_executions.values()
+                if e["status"] in {"pending", "retry_wait"}
+            ),
+            "image_archive": sum(
+                1
+                for a in self.image_assets.values()
+                if a.get("archive_state") in {"pending", "retry_wait"}
+            ),
+            "video_archive": sum(
+                1
+                for a in self.video_assets.values()
+                if a.get("archive_state") in {"pending", "retry_wait"}
+            ),
+            "analysis": sum(
+                1 for s in self.stage_runs.values() if s["status"] in {"pending", "retry_wait"}
+            ),
+            "publication": sum(
+                1
+                for p in self.publication_intents.values()
+                if p["status"] in {"pending", "partial", "retry_wait"}
+            ),
+            "maintenance": sum(
+                1 for j in self.cleanup_jobs.values() if j["status"] in {"pending", "retry_wait"}
+            ),
+        }
+
         return MetricsCollectionSnapshot(
             operations=ops,
             messages_by_status=msg_by_status,
@@ -1906,6 +2213,7 @@ class InMemoryAdminBackend:
             routing_evaluations_total=len(self.routing_evaluations),
             routing_matched_actions_total=len(self.publication_intents),
             publication_intents_by_status=intents_by_status,
+            worker_backlog_by_queue=worker_backlog_by_queue,
             api_database_ready=True,
         )
 
@@ -1982,22 +2290,21 @@ class InMemoryAdminBackend:
             validate_media_profile_content(content)
         elif family == "source-channel-profiles":
             cfg = validate_source_profile_content(content)
-            if require_published_refs:
-                for ref_vid, expected_fam in (
-                    (cfg.analysis_pipeline_version_id, "analysis-pipelines"),
-                    (cfg.routing_policy_version_id, "routing-policies"),
-                    (cfg.media_processing_profile_version_id, "media-processing-profiles"),
-                ):
-                    if ref_vid is not None:
-                        ref = self.config_versions.get(ref_vid)
-                        if (
-                            ref is None
-                            or ref["family"] != expected_fam
-                            or ref["state"] != "published"
-                        ):
-                            raise AdminValidationError(
-                                f"referenced {expected_fam} version {ref_vid} must be published"
-                            )
+            for ref_vid, expected_fam in (
+                (cfg.analysis_pipeline_version_id, "analysis-pipelines"),
+                (cfg.routing_policy_version_id, "routing-policies"),
+                (cfg.media_processing_profile_version_id, "media-processing-profiles"),
+            ):
+                if ref_vid is not None:
+                    ref = self.config_versions.get(ref_vid)
+                    if ref is None or ref["family"] != expected_fam:
+                        raise AdminValidationError(
+                            f"referenced {expected_fam} version {ref_vid} does not exist"
+                        )
+                    if require_published_refs and ref["state"] != "published":
+                        raise AdminValidationError(
+                            f"referenced {expected_fam} version {ref_vid} must be published"
+                        )
         elif family == "label-definitions":
             build_label_definition_domain(
                 version_id=version_id,
@@ -2021,6 +2328,7 @@ class InMemoryAdminBackend:
                 version_number=version_number,
                 state=state,
                 content=content,
+                allow_local=self._allow_local_inference,
             )
         elif family == "label-sets":
             build_label_set_domain(
@@ -2055,11 +2363,19 @@ class InMemoryAdminBackend:
                 require_published_refs=require_published_refs,
             )
         elif family == "rendering-templates":
-            validate_rendering_template_syntax(str(content.get("template_text", "")))
+            raw_template = content.get("template_text", "")
+            if not isinstance(raw_template, str):
+                raise AdminValidationError("rendering template_text must be a string")
+            validate_rendering_template_syntax(raw_template)
         elif family == "routing-policies":
             validate_routing_policy_content(
                 content,
                 destination_exists=lambda did: did in self.destination_channels,
+                identity_exists=lambda iid: iid in self.identities,
+                template_exists=lambda tid: (
+                    tid in self.config_versions
+                    and self.config_versions[tid]["family"] == "rendering-templates"
+                ),
                 template_is_published=lambda tid: (
                     tid in self.config_versions
                     and self.config_versions[tid]["family"] == "rendering-templates"
@@ -2102,6 +2418,7 @@ class InMemoryAdminBackend:
             version_number=ver["version_number"],
             state=ver["state"],
             content=ver["content"],
+            allow_local=self._allow_local_inference,
         )
 
     def _resolve_label_set_domain(self, version_id: str) -> Any:
@@ -2281,6 +2598,25 @@ class InMemoryAdminBackend:
                 return False
         return True
 
+    def _resolve_blocked_by_label_key(self, msg: Mapping[str, Any]) -> str | None:
+        explicit = msg.get("blocked_by_label_key")
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        if not msg.get("blocked_from_analysis"):
+            return None
+        labels = self.model_labels.get(str(msg.get("id") or ""), ())
+        for item in labels:
+            if item.activated and bool(
+                self.config_versions.get(item.label_definition_version_id, {})
+                .get("content", {})
+                .get("negative")
+            ):
+                return item.label_key
+        for item in labels:
+            if item.activated:
+                return item.label_key
+        return None
+
     def _serialize_message_summary(self, msg: Mapping[str, Any]) -> dict[str, Any]:
         resolved = labels_to_routing_snapshot(
             resolve_label_namespaces(
@@ -2293,10 +2629,10 @@ class InMemoryAdminBackend:
             for key, info in resolved.get("effective", {}).get("global", {}).items()
             if info.get("activated")
         ]
-        return {
-            **copy.deepcopy(dict(msg)),
-            "effective_global_labels": sorted(effective_global),
-        }
+        summary = copy.deepcopy(dict(msg))
+        summary["blocked_by_label_key"] = self._resolve_blocked_by_label_key(summary)
+        summary["effective_global_labels"] = sorted(effective_global)
+        return summary
 
     @staticmethod
     def _serialize_manual_event(ev: ManualLabelEvent) -> dict[str, Any]:
@@ -2344,6 +2680,12 @@ class InMemoryAdminBackend:
             and msg.get("review_status") not in cleanup_filter.review_statuses
         ):
             return False
+        if cleanup_filter.duplicate_statuses:
+            msg_dup = normalize_cleanup_duplicate_status(
+                str(msg.get("duplicate_status") or "unknown")
+            )
+            if msg_dup not in cleanup_filter.duplicate_statuses:
+                return False
         if (
             cleanup_filter.blocked_from_analysis is not None
             and bool(msg.get("blocked_from_analysis")) != cleanup_filter.blocked_from_analysis
@@ -2539,6 +2881,17 @@ def _build_cleanup_filter(raw: Mapping[str, Any]) -> ArchiveCleanupFilter:
             raise AdminValidationError(f"{key} must be a list of strings")
         return tuple(str(x) for x in val)
 
+    def dup_tup(key: str) -> tuple[str, ...]:
+        raw_values = tup(key)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in raw_values:
+            mapped = normalize_cleanup_duplicate_status(item)
+            if mapped not in seen:
+                seen.add(mapped)
+                normalized.append(mapped)
+        return tuple(normalized)
+
     try:
         return ArchiveCleanupFilter(
             archived_from=opt_dt("archived_from"),
@@ -2553,7 +2906,7 @@ def _build_cleanup_filter(raw: Mapping[str, Any]) -> ArchiveCleanupFilter:
             negative_label=raw.get("negative_label"),
             review_statuses=tup("review_statuses"),
             processing_statuses=tup("processing_statuses"),
-            duplicate_statuses=tup("duplicate_statuses"),
+            duplicate_statuses=dup_tup("duplicate_statuses"),
             media_types=tup("media_types"),
             blocked_from_analysis=raw.get("blocked_from_analysis"),
         )

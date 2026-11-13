@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from tgcurator.application.admin import (
     SESSION_COOKIE_NAME,
@@ -29,18 +29,22 @@ JsonObjectBody = Annotated[dict[str, Any], Body()]
 OptionalJsonObjectBody = Annotated[dict[str, Any], Body(default_factory=dict)]
 
 
-class LoginRequest(BaseModel):
+class _StrictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LoginRequest(_StrictRequest):
     username: str
-    password: str
+    password: SecretStr
 
 
-class CreateSecretRequest(BaseModel):
+class CreateSecretRequest(_StrictRequest):
     secret_type: str
-    plaintext: str
+    plaintext: SecretStr
 
 
-class RotateSecretRequest(BaseModel):
-    plaintext: str
+class RotateSecretRequest(_StrictRequest):
+    plaintext: SecretStr
 
 
 class CreateIdentityRequest(BaseModel):
@@ -137,14 +141,16 @@ async def login(
     client_host = request.client.host if request.client is not None else None
     raw_token, admin = await service.sessions.login(
         username=payload.username,
-        password=payload.password,
+        password=payload.password.get_secret_value(),
         user_agent=request.headers.get("User-Agent"),
         ip_address=client_host,
     )
     is_prod = request.app.state.settings.environment == "production"
+    max_age = max(1, int(service.sessions.session_ttl.total_seconds()))
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=raw_token,
+        max_age=max_age,
         httponly=True,
         secure=is_prod,
         samesite="lax",
@@ -266,7 +272,7 @@ async def create_secret(
     return await service.create_secret(
         admin=admin,
         secret_type=payload.secret_type,
-        plaintext=payload.plaintext,
+        plaintext=payload.plaintext.get_secret_value(),
     )
 
 
@@ -289,7 +295,7 @@ async def rotate_secret(
     return await service.rotate_secret(
         admin=admin,
         secret_id=secret_id,
-        plaintext=payload.plaintext,
+        plaintext=payload.plaintext.get_secret_value(),
     )
 
 
